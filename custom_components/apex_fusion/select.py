@@ -1,8 +1,14 @@
-"""Switch entities for Apex Fusion (Local).
+"""Select entities for Apex Fusion (Local).
 
-For each outlet/output we expose two switches:
-- "Auto": True when the outlet is in AUTO mode (AON/AOF)
-- "State": True when the outlet is energized (AON/ON)
+This platform exposes a single 3-way SelectEntity per outlet/output:
+- Off
+- Auto
+- On
+
+Attributes:
+- raw_state: Controller-reported state string (AON/AOF/TBL/ON/OFF/...)
+- raw_mode: Controller command-mode we will send (AUTO/ON/OFF) inferred from selection
+- effective_state: "On"/"Off" based on whether the outlet is energized
 
 Control is via the local REST API:
 - POST /rest/login -> connect.sid
@@ -19,12 +25,11 @@ from typing import Any, Callable, cast
 
 import aiohttp
 import async_timeout
-from homeassistant.components.switch import SwitchEntity
+from homeassistant.components.select import SelectEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from yarl import URL
 
@@ -37,124 +42,68 @@ from .const import (
     LOGGER_NAME,
 )
 from .coordinator import ApexNeptuneDataUpdateCoordinator, build_base_url
+from .sensor import build_device_info, friendly_outlet_name, icon_for_outlet_type
 
 _LOGGER = logging.getLogger(LOGGER_NAME)
 
-
-def _pretty_model(s: str) -> str:
-    """Prettify model tokens like 'Nero5' -> 'Nero 5'."""
-    t = (s or "").strip()
-    if not t:
-        return t
-
-    split_at: int | None = None
-    for idx, ch in enumerate(t):
-        if ch.isdigit():
-            split_at = idx
-            break
-
-    if split_at is None or split_at == 0:
-        return t
-
-    prefix = t[:split_at]
-    suffix = t[split_at:]
-    if suffix.isdigit() and prefix.isalpha():
-        return f"{prefix} {suffix}"
-    return t
-
-
-def _friendly_outlet_name(*, outlet_name: str, outlet_type: str | None) -> str:
-    """Return a better entity name for an outlet/output."""
-    raw_name = (outlet_name or "").strip()
-    raw_type = (outlet_type or "").strip()
-    if not raw_name:
-        return raw_name
-
-    parts = [p.strip() for p in raw_type.split("|") if p.strip()]
-    if len(parts) >= 3 and parts[0].upper().startswith("MXM"):
-        vendor = parts[1]
-        model = _pretty_model(parts[2])
-        pretty_name = raw_name.replace("_", " ").strip()
-        label = f"{vendor} {model}".strip()
-        if pretty_name and pretty_name.lower() not in label.lower():
-            return f"{label} ({pretty_name})"
-        return label
-
-    return raw_name.replace("_", " ").strip()
+_OPTIONS: list[str] = ["Off", "Auto", "On"]
 
 
 @dataclass(frozen=True)
 class _OutletRef:
-    """Reference to an Apex output/outlet."""
-
     did: str
     name: str
 
 
-def _build_device_info(
-    *, host: str, meta: dict[str, Any], device_identifier: str
-) -> DeviceInfo:
-    """Build DeviceInfo for this controller.
-
-    Args:
-        host: Controller host/IP.
-        meta: Coordinator meta dict.
-
-    Returns:
-        DeviceInfo instance.
-    """
-    serial = str(meta.get("serial") or "").strip() or None
-    model = str(meta.get("type") or meta.get("hardware") or "Apex").strip() or "Apex"
-    name = str(meta.get("hostname") or f"Apex ({host})")
-
-    identifiers = {(DOMAIN, device_identifier)}
-    return DeviceInfo(
-        identifiers=identifiers,
-        name=name,
-        manufacturer="Neptune Systems",
-        model=model,
-        serial_number=serial,
-        hw_version=(str(meta.get("hardware") or "").strip() or None),
-        sw_version=(str(meta.get("software") or "").strip() or None),
-        configuration_url=f"http://{host}",
-    )
+def _is_energized_state(raw_state: str) -> bool:
+    return (raw_state or "").strip().upper() in {"AON", "ON", "TBL"}
 
 
-def _is_switchable_outlet(outlet: dict[str, Any]) -> bool:
-    """Return True if an outlet exposes a supported state."""
-    state = str(outlet.get("state") or "").strip().upper()
-    # TBL indicates an output controlled by a schedule/table (AUTO).
-    return state in {"AON", "AOF", "ON", "OFF", "TBL"}
+def _is_selectable_outlet(outlet: dict[str, Any]) -> bool:
+    raw_state = str(outlet.get("state") or "").strip().upper()
+    return raw_state in {"AON", "AOF", "TBL", "ON", "OFF"}
 
 
-def _is_auto_state(state: str) -> bool:
-    return (state or "").strip().upper() in {"AON", "AOF", "TBL"}
+def _option_from_raw_state(raw_state: str) -> str | None:
+    t = (raw_state or "").strip().upper()
+    if t in {"ON"}:
+        return "On"
+    if t in {"OFF"}:
+        return "Off"
+    if t in {"AON", "AOF", "TBL"}:
+        return "Auto"
+    return None
 
 
-def _is_energized_state(state: str) -> bool:
-    # For scheduled/table-driven outputs the controller reports TBL; treat as
-    # "on" for purposes of preserving state when leaving AUTO.
-    return (state or "").strip().upper() in {"AON", "ON", "TBL"}
+def _effective_state_from_raw_state(raw_state: str) -> str | None:
+    t = (raw_state or "").strip().upper()
+    if not t:
+        return None
+    return "On" if _is_energized_state(t) else "Off"
+
+
+def _mode_from_option(option: str) -> str:
+    t = (option or "").strip().lower()
+    if t == "auto":
+        return "AUTO"
+    if t == "on":
+        return "ON"
+    if t == "off":
+        return "OFF"
+    raise HomeAssistantError(f"Invalid option: {option}")
 
 
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    """Set up Apex Fusion switches from a config entry.
-
-    Args:
-        hass: Home Assistant instance.
-        entry: The config entry.
-        async_add_entities: Callback to add entities.
-    """
     coordinator: ApexNeptuneDataUpdateCoordinator = hass.data[DOMAIN][entry.entry_id]
 
     added_dids: set[str] = set()
 
-    def _add_outlet_switches() -> None:
+    def _add_outlet_selects() -> None:
         data = coordinator.data or {}
         outlets_any = data.get("outlets", [])
-        new_entities: list[SwitchEntity] = []
+        new_entities: list[SelectEntity] = []
 
         if isinstance(outlets_any, list):
             for outlet_any in cast(list[Any], outlets_any):
@@ -165,38 +114,38 @@ async def async_setup_entry(
                 did = did_any if isinstance(did_any, str) else None
                 if not did or did in added_dids:
                     continue
-                if not _is_switchable_outlet(outlet):
+                if not _is_selectable_outlet(outlet):
                     continue
 
                 outlet_type_any: Any = outlet.get("type")
                 outlet_type = (
                     outlet_type_any if isinstance(outlet_type_any, str) else None
                 )
-                outlet_name = _friendly_outlet_name(
+
+                outlet_name = friendly_outlet_name(
                     outlet_name=str(outlet.get("name") or did),
                     outlet_type=outlet_type,
                 )
 
-                ref = _OutletRef(did=did, name=outlet_name)
                 new_entities.append(
-                    ApexOutletAutoSwitch(hass, coordinator, entry, ref=ref)
-                )
-                new_entities.append(
-                    ApexOutletStateSwitch(hass, coordinator, entry, ref=ref)
+                    ApexOutletModeSelect(
+                        hass,
+                        coordinator,
+                        entry,
+                        ref=_OutletRef(did=did, name=outlet_name),
+                    )
                 )
                 added_dids.add(did)
 
         if new_entities:
             async_add_entities(new_entities)
 
-    _add_outlet_switches()
-    remove = coordinator.async_add_listener(_add_outlet_switches)
+    _add_outlet_selects()
+    remove = coordinator.async_add_listener(_add_outlet_selects)
     entry.async_on_unload(remove)
 
 
-class _ApexOutletBaseSwitch(SwitchEntity):
-    """Common base for outlet control switches."""
-
+class ApexOutletModeSelect(SelectEntity):
     _attr_has_entity_name = True
     _attr_should_poll = False
 
@@ -208,7 +157,6 @@ class _ApexOutletBaseSwitch(SwitchEntity):
         *,
         ref: _OutletRef,
     ) -> None:
-        """Initialize the switch."""
         super().__init__()
         self.hass = hass
         self._coordinator = coordinator
@@ -220,19 +168,24 @@ class _ApexOutletBaseSwitch(SwitchEntity):
         meta = cast(dict[str, Any], (coordinator.data or {}).get("meta", {}))
         serial = str(meta.get("serial") or host or "apex").replace(":", "_")
 
-        self._serial_for_ids = serial
+        self._attr_unique_id = f"{serial}_outlet_mode_{ref.did}".lower()
+        self._attr_name = f"{ref.name} Mode"
 
-        self._attr_device_info = _build_device_info(
+        self._attr_device_info = build_device_info(
             host=host,
             meta=meta,
             device_identifier=coordinator.device_identifier,
         )
 
+        self._attr_options = list(_OPTIONS)
         self._attr_available = bool(
             getattr(self._coordinator, "last_update_success", True)
         )
-        self._attr_is_on = False
-        self._attr_extra_state_attributes = {}
+        self._attr_current_option = None
+        self._attr_icon = icon_for_outlet_type(
+            cast(str | None, self._find_outlet().get("type"))
+        )
+        self._refresh_from_coordinator()
 
     def _find_outlet(self) -> dict[str, Any]:
         data = self._coordinator.data or {}
@@ -251,6 +204,52 @@ class _ApexOutletBaseSwitch(SwitchEntity):
         outlet = self._find_outlet()
         return str(outlet.get("state") or "").strip().upper()
 
+    def _read_extra_attrs(self) -> dict[str, Any]:
+        outlet = self._find_outlet()
+        raw_state = self._read_raw_state()
+
+        attrs: dict[str, Any] = {
+            "raw_state": raw_state or None,
+            "raw_mode": _mode_from_option(self._attr_current_option)
+            if self._attr_current_option
+            else None,
+            "effective_state": _effective_state_from_raw_state(raw_state),
+        }
+
+        # Preserve debug visibility from the previous raw-state sensor.
+        for key in ("output_id", "type", "gid", "status"):
+            if key in outlet:
+                attrs[key] = outlet.get(key)
+
+        name_any: Any = outlet.get("name")
+        outlet_name = str(name_any).strip() if name_any is not None else ""
+        mxm_any: Any = (self._coordinator.data or {}).get("mxm_devices")
+        if outlet_name and isinstance(mxm_any, dict):
+            mxm_devices = cast(dict[str, Any], mxm_any)
+            dev_any: Any = mxm_devices.get(outlet_name)
+            if isinstance(dev_any, dict):
+                dev = cast(dict[str, Any], dev_any)
+                attrs["mxm_rev"] = dev.get("rev")
+                attrs["mxm_serial"] = dev.get("serial")
+                attrs["mxm_status"] = dev.get("status")
+
+        return attrs
+
+    def _refresh_from_coordinator(self) -> None:
+        raw_state = self._read_raw_state()
+        self._attr_available = bool(
+            getattr(self._coordinator, "last_update_success", True)
+        )
+        self._attr_current_option = _option_from_raw_state(raw_state)
+        self._attr_extra_state_attributes = self._read_extra_attrs()
+        self._attr_icon = icon_for_outlet_type(
+            cast(str | None, self._find_outlet().get("type"))
+        )
+
+    async def async_select_option(self, option: str) -> None:
+        mode = _mode_from_option(option)
+        await self._async_set_mode(mode)
+
     async def _async_set_mode(self, mode: str) -> None:
         host = str(self._entry.data.get(CONF_HOST, ""))
         username = str(self._entry.data.get(CONF_USERNAME, "") or "admin")
@@ -267,7 +266,6 @@ class _ApexOutletBaseSwitch(SwitchEntity):
         if desired not in {"AUTO", "ON", "OFF"}:
             raise HomeAssistantError(f"Invalid outlet mode: {mode}")
 
-        # Prefer existing cookie (reduces session churn / accidental invalidation).
         sid: str | None = None
         sid_morsel = session.cookie_jar.filter_cookies(URL(base_url)).get("connect.sid")
         if sid_morsel is not None and sid_morsel.value:
@@ -287,7 +285,6 @@ class _ApexOutletBaseSwitch(SwitchEntity):
 
         def _note_rate_limited(*, seconds: float) -> None:
             try:
-                # Coordinator implements backoff for REST polling.
                 disable = getattr(self._coordinator, "_disable_rest", None)
                 if callable(disable):
                     disable(seconds=seconds, reason="rate_limited_control")
@@ -392,26 +389,11 @@ class _ApexOutletBaseSwitch(SwitchEntity):
         except (asyncio.TimeoutError, aiohttp.ClientError) as err:
             raise HomeAssistantError(f"Error setting output mode: {err}") from err
 
+        # Ensure state updates promptly.
         await self._coordinator.async_request_refresh()
 
-    def _read_extra_attrs(self) -> dict[str, Any]:
-        outlet = self._find_outlet()
-        raw_state = str(outlet.get("state") or "").strip().upper()
-        return {
-            "raw_state": raw_state or None,
-            "auto": _is_auto_state(raw_state),
-            "energized": _is_energized_state(raw_state) if raw_state else None,
-        }
-
-    def _read_is_on(self) -> bool:
-        raise NotImplementedError
-
     def _handle_coordinator_update(self) -> None:
-        self._attr_available = bool(
-            getattr(self._coordinator, "last_update_success", True)
-        )
-        self._attr_is_on = self._read_is_on()
-        self._attr_extra_state_attributes = self._read_extra_attrs()
+        self._refresh_from_coordinator()
         self.async_write_ha_state()
 
     async def async_added_to_hass(self) -> None:
@@ -424,73 +406,3 @@ class _ApexOutletBaseSwitch(SwitchEntity):
         if self._unsub is not None:
             self._unsub()
             self._unsub = None
-
-
-class ApexOutletAutoSwitch(_ApexOutletBaseSwitch):
-    """Switch representing AUTO mode (AON/AOF)."""
-
-    _attr_has_entity_name = True
-
-    def __init__(
-        self,
-        hass: HomeAssistant,
-        coordinator: ApexNeptuneDataUpdateCoordinator,
-        entry: ConfigEntry,
-        *,
-        ref: _OutletRef,
-    ) -> None:
-        super().__init__(hass, coordinator, entry, ref=ref)
-        self._attr_unique_id = f"{self._serial_for_ids}_auto_{ref.did}".lower()
-        self._attr_name = f"{ref.name} Auto"
-        # Do not call async_write_ha_state() in __init__ (entity has no platform yet).
-        self._attr_available = bool(
-            getattr(self._coordinator, "last_update_success", True)
-        )
-        self._attr_is_on = self._read_is_on()
-        self._attr_extra_state_attributes = self._read_extra_attrs()
-
-    def _read_is_on(self) -> bool:
-        return _is_auto_state(self._read_raw_state())
-
-    async def async_turn_on(self, **kwargs: Any) -> None:
-        await self._async_set_mode("AUTO")
-
-    async def async_turn_off(self, **kwargs: Any) -> None:
-        # Leaving AUTO should preserve the current energized state.
-        raw = self._read_raw_state()
-        await self._async_set_mode("ON" if _is_energized_state(raw) else "OFF")
-
-
-class ApexOutletStateSwitch(_ApexOutletBaseSwitch):
-    """Switch representing energized state (always ON/OFF)."""
-
-    _attr_has_entity_name = True
-
-    def __init__(
-        self,
-        hass: HomeAssistant,
-        coordinator: ApexNeptuneDataUpdateCoordinator,
-        entry: ConfigEntry,
-        *,
-        ref: _OutletRef,
-    ) -> None:
-        super().__init__(hass, coordinator, entry, ref=ref)
-        self._attr_unique_id = f"{self._serial_for_ids}_switch_{ref.did}".lower()
-        self._attr_name = f"{ref.name} State"
-        # Do not call async_write_ha_state() in __init__ (entity has no platform yet).
-        self._attr_available = bool(
-            getattr(self._coordinator, "last_update_success", True)
-        )
-        self._attr_is_on = self._read_is_on()
-        self._attr_extra_state_attributes = self._read_extra_attrs()
-
-    def _read_is_on(self) -> bool:
-        return _is_energized_state(self._read_raw_state())
-
-    async def async_turn_on(self, **kwargs: Any) -> None:
-        # Forcing state implies leaving AUTO.
-        await self._async_set_mode("ON")
-
-    async def async_turn_off(self, **kwargs: Any) -> None:
-        # Forcing state implies leaving AUTO.
-        await self._async_set_mode("OFF")

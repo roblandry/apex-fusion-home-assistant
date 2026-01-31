@@ -44,30 +44,30 @@ def test_sensor_helpers_cover_all_branches():
     assert sensor._friendly_probe_name(name="Temp", probe_type="Temp") == "Temperature"
     assert sensor._friendly_probe_name(name="T1", probe_type="Tmp") == "T1"
 
-    assert sensor._pretty_model("Nero5") == "Nero 5"
-    assert sensor._pretty_model("Nero") == "Nero"
-    assert sensor._pretty_model("123") == "123"
-    assert sensor._pretty_model("A1B") == "A1B"
-    assert sensor._pretty_model("") == ""
+    assert sensor.pretty_model("Nero5") == "Nero 5"
+    assert sensor.pretty_model("Nero") == "Nero"
+    assert sensor.pretty_model("123") == "123"
+    assert sensor.pretty_model("A1B") == "A1B"
+    assert sensor.pretty_model("") == ""
 
     assert (
-        sensor._friendly_outlet_name(
+        sensor.friendly_outlet_name(
             outlet_name="Nero_5_F", outlet_type="MXMPump|AI|Nero5"
         )
         == "AI Nero 5 (Nero 5 F)"
     )
     # pretty_name already included in label -> label only
     assert (
-        sensor._friendly_outlet_name(
+        sensor.friendly_outlet_name(
             outlet_name="Nero_5", outlet_type="MXMPump|AI|Nero5"
         )
         == "AI Nero 5"
     )
     assert (
-        sensor._friendly_outlet_name(outlet_name="Heater_1", outlet_type=None)
+        sensor.friendly_outlet_name(outlet_name="Heater_1", outlet_type=None)
         == "Heater 1"
     )
-    assert sensor._friendly_outlet_name(outlet_name="", outlet_type="x") == ""
+    assert sensor.friendly_outlet_name(outlet_name="", outlet_type="x") == ""
 
     assert sensor._temp_unit(25.0).endswith("C")
     assert sensor._temp_unit(80.0).endswith("F")
@@ -110,10 +110,10 @@ def test_sensor_helpers_cover_all_branches():
         sensor._units_and_meta(probe_name="x", probe_type="other", value=1.0)[0] is None
     )
 
-    assert sensor._icon_for_outlet_type("pump") == "mdi:pump"
-    assert sensor._icon_for_outlet_type("light") == "mdi:lightbulb"
-    assert sensor._icon_for_outlet_type("heater") == "mdi:radiator"
-    assert sensor._icon_for_outlet_type("other") == "mdi:power-socket-us"
+    assert sensor.icon_for_outlet_type("pump") == "mdi:pump"
+    assert sensor.icon_for_outlet_type("light") == "mdi:lightbulb"
+    assert sensor.icon_for_outlet_type("heater") == "mdi:radiator"
+    assert sensor.icon_for_outlet_type("other") == "mdi:power-socket-us"
 
     # network/meta field helpers
     nf = sensor._network_field("ipaddr")
@@ -173,8 +173,8 @@ async def test_sensor_setup_creates_entities_and_updates(
 
     await sensor.async_setup_entry(hass, cast(Any, entry), _add_entities)
 
-    # Probes (2) + outlet (1) + diagnostics (at least 1)
-    assert len(added) >= 4
+    # Probes (2) + diagnostics
+    assert len(added) >= 3
 
     # Exercise entity update handlers and remove handlers.
     for ent in added:
@@ -182,9 +182,7 @@ async def test_sensor_setup_creates_entities_and_updates(
         await ent.async_added_to_hass()
 
     probe_entities = [e for e in added if isinstance(e, sensor.ApexProbeSensor)]
-    outlet_entities = [e for e in added if isinstance(e, sensor.ApexOutletStatusSensor)]
     assert probe_entities
-    assert outlet_entities
 
     # Update probe values to hit coercion/branches.
     coordinator.data["probes"]["T1"]["value"] = 26
@@ -203,11 +201,6 @@ async def test_sensor_setup_creates_entities_and_updates(
     probe_entities[0]._handle_coordinator_update()
     coordinator.data["probes"] = {"T1": "nope"}
     probe_entities[0]._handle_coordinator_update()
-
-    coordinator.data["outlets"] = "nope"
-    outlet_entities[0]._handle_coordinator_update()
-    coordinator.data["outlets"] = ["nope"]
-    outlet_entities[0]._handle_coordinator_update()
 
     # Ensure will_remove cleans up unsub on probe/outlet sensors.
     for ent in added:

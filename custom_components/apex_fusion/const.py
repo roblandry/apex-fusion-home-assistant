@@ -30,6 +30,6 @@ DEFAULT_TIMEOUT_SECONDS: Final[int] = 10
 
 PLATFORMS: Final[list[Platform]] = [
     Platform.SENSOR,
-    Platform.SWITCH,
+    Platform.SELECT,
     Platform.BINARY_SENSOR,
 ]

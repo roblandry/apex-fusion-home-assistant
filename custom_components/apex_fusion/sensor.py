@@ -82,7 +82,7 @@ def _friendly_probe_name(*, name: str, probe_type: str | None) -> str:
     return n
 
 
-def _pretty_model(s: str) -> str:
+def pretty_model(s: str) -> str:
     """Prettify model tokens like 'Nero5' -> 'Nero 5'."""
     t = (s or "").strip()
     if not t:
@@ -106,7 +106,7 @@ def _pretty_model(s: str) -> str:
     return t
 
 
-def _friendly_outlet_name(*, outlet_name: str, outlet_type: str | None) -> str:
+def friendly_outlet_name(*, outlet_name: str, outlet_type: str | None) -> str:
     """Return a better entity name for an outlet/output.
 
     Examples:
@@ -128,7 +128,7 @@ def _friendly_outlet_name(*, outlet_name: str, outlet_type: str | None) -> str:
     parts = [p.strip() for p in raw_type.split("|") if p.strip()]
     if len(parts) >= 3 and parts[0].upper().startswith("MXM"):
         vendor = parts[1]
-        model = _pretty_model(parts[2])
+        model = pretty_model(parts[2])
         pretty_name = raw_name.replace("_", " ").strip()
         label = f"{vendor} {model}".strip()
         if pretty_name and pretty_name.lower() not in label.lower():
@@ -221,7 +221,7 @@ def _units_and_meta(
     return None, None, SensorStateClass.MEASUREMENT
 
 
-def _icon_for_outlet_type(outlet_type: str | None) -> str | None:
+def icon_for_outlet_type(outlet_type: str | None) -> str | None:
     """Return an icon for an outlet based on its device type."""
     t = (outlet_type or "").strip().upper()
     if "PUMP" in t:
@@ -238,14 +238,6 @@ class _ProbeRef:
     """Reference to a probe/input exposed by the controller."""
 
     key: str
-    name: str
-
-
-@dataclass(frozen=True)
-class _OutletRef:
-    """Reference to an output/outlet exposed by the controller."""
-
-    did: str
     name: str
 
 
@@ -295,7 +287,6 @@ async def async_setup_entry(
     host = str(entry.data.get(CONF_HOST, ""))
 
     added_probe_keys: set[str] = set()
-    added_outlet_dids: set[str] = set()
 
     def _add_probe_and_outlet_entities() -> None:
         coordinator_data = coordinator.data or {}
@@ -328,31 +319,6 @@ async def async_setup_entry(
                     )
                 )
                 added_probe_keys.add(key_str)
-
-        outlets_any = coordinator_data.get("outlets", [])
-        if isinstance(outlets_any, list):
-            for outlet_any in cast(list[Any], outlets_any):
-                if not isinstance(outlet_any, dict):
-                    continue
-                outlet = cast(dict[str, Any], outlet_any)
-                did_any = outlet.get("device_id")
-                did = did_any if isinstance(did_any, str) else None
-                if not did or did in added_outlet_dids:
-                    continue
-                outlet_type = outlet.get("type")
-                outlet_type_str = outlet_type if isinstance(outlet_type, str) else None
-                outlet_name = _friendly_outlet_name(
-                    outlet_name=str(outlet.get("name") or did),
-                    outlet_type=outlet_type_str,
-                )
-                new_entities.append(
-                    ApexOutletStatusSensor(
-                        coordinator,
-                        entry,
-                        ref=_OutletRef(did=did, name=outlet_name),
-                    )
-                )
-                added_outlet_dids.add(did)
 
         if new_entities:
             async_add_entities(new_entities)
@@ -429,7 +395,7 @@ async def async_setup_entry(
         async_add_entities(diagnostic_entities)
 
 
-def _build_device_info(
+def build_device_info(
     *, host: str, meta: dict[str, Any], device_identifier: str
 ) -> DeviceInfo:
     """Build DeviceInfo for this controller.
@@ -481,7 +447,7 @@ class ApexRestDebugSensor(SensorEntity):
         serial = str(meta.get("serial") or host or "apex").replace(":", "_")
         self._attr_unique_id = f"{serial}_rest_debug_keys".lower()
         self._attr_name = "REST Status Keys"
-        self._attr_device_info = _build_device_info(
+        self._attr_device_info = build_device_info(
             host=host,
             meta=meta,
             device_identifier=coordinator.device_identifier,
@@ -573,7 +539,7 @@ class ApexDiagnosticSensor(SensorEntity):
         self._attr_unique_id = unique_id
         self._attr_name = name
         self._attr_native_unit_of_measurement = native_unit
-        self._attr_device_info = _build_device_info(
+        self._attr_device_info = build_device_info(
             host=host,
             meta=meta,
             device_identifier=coordinator.device_identifier,
@@ -644,7 +610,7 @@ class ApexProbeSensor(SensorEntity):
         self._attr_unique_id = f"{serial}_probe_{ref.key}".lower()
         self._attr_name = ref.name
 
-        self._attr_device_info = _build_device_info(
+        self._attr_device_info = build_device_info(
             host=host,
             meta=meta,
             device_identifier=coordinator.device_identifier,
@@ -724,119 +690,3 @@ class ApexProbeSensor(SensorEntity):
             self._unsub = None
 
     # NOTE: Do not override SensorEntity.native_value; we set `_attr_native_value`.
-
-
-class ApexOutletStatusSensor(SensorEntity):
-    """Sensor exposing an output/outlet state string."""
-
-    _attr_has_entity_name = True
-    _attr_should_poll = False
-
-    def __init__(
-        self,
-        coordinator: ApexNeptuneDataUpdateCoordinator,
-        entry: ConfigEntry,
-        *,
-        ref: _OutletRef,
-    ) -> None:
-        """Initialize the outlet status sensor.
-
-        Args:
-            coordinator: Data coordinator.
-            entry: The config entry.
-            ref: Outlet reference.
-        """
-        super().__init__()
-        self._coordinator = coordinator
-        self._entry = entry
-        self._ref = ref
-        self._unsub: Callable[[], None] | None = None
-
-        host = str(entry.data.get(CONF_HOST, ""))
-        coordinator_data = coordinator.data or {}
-        meta = cast(dict[str, Any], coordinator_data.get("meta", {}))
-        serial = str(meta.get("serial") or host or "apex").replace(":", "_")
-
-        self._attr_unique_id = f"{serial}_outlet_{ref.did}".lower()
-        self._attr_name = ref.name
-
-        self._attr_device_info = _build_device_info(
-            host=host,
-            meta=meta,
-            device_identifier=coordinator.device_identifier,
-        )
-        self._attr_available = bool(
-            getattr(self._coordinator, "last_update_success", True)
-        )
-        self._attr_native_value = self._read_native_value()
-        self._attr_extra_state_attributes = self._read_extra_attrs()
-        self._attr_icon = _icon_for_outlet_type(
-            cast(str | None, self._find_outlet().get("type"))
-        )
-
-    def _find_outlet(self) -> dict[str, Any]:
-        """Find this outlet in the coordinator outlets list."""
-        data = self._coordinator.data or {}
-        outlets_any = data.get("outlets", [])
-        if not isinstance(outlets_any, list):
-            return {}
-        for outlet_any in cast(list[Any], outlets_any):
-            if not isinstance(outlet_any, dict):
-                continue
-            outlet = cast(dict[str, Any], outlet_any)
-            if str(outlet.get("device_id") or "") == self._ref.did:
-                return outlet
-        return {}
-
-    def _read_native_value(self) -> StateType:
-        """Read the current outlet state (AON/AOF/TBL/etc)."""
-        outlet = self._find_outlet()
-        # Prefer canonical state string (AON/AOF/TBL/etc).
-        state = outlet.get("state")
-        return cast(StateType, state)
-
-    def _read_extra_attrs(self) -> dict[str, Any]:
-        """Read additional outlet metadata for debugging/visibility."""
-        outlet = self._find_outlet()
-        attrs: dict[str, Any] = {}
-        for key in ("output_id", "type", "gid", "status"):
-            if key in outlet:
-                attrs[key] = outlet.get(key)
-
-        name_any: Any = outlet.get("name")
-        outlet_name = str(name_any).strip() if name_any is not None else ""
-        mxm_any: Any = (self._coordinator.data or {}).get("mxm_devices")
-        if outlet_name and isinstance(mxm_any, dict):
-            mxm_devices = cast(dict[str, Any], mxm_any)
-            dev_any: Any = mxm_devices.get(outlet_name)
-            if isinstance(dev_any, dict):
-                dev = cast(dict[str, Any], dev_any)
-                attrs["mxm_rev"] = dev.get("rev")
-                attrs["mxm_serial"] = dev.get("serial")
-                attrs["mxm_status"] = dev.get("status")
-        return attrs
-
-    def _handle_coordinator_update(self) -> None:
-        """Handle updated data from the coordinator."""
-        self._attr_available = bool(
-            getattr(self._coordinator, "last_update_success", True)
-        )
-        self._attr_native_value = self._read_native_value()
-        self._attr_extra_state_attributes = self._read_extra_attrs()
-        self._attr_icon = _icon_for_outlet_type(
-            cast(str | None, self._find_outlet().get("type"))
-        )
-        self.async_write_ha_state()
-
-    async def async_added_to_hass(self) -> None:
-        """Register coordinator update listener."""
-        self._unsub = self._coordinator.async_add_listener(
-            self._handle_coordinator_update
-        )
-        self._handle_coordinator_update()
-
-    async def async_will_remove_from_hass(self) -> None:
-        """Remove coordinator listener."""
-        if self._unsub is not None:
-            self._unsub()
-            self._unsub = None

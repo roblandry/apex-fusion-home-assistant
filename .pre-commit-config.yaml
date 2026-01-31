@@ -1,14 +1,4 @@
 repos:
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    # Ruff version.
-    rev: v0.14.9
-    hooks:
-      # Run the linter.
-      - id: ruff-check
-        args: [--fix]
-      # Run the formatter.
-      - id: ruff-format
-
   - repo: local
     hooks:
       - id: markdownlint
@@ -28,76 +18,14 @@ repos:
         additional_dependencies:
           - markdownlint-cli2@0.14.0
 
-      - id: pyright
-        name: pyright
-        entry: pyright
-        language: python
-        args: [--project, pyrightconfig.precommit.json]
-        additional_dependencies:
-          - pyright>=1.1.390
-          # Provide Home Assistant modules/types in the hook env.
-          - pytest-homeassistant-custom-component>=0.13.301
-          # Runtime dependency declared in manifest.json
-          - jsonpath-ng>=1.7.0
-          # Used by auto_detect.py
-          - requests>=2.31.0
-        types: [python]
-        pass_filenames: true
-
-      - id: pyright-all
-        name: pyright (full repo)
-        entry: pyright
-        language: python
-        args: [--project, pyrightconfig.precommit.json]
-        additional_dependencies:
-          - pyright>=1.1.390
-          # Provide Home Assistant modules/types in the hook env.
-          - pytest-homeassistant-custom-component>=0.13.301
-          # Runtime dependency declared in manifest.json
-          - jsonpath-ng>=1.7.0
-          # Used by auto_detect.py
-          - requests>=2.31.0
-        pass_filenames: false
-        stages: [manual]
-
-      - id: pytest
-        name: pytest (-q)
-        entry: pytest -q
-        language: python
-        files: ^tests/
-        pass_filenames: true
-        additional_dependencies:
-          # Keep this minimal: only what's required to run the test suite.
-          - pytest>=8
-          - pytest-asyncio>=1.3.0
-          - pytest-cov>=7.0.0
-          - pytest-homeassistant-custom-component>=0.13.301
-          # Runtime dependency declared in manifest.json
-          - jsonpath-ng>=1.7.0
-
-      - id: pytest-all
-        name: pytest (-q) (full suite)
-        entry: pytest -q
-        language: python
-        always_run: true
-        pass_filenames: false
-        stages: [manual]
-        additional_dependencies:
-          # Keep this minimal: only what's required to run the test suite.
-          - pytest>=8
-          - pytest-asyncio>=1.3.0
-          - pytest-cov>=7.0.0
-          - pytest-homeassistant-custom-component>=0.13.301
-          # Runtime dependency declared in manifest.json
-          - jsonpath-ng>=1.7.0
-
       - id: full-suite-stashed
         name: full suite (stash WIP)
         entry: python scripts/precommit_full_stash.py
         language: python
         pass_filenames: false
-        stages: [manual]
+        always_run: true
         additional_dependencies:
+          - ruff==0.14.9
           - pyright>=1.1.390
           - pytest>=8
           - pytest-asyncio>=1.3.0
