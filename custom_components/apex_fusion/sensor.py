@@ -191,7 +191,7 @@ def _units_and_meta(
         Tuple of (unit, device_class, state_class).
     """
     t = (probe_type or "").strip().lower()
-    n = (probe_name or "").strip().lower()
+    _ = (probe_name or "").strip().lower()
 
     if t == "amps":
         return (
@@ -206,11 +206,7 @@ def _units_and_meta(
     if t in ("ca", "mg"):
         return "ppm", None, SensorStateClass.MEASUREMENT
     if t == "cond":
-        return (
-            ("ppt" if n.startswith("salt") else None),
-            None,
-            SensorStateClass.MEASUREMENT,
-        )
+        return "ppt", None, SensorStateClass.MEASUREMENT
     if t in {"temp", "tmp"}:
         return (
             _temp_unit(value),
@@ -267,6 +263,19 @@ def _meta_field(field: str) -> Callable[[dict[str, Any]], Any]:
     return _get
 
 
+def _section_field(section: str, field: str) -> Callable[[dict[str, Any]], Any]:
+    """Return a function that extracts a field from a nested section dict."""
+
+    def _get(data: dict[str, Any]) -> Any:
+        section_any = data.get(section)
+        if isinstance(section_any, dict):
+            section_dict = cast(dict[str, Any], section_any)
+            return section_dict.get(field)
+        return None
+
+    return _get
+
+
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
@@ -306,6 +315,10 @@ async def async_setup_entry(
                 )
                 probe_name = str(probe.get("name") or key_str)
                 probe_type = str(probe.get("type") or "")
+                if probe_type.strip().lower() == "digital":
+                    # Digital probes are represented as open/closed binary sensors.
+                    added_probe_keys.add(key_str)
+                    continue
                 new_entities.append(
                     ApexProbeSensor(
                         coordinator,
@@ -342,6 +355,7 @@ async def async_setup_entry(
                 entry,
                 unique_id=f"{serial_for_ids}_diag_ipaddr".lower(),
                 name="IP Address",
+                icon="mdi:ip-network",
                 value_fn=_network_field("ipaddr"),
             ),
             ApexDiagnosticSensor(
@@ -349,6 +363,7 @@ async def async_setup_entry(
                 entry,
                 unique_id=f"{serial_for_ids}_diag_gateway".lower(),
                 name="Gateway",
+                icon="mdi:router-network",
                 value_fn=_network_field("gateway"),
             ),
             ApexDiagnosticSensor(
@@ -356,6 +371,7 @@ async def async_setup_entry(
                 entry,
                 unique_id=f"{serial_for_ids}_diag_netmask".lower(),
                 name="Netmask",
+                icon="mdi:ip-network-outline",
                 value_fn=_network_field("netmask"),
             ),
             ApexDiagnosticSensor(
@@ -363,6 +379,7 @@ async def async_setup_entry(
                 entry,
                 unique_id=f"{serial_for_ids}_diag_ssid".lower(),
                 name="Wi-Fi SSID",
+                icon="mdi:wifi-settings",
                 value_fn=_network_field("ssid"),
             ),
             ApexDiagnosticSensor(
@@ -370,6 +387,7 @@ async def async_setup_entry(
                 entry,
                 unique_id=f"{serial_for_ids}_diag_wifi_strength".lower(),
                 name="Wi-Fi Strength",
+                icon="mdi:wifi-strength-4",
                 native_unit=PERCENTAGE,
                 value_fn=_network_field("strength"),
             ),
@@ -378,6 +396,7 @@ async def async_setup_entry(
                 entry,
                 unique_id=f"{serial_for_ids}_diag_wifi_quality".lower(),
                 name="Wi-Fi Quality",
+                icon="mdi:signal",
                 native_unit=PERCENTAGE,
                 value_fn=_network_field("quality"),
             ),
@@ -386,7 +405,24 @@ async def async_setup_entry(
                 entry,
                 unique_id=f"{serial_for_ids}_diag_latest_firmware".lower(),
                 name="Latest Firmware",
+                icon="mdi:update",
                 value_fn=_meta_field("firmware_latest"),
+            ),
+            ApexDiagnosticSensor(
+                coordinator,
+                entry,
+                unique_id=f"{serial_for_ids}_diag_last_alert_statement".lower(),
+                name="Last Alert Statement",
+                icon="mdi:alert-circle-outline",
+                value_fn=_section_field("alerts", "last_statement"),
+            ),
+            ApexDiagnosticSensor(
+                coordinator,
+                entry,
+                unique_id=f"{serial_for_ids}_diag_trident_status".lower(),
+                name="Trident Status",
+                icon="mdi:flask-outline",
+                value_fn=_section_field("trident", "status"),
             ),
         ]
     )
@@ -430,6 +466,7 @@ class ApexRestDebugSensor(SensorEntity):
     _attr_has_entity_name = True
     _attr_should_poll = False
     _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:bug-outline"
 
     def __init__(
         self,
@@ -517,6 +554,7 @@ class ApexDiagnosticSensor(SensorEntity):
         name: str,
         value_fn: Callable[[dict[str, Any]], Any],
         native_unit: str | None = None,
+        icon: str | None = None,
     ) -> None:
         """Initialize the diagnostic sensor.
 
@@ -539,6 +577,7 @@ class ApexDiagnosticSensor(SensorEntity):
         self._attr_unique_id = unique_id
         self._attr_name = name
         self._attr_native_unit_of_measurement = native_unit
+        self._attr_icon = icon
         self._attr_device_info = build_device_info(
             host=host,
             meta=meta,

@@ -148,6 +148,15 @@ def test_select_helpers_cover_all_branches():
     with pytest.raises(HomeAssistantError):
         select._mode_from_option("nope")
 
+    assert select._icon_for_outlet_select("Alarm 1 2", "EB832") == "mdi:alarm"
+    assert select._icon_for_outlet_select("Warn Outlet", "EB832") == "mdi:alarm"
+    assert select._icon_for_outlet_select("AI Nero", "MXMPump|AI|Nero5") == "mdi:pump"
+    assert select._icon_for_outlet_select("Light", "SomeLightType") == "mdi:lightbulb"
+    assert select._icon_for_outlet_select("Heater", "SomeHeaterType") == "mdi:radiator"
+    assert (
+        select._icon_for_outlet_select("Something", "") == "mdi:toggle-switch-outline"
+    )
+
 
 async def test_select_setup_entry_creates_selects_and_listener_adds_new(
     hass, enable_custom_integrations
@@ -245,12 +254,58 @@ async def test_select_entity_attributes_include_raw_and_mxm(
 
     assert ent.extra_state_attributes is not None
     attrs = cast(dict[str, Any], ent.extra_state_attributes)
-    assert attrs["raw_state"] == "AOF"
+    assert attrs["state_code"] == "AOF"
     assert attrs["effective_state"] == "Off"
-    assert attrs["raw_mode"] == "AUTO"
+    assert attrs["mode"] == "AUTO"
     assert attrs["mxm_rev"] == "1"
     assert attrs["mxm_serial"] == "S"
     assert attrs["mxm_status"] == "OK"
+
+    await ent.async_will_remove_from_hass()
+
+
+async def test_select_entity_attributes_extract_percent_from_status_list(
+    hass, enable_custom_integrations
+):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "1.2.3.4", CONF_USERNAME: "admin", CONF_PASSWORD: "pw"},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
+    )
+    entry.add_to_hass(hass)
+
+    coordinator = _CoordinatorStub(
+        data={
+            "meta": {"serial": "ABC"},
+            "outlets": [
+                {
+                    "name": "SerialOut",
+                    "device_id": "O1",
+                    "state": "AON",
+                    "type": "Serial",
+                    "output_id": "1",
+                    "gid": "g",
+                    "status": [None, " ", "AON", "100%", "OK"],
+                }
+            ],
+        },
+        device_identifier="ABC",
+    )
+
+    from custom_components.apex_fusion.select import ApexOutletModeSelect, _OutletRef
+
+    ent = ApexOutletModeSelect(
+        hass,
+        cast(Any, coordinator),
+        cast(Any, entry),
+        ref=_OutletRef(did="O1", name="SerialOut"),
+    )
+    ent.async_write_ha_state = lambda *args, **kwargs: None
+    await ent.async_added_to_hass()
+
+    attrs = cast(dict[str, Any], ent.extra_state_attributes)
+    assert attrs["percent"] == 100
 
     await ent.async_will_remove_from_hass()
 

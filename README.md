@@ -48,6 +48,84 @@ Add the integration from Home Assistant UI:
 1. Settings → Devices & services → Add integration
 2. Search for **Apex Fusion (Local)**
 
+   > [!TIP]
+   > Recommend using `admin` user with default password of `1234` or changing the password.
+   > It is known that the user logged in will log out any users using the local webpages.
+
+## Notes
+
+Outputs are exposed as 3 way selects. They have attributes that can be used in UI.
+ex.
+
+```yaml
+state: Auto
+options: Off, Auto, On
+state_code: TBL
+mode: AUTO
+effective_state: On
+output_id: 12
+type: MXMPump|AI|Axis
+gid: 0
+status: TBL, , Cnst, OK
+icon: mdi:pump
+friendly_name: 80g_Frag_Tank AI Axis (Axis 90)
+```
+
+```yaml
+State: Off
+options: Off, Auto, On
+state_code: AON
+mode: AUTO
+percent: 100
+effective_state: On
+output_id: 21
+type: serial
+gid: null
+status: AON, 100, OK, 
+icon: mdi:power-socket-us
+friendly_name: 80g_Frag_Tank WhtLED 6 6
+```
+
+Binary sensors have the following attributes
+ex.
+
+```yaml
+state: off
+value: 0
+type: digital
+device_class: opening
+icon: mdi:toggle-switch-outline
+friendly_name: 80g_Frag_Tank Level
+```
+
+Sensors have the following attributes
+
+```yaml
+state: 33.6
+state_class: measurement
+unit_of_measurement: ppt
+icon: mdi:flash
+friendly_name: 80g_Frag_Tank Cond
+```
+
+The following diagnostic information is also exposed
+ex.
+
+```yaml
+DHCP Enabled: On
+Gateway: 10.0.30.1
+IP Address: 10.0.30.40
+Last Alert Statement: Unknown
+Latest Firmware: 5.12_CA25
+Netmask: 255.255.255.0
+Trident Status: Idle
+Trident Testing: Off
+Wi-Fi Enabled: On
+Wi-Fi Quality: 99.0%
+Wi-Fi SSID: MySSID-IoT-2.4
+Wi-Fi Strength: 100.0%
+```
+
 ## Development
 
 - Create and use `.venv`

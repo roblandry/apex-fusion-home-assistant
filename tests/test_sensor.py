@@ -100,7 +100,7 @@ def test_sensor_helpers_cover_all_branches():
     )
     assert (
         sensor._units_and_meta(probe_name="cond", probe_type="cond", value=1.0)[0]
-        is None
+        == "ppt"
     )
     assert (
         sensor._units_and_meta(probe_name="Tmp", probe_type="tmp", value=25.0)[0]
@@ -122,6 +122,9 @@ def test_sensor_helpers_cover_all_branches():
     assert nf({"network": "nope"}) is None
     assert mf({"meta": {"firmware_latest": "1.0"}}) == "1.0"
     assert mf({"meta": "nope"}) is None
+    sf = sensor._section_field("alerts", "last_statement")
+    assert sf({"alerts": "nope"}) is None
+    assert sf({"alerts": {"last_statement": "x"}}) == "x"
 
 
 async def test_sensor_setup_creates_entities_and_updates(
@@ -143,6 +146,12 @@ async def test_sensor_setup_creates_entities_and_updates(
                 "": {"name": "", "type": "Tmp", "value": "25", "value_raw": None},
                 "T1": {"name": "Tmp", "type": "Tmp", "value": "25", "value_raw": None},
                 "PH": {"name": "pH", "type": "pH", "value": 8.1, "value_raw": None},
+                "DI1": {
+                    "name": "Door_1",
+                    "type": "digital",
+                    "value": 0,
+                    "value_raw": None,
+                },
                 "BAD": "nope",
             },
             "outlets": [
@@ -173,7 +182,7 @@ async def test_sensor_setup_creates_entities_and_updates(
 
     await sensor.async_setup_entry(hass, cast(Any, entry), _add_entities)
 
-    # Probes (2) + diagnostics
+    # Probes + diagnostics
     assert len(added) >= 3
 
     # Exercise entity update handlers and remove handlers.
@@ -182,7 +191,9 @@ async def test_sensor_setup_creates_entities_and_updates(
         await ent.async_added_to_hass()
 
     probe_entities = [e for e in added if isinstance(e, sensor.ApexProbeSensor)]
-    assert probe_entities
+    # "DI1" is digital and excluded from sensor platform; "BAD" is invalid but is still
+    # represented as a probe entity to exercise error-tolerant behavior.
+    assert len(probe_entities) == 3
 
     # Update probe values to hit coercion/branches.
     coordinator.data["probes"]["T1"]["value"] = 26
@@ -241,7 +252,7 @@ async def test_sensor_setup_without_network_or_firmware_adds_no_diagnostics(
 
     # Diagnostic entities are always created (even if values are None) so they
     # don't disappear when the first poll falls back to legacy data.
-    assert len(added) == 7
+    assert len(added) == 9
 
 
 async def test_sensor_simple_rest_debug_mode_creates_one_entity_and_updates(

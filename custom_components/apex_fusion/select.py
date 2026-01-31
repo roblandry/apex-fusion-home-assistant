@@ -6,8 +6,8 @@ This platform exposes a single 3-way SelectEntity per outlet/output:
 - On
 
 Attributes:
-- raw_state: Controller-reported state string (AON/AOF/TBL/ON/OFF/...)
-- raw_mode: Controller command-mode we will send (AUTO/ON/OFF) inferred from selection
+- state_code: Controller-reported state string (AON/AOF/TBL/ON/OFF/...)
+- mode: Controller command-mode we will send (AUTO/ON/OFF) inferred from selection
 - effective_state: "On"/"Off" based on whether the outlet is energized
 
 Control is via the local REST API:
@@ -42,7 +42,7 @@ from .const import (
     LOGGER_NAME,
 )
 from .coordinator import ApexNeptuneDataUpdateCoordinator, build_base_url
-from .sensor import build_device_info, friendly_outlet_name, icon_for_outlet_type
+from .sensor import build_device_info, friendly_outlet_name
 
 _LOGGER = logging.getLogger(LOGGER_NAME)
 
@@ -91,6 +91,27 @@ def _mode_from_option(option: str) -> str:
     if t == "off":
         return "OFF"
     raise HomeAssistantError(f"Invalid option: {option}")
+
+
+def _icon_for_outlet_select(outlet_name: str, outlet_type: str | None) -> str | None:
+    """Return an icon for a selectable output.
+
+    These SelectEntities control an output mode (Off/Auto/On). Avoid outlet/power-socket
+    icons so they don't get confused with EB (Energy Bar) outlet entities.
+    """
+
+    name = (outlet_name or "").strip().lower()
+    t = (outlet_type or "").strip().upper()
+
+    if any(token in name for token in ("alarm", "warn")):
+        return "mdi:alarm"
+    if "PUMP" in t:
+        return "mdi:pump"
+    if "LIGHT" in t:
+        return "mdi:lightbulb"
+    if "HEATER" in t:
+        return "mdi:radiator"
+    return "mdi:toggle-switch-outline"
 
 
 async def async_setup_entry(
@@ -169,7 +190,7 @@ class ApexOutletModeSelect(SelectEntity):
         serial = str(meta.get("serial") or host or "apex").replace(":", "_")
 
         self._attr_unique_id = f"{serial}_outlet_mode_{ref.did}".lower()
-        self._attr_name = f"{ref.name} Mode"
+        self._attr_name = ref.name
 
         self._attr_device_info = build_device_info(
             host=host,
@@ -182,8 +203,9 @@ class ApexOutletModeSelect(SelectEntity):
             getattr(self._coordinator, "last_update_success", True)
         )
         self._attr_current_option = None
-        self._attr_icon = icon_for_outlet_type(
-            cast(str | None, self._find_outlet().get("type"))
+        outlet = self._find_outlet()
+        self._attr_icon = _icon_for_outlet_select(
+            ref.name, cast(str | None, outlet.get("type"))
         )
         self._refresh_from_coordinator()
 
@@ -209,8 +231,8 @@ class ApexOutletModeSelect(SelectEntity):
         raw_state = self._read_raw_state()
 
         attrs: dict[str, Any] = {
-            "raw_state": raw_state or None,
-            "raw_mode": _mode_from_option(self._attr_current_option)
+            "state_code": raw_state or None,
+            "mode": _mode_from_option(self._attr_current_option)
             if self._attr_current_option
             else None,
             "effective_state": _effective_state_from_raw_state(raw_state),
@@ -220,6 +242,25 @@ class ApexOutletModeSelect(SelectEntity):
         for key in ("output_id", "type", "gid", "status"):
             if key in outlet:
                 attrs[key] = outlet.get(key)
+
+        # Serial outputs often include a percentage in the status list, e.g.
+        # ["AON", "100", "OK"]. Expose a derived attribute for UI/automation.
+        status_any: Any = outlet.get("status")
+        if isinstance(status_any, list):
+            for item_any in cast(list[Any], status_any):
+                if item_any is None:
+                    continue
+                text = str(item_any).strip()
+                if not text:
+                    continue
+                if text.endswith("%"):
+                    text = text[:-1].strip()
+                if not text.isdigit():
+                    continue
+                percent = int(text)
+                if 0 <= percent <= 100:
+                    attrs["percent"] = percent
+                    break
 
         name_any: Any = outlet.get("name")
         outlet_name = str(name_any).strip() if name_any is not None else ""
@@ -242,8 +283,9 @@ class ApexOutletModeSelect(SelectEntity):
         )
         self._attr_current_option = _option_from_raw_state(raw_state)
         self._attr_extra_state_attributes = self._read_extra_attrs()
-        self._attr_icon = icon_for_outlet_type(
-            cast(str | None, self._find_outlet().get("type"))
+        outlet = self._find_outlet()
+        self._attr_icon = _icon_for_outlet_select(
+            self._ref.name, cast(str | None, outlet.get("type"))
         )
 
     async def async_select_option(self, option: str) -> None:

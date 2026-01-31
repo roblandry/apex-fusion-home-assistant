@@ -137,12 +137,22 @@ def test_parse_status_xml_and_rest_and_cgi_json():
             {"did": "", "name": ""},
             "nope",
         ],
+        "modules": [
+            {"hwtype": "EB832", "extra": {"status": "ignored"}},
+            {"hwtype": "TRI", "extra": {"status": "testing Ca/Mg"}},
+        ],
+        "notifications": [
+            {"statement": "pH is less than 7.8"},
+        ],
     }
     rest_parsed = coordinator.parse_status_rest(rest_obj)
     assert rest_parsed["meta"]["source"] == "rest"
     assert rest_parsed["network"]["ipaddr"] == "1.2.3.4"
     assert "T1" in rest_parsed["probes"]
     assert rest_parsed["outlets"][0]["device_id"] == "O1"
+    assert rest_parsed["trident"]["status"] == "testing Ca/Mg"
+    assert rest_parsed["trident"]["is_testing"] is True
+    assert rest_parsed["alerts"]["last_statement"] == "pH is less than 7.8"
 
     # Nested containers + int IDs + fallback from inputs->probes and outputs->outlets.
     rest_nested = {
@@ -158,12 +168,17 @@ def test_parse_status_xml_and_rest_and_cgi_json():
                     "status": "AON",  # non-list -> status None
                 }
             ],
+            "modules": [{"hwtype": "TRI", "extra": {"status": "idle"}}],
+            "alerts": ["Apex Fusion Alarm: X Statement: Alk is low"],
         }
     }
     rest_nested_parsed = coordinator.parse_status_rest(rest_nested)
     assert "123" in rest_nested_parsed["probes"]
     assert rest_nested_parsed["outlets"][0]["output_id"] == "99"
     assert rest_nested_parsed["outlets"][0]["status"] is None
+    assert rest_nested_parsed["trident"]["status"] == "Idle"
+    assert rest_nested_parsed["trident"]["is_testing"] is False
+    assert rest_nested_parsed["alerts"]["last_statement"] == "Alk is low"
 
     cgi_obj = {
         "istat": {
@@ -241,6 +256,64 @@ def test_parse_status_rest_ignores_non_list_inputs_outputs():
     out = coordinator.parse_status_rest({"inputs": "x", "outputs": "y"})
     assert out["probes"] == {}
     assert out["outlets"] == []
+
+
+def test_parse_status_rest_trident_and_alert_variants():
+    # Trident parsing: cover non-dict entries, wrong hwtype, bad extra, non-str status, blank status.
+    out = coordinator.parse_status_rest(
+        {
+            "modules": [
+                "nope",
+                {"hwtype": "EB832", "extra": {"status": "ignored"}},
+                {"hwtype": "TRI", "extra": 1},
+                {"hwtype": "TRI", "extra": {"status": 1}},
+                {"hwType": "TRI", "extra": {"status": "  \n"}},
+            ]
+        }
+    )
+    assert out["trident"]["status"] is None
+    assert out["trident"]["is_testing"] is None
+
+    out2 = coordinator.parse_status_rest(
+        {
+            "modules": [
+                {"hwtype": "TRI", "extra": {"status": "Idle"}},
+            ]
+        }
+    )
+    assert out2["trident"]["status"] == "Idle"
+    assert out2["trident"]["is_testing"] is False
+
+    # Preserve short all-caps abbreviations.
+    out2b = coordinator.parse_status_rest(
+        {
+            "modules": [
+                {"hwtype": "TRI", "extra": {"status": "OK"}},
+            ]
+        }
+    )
+    assert out2b["trident"]["status"] == "OK"
+    assert out2b["trident"]["is_testing"] is False
+
+    # Alert parsing: dict message with Statement extraction, dict message without Statement,
+    # and string message without Statement.
+    out3 = coordinator.parse_status_rest(
+        {
+            "notifications": [
+                {"message": "Apex Fusion Alarm: X Statement: Ca is low"},
+            ]
+        }
+    )
+    assert out3["alerts"]["last_statement"] == "Ca is low"
+    assert out3["alerts"]["last_message"] == "Apex Fusion Alarm: X Statement: Ca is low"
+
+    out4 = coordinator.parse_status_rest({"warnings": [{"message": "Just a warning"}]})
+    assert out4["alerts"]["last_statement"] is None
+    assert out4["alerts"]["last_message"] == "Just a warning"
+
+    out5 = coordinator.parse_status_rest({"messages": ["No statement here"]})
+    assert out5["alerts"]["last_statement"] is None
+    assert out5["alerts"]["last_message"] == "No statement here"
 
 
 def test_parse_status_cgi_json_ignores_non_list_inputs_outputs():

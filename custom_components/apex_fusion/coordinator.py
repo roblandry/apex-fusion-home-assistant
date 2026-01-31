@@ -243,7 +243,13 @@ def parse_status_xml(xml_text: str) -> dict[str, Any]:
             }
         )
 
-    return {"meta": meta, "probes": probes, "outlets": outlets}
+    return {
+        "meta": meta,
+        "probes": probes,
+        "outlets": outlets,
+        "alerts": {"last_statement": None, "last_message": None},
+        "trident": {"status": None, "is_testing": None},
+    }
 
 
 def parse_status_rest(status_obj: dict[str, Any]) -> dict[str, Any]:
@@ -391,23 +397,112 @@ def parse_status_rest(status_obj: dict[str, Any]) -> dict[str, Any]:
                 }
             )
 
-    # TODO(Trident): Consider exposing a Trident "test status" sensor (not just on/off).
-    # Issue URL: https://github.com/roblandry/apex-fusion-home-assistant/issues/3
-    # The REST payload includes `modules[]` entries with `hwtype == "TRI"` and a human-readable
-    # progress/status string at `modules[].extra.status` (example seen: "testing Ca/Mg").
-    # A future implementation could:
-    # - Parse `modules` here (similar to inputs/outputs) and store normalized TRI module info in
-    #   coordinator data (e.g., `data["trident"]["status"]`, `data["trident"]["lastCal"]`, etc.).
-    # - Use the sensor's `native_value` (or state) to report the *current phase* such as
-    #   "testing Ca", "testing Alk", "testing Mg", or the raw string from `extra.status`.
-    # - Optionally derive a separate binary sensor later ("testing" yes/no), but the primary ask
-    #   is to surface *which* test is running.
-    # - Expose useful attributes like `extra.lastCal` (epoch), `extra.temp`, and `extra.levels`.
+    def _parse_trident_from_modules() -> dict[str, Any]:
+        modules_any: Any = _find_field(status_obj, "modules")
+        if not isinstance(modules_any, list):
+            return {"status": None, "is_testing": None}
+
+        best_status: str | None = None
+        for module_any in cast(list[Any], modules_any):
+            if not isinstance(module_any, dict):
+                continue
+            module = cast(dict[str, Any], module_any)
+            hwtype = (
+                str(
+                    module.get("hwtype")
+                    or module.get("hwType")
+                    or module.get("type")
+                    or ""
+                )
+                .strip()
+                .upper()
+            )
+            if hwtype != "TRI":
+                continue
+            extra_any: Any = module.get("extra")
+            if not isinstance(extra_any, dict):
+                continue
+            extra = cast(dict[str, Any], extra_any)
+            status_any: Any = extra.get("status")
+            if not isinstance(status_any, str):
+                continue
+            status = status_any.strip()
+            if not status:
+                continue
+
+            # Some firmwares return simple statuses like "idle"/"ok".
+            # Normalize those to sentence-case while preserving mixed-content
+            # statuses like "testing Ca/Mg".
+            if status.isalpha():
+                if status.isupper() and len(status) <= 3:
+                    # Preserve common abbreviations like "OK".
+                    status = status
+                else:
+                    status = status[:1].upper() + status[1:].lower()
+
+            best_status = status
+            break
+
+        if best_status is None:
+            return {"status": None, "is_testing": None}
+
+        lower = best_status.lower()
+        is_testing = "testing" in lower
+        return {"status": best_status, "is_testing": is_testing}
+
+    def _parse_last_alert_statement() -> dict[str, Any]:
+        # The Apex REST payload format for alerts/notifications varies by firmware.
+        # We try common container names and extract a human-facing statement.
+        for key in ("notifications", "alerts", "alarms", "warnings", "messages"):
+            items_any: Any = _find_field(status_obj, key)
+            if not isinstance(items_any, list) or not items_any:
+                continue
+            last_any: Any = cast(list[Any], items_any)[-1]
+            if isinstance(last_any, dict):
+                last = cast(dict[str, Any], last_any)
+                statement_any: Any = (
+                    last.get("statement")
+                    or last.get("Statement")
+                    or last.get("detail")
+                    or last.get("details")
+                )
+                if isinstance(statement_any, str) and statement_any.strip():
+                    return {
+                        "last_statement": statement_any.strip(),
+                        "last_message": None,
+                    }
+
+                message_any: Any = (
+                    last.get("message")
+                    or last.get("msg")
+                    or last.get("text")
+                    or last.get("title")
+                )
+                if isinstance(message_any, str) and message_any.strip():
+                    msg = message_any.strip()
+                    m = re.search(r"(?:^|\b)Statement:\s*(?P<s>.+)$", msg)
+                    if m:
+                        stmt = m.group("s").strip()
+                        return {"last_statement": stmt or None, "last_message": msg}
+                    return {"last_statement": None, "last_message": msg}
+
+            if isinstance(last_any, str) and last_any.strip():
+                msg = last_any.strip()
+                m = re.search(r"(?:^|\b)Statement:\s*(?P<s>.+)$", msg)
+                if m:
+                    stmt = m.group("s").strip()
+                    return {"last_statement": stmt or None, "last_message": msg}
+                return {"last_statement": None, "last_message": msg}
+
+        return {"last_statement": None, "last_message": None}
+
     return {
         "meta": meta,
         "network": network,
         "probes": probes,
         "outlets": outlets,
+        "alerts": _parse_last_alert_statement(),
+        "trident": _parse_trident_from_modules(),
         "raw": status_obj,
     }
 
@@ -516,7 +611,14 @@ def parse_status_cgi_json(status_obj: dict[str, Any]) -> dict[str, Any]:
                 }
             )
 
-    return {"meta": meta, "probes": probes, "outlets": outlets, "raw": status_obj}
+    return {
+        "meta": meta,
+        "probes": probes,
+        "outlets": outlets,
+        "alerts": {"last_statement": None, "last_message": None},
+        "trident": {"status": None, "is_testing": None},
+        "raw": status_obj,
+    }
 
 
 class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
