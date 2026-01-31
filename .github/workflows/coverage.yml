@@ -37,7 +37,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
 
-          python -c "import json; print('\\n'.join(json.load(open('custom_components/redsea/manifest.json'))['requirements']))" > /tmp/manifest_requirements.txt
+          python -c "import json; print('\\n'.join(json.load(open('custom_components/apex_fusion/manifest.json'))['requirements']))" > /tmp/manifest_requirements.txt
           pip install -r /tmp/manifest_requirements.txt -c ${{ matrix.constraints }}
           pip install -r requirements.test.txt -c ${{ matrix.constraints }}
 
