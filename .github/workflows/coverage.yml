@@ -39,7 +39,7 @@ jobs:
 
           python -c "import json; print('\\n'.join(json.load(open('custom_components/apex_fusion/manifest.json'))['requirements']))" > /tmp/manifest_requirements.txt
           pip install -r /tmp/manifest_requirements.txt -c ${{ matrix.constraints }}
-          pip install -r requirements.test.txt -c ${{ matrix.constraints }}
+          pip install -r requirements.txt -c ${{ matrix.constraints }}
 
       - name: Run tests with coverage (HA ${{ matrix.ha }})
         if: matrix.ha == '2026.1'
