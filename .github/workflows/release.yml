@@ -1,45 +1,96 @@
-# TODO: ADD EMAIL SECRET
 name: Release
+
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag Version"
+        description: Tag to create (e.g. v0.1.0)
         required: true
-        default: "v"
+        default: v0.1.0
+      prerelease:
+        description: Mark GitHub release as prerelease
+        type: boolean
+        required: true
+        default: false
 
 permissions:
   contents: write
+
 jobs:
   release:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v2
-      - name: "Set version number from trigger's tag"
-        id: update_manifest
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set tag/version
+        id: vars
+        shell: bash
         run: |
-          yq -i -o json '.version="${{ github.event.inputs.tag}}"' \
-            "${{ github.workspace }}/custom_components/apex_fusion/manifest.json"
-          git config --global user.email "${{ secrets.GIT_USER_EMAIL }}"
-          git config --global user.name "roblandry"
-          git commit -a -m "Update version"
+          set -euo pipefail
+          TAG='${{ github.event.inputs.tag }}'
+          VERSION="${TAG#v}"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Update manifest version
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+
+          p = os.path.join(
+            os.environ["GITHUB_WORKSPACE"],
+            "custom_components",
+            "apex_fusion",
+            "manifest.json",
+          )
+          version = os.environ.get("VERSION", "")
+          if not version:
+            raise SystemExit("VERSION not set")
+
+          with open(p, "r", encoding="utf-8") as f:
+            obj = json.load(f)
+          obj["version"] = version
+          with open(p, "w", encoding="utf-8") as f:
+            json.dump(obj, f, indent=2, sort_keys=False)
+            f.write("\n")
+
+          print(f"Updated manifest.json version to {version}")
+          PY
+
+      - name: Generate CHANGELOG.md
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --tag "${{ steps.vars.outputs.tag }}" --output CHANGELOG.md
+
+      - name: Commit, tag, and push
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+
+          git add custom_components/apex_fusion/manifest.json CHANGELOG.md
+          git commit -m "chore(release): ${TAG}"
+
           git push origin HEAD:main
-          SHA=`git rev-parse HEAD`
-          echo "tag_sha=${SHA}" >> $GITHUB_OUTPUT
-      - name: Create tag
-        if: steps.update_manifest.outcome == 'success'
-        uses: actions/github-script@v5
-        id: create_tag
+
+          git tag -a "${TAG}" -m "${TAG}"
+          git push origin "${TAG}"
+
+      - name: Create GitHub release
+        uses: ncipollo/release-action@v1
         with:
-          script: |
-            github.rest.git.createRef({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              ref: 'refs/tags/${{ github.event.inputs.tag}}',
-              sha: '${{steps.update_manifest.outputs.tag_sha}}'
-            })
-      - uses: ncipollo/release-action@v1
-        with:
-          prerelease: "true"
-          tag: ${{ github.event.inputs.tag}}
+          tag: ${{ steps.vars.outputs.tag }}
+          prerelease: ${{ github.event.inputs.prerelease }}
+          generateReleaseNotes: true

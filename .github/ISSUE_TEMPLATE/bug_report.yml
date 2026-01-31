@@ -1,0 +1,143 @@
+name: Bug report
+description: Report a problem with the integration
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug.
+
+        If you can, include a redacted device dump (see README → Development → Device dump helper).
+
+  - type: input
+    id: ha_version
+    attributes:
+      label: Home Assistant version
+      placeholder: "2026.1.x"
+    validations:
+      required: true
+
+  - type: input
+    id: integration_version
+    attributes:
+      label: Integration version / commit
+      description: If installed from git, paste the commit hash.
+      placeholder: "vX.Y.Z or abcdef1"
+    validations:
+      required: false
+
+  - type: input
+    id: apex_type
+    attributes:
+      label: Apex controller type
+      description: "Example: AC6J"
+      placeholder: "AC6J"
+    validations:
+      required: false
+
+  - type: input
+    id: apex_firmware
+    attributes:
+      label: Apex firmware
+      description: "Example: 5.12J_CA25"
+      placeholder: "5.12J_CA25"
+    validations:
+      required: false
+
+  - type: textarea
+    id: modules
+    attributes:
+      label: Modules present
+      description: List modules you have (TRI, FMM, EB832, DOS, PMUP, etc)
+      placeholder: |
+        - TRI (Trident)
+        - FMM
+        - EB832
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: What part of the integration is affected?
+      options:
+        - area:trident
+        - area:modules
+        - area:inputs
+        - area:outputs
+        - area:updates
+        - area:config-flow
+        - area:auth
+        - area:rest
+        - area:legacy
+        - area:docs
+        - area:devtools
+        - not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: module
+    attributes:
+      label: Specific module (if applicable)
+      description: Pick the primary module involved.
+      options:
+        - module:trident
+        - module:trident-np
+        - module:dos
+        - module:fmm
+        - module:pmup
+        - module:eb832
+        - module:eb8
+        - module:vdm
+        - module:pm2
+        - module:mxm
+        - module:afs
+        - not sure / none
+    validations:
+      required: true
+
+  - type: dropdown
+    id: api
+    attributes:
+      label: API mode
+      description: Which local API works for you?
+      options:
+        - REST (/rest/*)
+        - Legacy CGI (/cgi-bin/status.xml/json)
+        - Both
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: what_happened
+    attributes:
+      label: What happened?
+      description: Include a short description and what you expected instead.
+      placeholder: |
+        Example:
+        - Trident reagent sensors never appear
+        - Expected them to appear once the Trident is detected
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Home Assistant logs
+      description: Paste relevant logs. Redact IPs/hostnames if you prefer.
+      render: text
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: dump
+    attributes:
+      label: Device dump (optional but helpful)
+      description: If you can share a redacted dump, it helps add/fix support quickly.
+      options:
+        - label: I can provide a redacted dump from `python3 apex_dev.py dump ...`
+          required: false

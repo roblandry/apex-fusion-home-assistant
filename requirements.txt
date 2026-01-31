@@ -7,3 +7,4 @@ dotenv>=0.9.9
 pre-commit>=3.7.1
 ruff==0.14.9
 colorlog>=6.10.1
+commitizen>=3.29.0

@@ -1,0 +1,116 @@
+name: Issue triage labels
+
+on:
+  issues:
+    types: [opened, edited]
+
+permissions:
+  issues: write
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Apply labels from issue form
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const issue_number = context.payload.issue.number;
+            const body = context.payload.issue.body || "";
+
+            function firstMatch(re) {
+              const m = body.match(re);
+              return m ? (m[1] || "").trim() : "";
+            }
+
+            function sectionValue(title) {
+              // Extract the first paragraph after a "### <title>" heading.
+              // Issue Forms use "_No response_" when left blank.
+              const re = new RegExp(
+                `###\\s*${title}\\s*\\n+([\\s\\S]*?)(?:\\n###\\s|$)`,
+                "i",
+              );
+              const m = body.match(re);
+              if (!m) return "";
+              return (m[1] || "").trim();
+            }
+
+            // Issue forms render headings like:
+            // ### Area
+            // area:trident
+            const area = firstMatch(/###\s*Area\s*\n+([^\n]+)/i);
+            const module = firstMatch(/###\s*Specific module \(if applicable\)\s*\n+([^\n]+)/i);
+            const apiMode = firstMatch(/###\s*API mode\s*\n+([^\n]+)/i);
+            const dataSource = firstMatch(/###\s*Data source\s*\n+([^\n]+)/i);
+
+            const logsSection = sectionValue("Home Assistant logs");
+            const dumpSection = sectionValue("Device dump\\s*\\(optional but helpful\\)");
+
+            const labels = new Set();
+
+            // Base labels from template already apply (bug/enhancement).
+            // Add structured labels.
+            if (area && !/not sure/i.test(area)) labels.add(area);
+            if (module && !/not sure/i.test(module)) labels.add(module);
+
+            // API/source helper labels
+            const apiText = (apiMode || dataSource || "").toLowerCase();
+            if (apiText.includes("/rest")) labels.add("area:rest");
+            if (apiText.includes("cgi")) labels.add("area:legacy");
+
+            // Missing info signals (only when the form section is empty)
+            const logsEmpty = !logsSection || /^_No response_$/i.test(logsSection);
+            if (logsEmpty) labels.add("needs-logs");
+
+            const dumpChecked = /-\s*\[x\]\s+I can provide a redacted dump/i.test(body);
+            const moduleSelected = module && !/not sure/i.test(module);
+            const areaSelected = area && !/not sure/i.test(area);
+            const dumpRelevant =
+              moduleSelected ||
+              (areaSelected && /area:(trident|modules|inputs|outputs|updates|rest|legacy)/i.test(area));
+            if (dumpRelevant && !dumpChecked) labels.add("needs-device-dump");
+
+            const labelList = Array.from(labels);
+            if (labelList.length === 0) return;
+
+            async function ensureLabel(name) {
+              // Create label if missing (idempotent).
+              try {
+                await github.rest.issues.getLabel({ owner, repo, name });
+                return;
+              } catch (e) {
+                if (e.status !== 404) throw e;
+              }
+
+              // Simple deterministic color by label prefix
+              const colorByPrefix = {
+                "area:": "0E8A16",      // green
+                "module:": "5319E7",    // purple
+                "needs-": "FBCA04",     // yellow
+              };
+              let color = "D4C5F9"; // default pastel
+              for (const [prefix, c] of Object.entries(colorByPrefix)) {
+                if (name.startsWith(prefix)) { color = c; break; }
+              }
+
+              await github.rest.issues.createLabel({
+                owner,
+                repo,
+                name,
+                color,
+                description: "Auto-managed by issue form triage",
+              });
+            }
+
+            for (const name of labelList) {
+              await ensureLabel(name);
+            }
+
+            await github.rest.issues.addLabels({
+              owner,
+              repo,
+              issue_number,
+              labels: labelList,
+            });

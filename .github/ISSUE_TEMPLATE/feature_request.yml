@@ -1,0 +1,108 @@
+name: Feature request
+description: Suggest an enhancement or new entity support
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion.
+
+        If this is about module support or parsing, a redacted device dump is the fastest way to validate feasibility.
+
+  - type: textarea
+    id: request
+    attributes:
+      label: What do you want to add or change?
+      placeholder: |
+        Example:
+        - Add EB832 outlet power sensors
+        - Add DOS container level sensors (if available from controller)
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: Why is this useful?
+      placeholder: |
+        Example:
+        - Lets me alert when power draw spikes
+        - Helps with reagent tracking
+    validations:
+      required: false
+
+  - type: textarea
+    id: device
+    attributes:
+      label: Device context
+      description: Controller type/firmware and modules involved.
+      placeholder: |
+        Controller: AC6J
+        Firmware: 5.12J_CA25
+        Modules: TRI, FMM, EB832
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: What part of the integration would this affect?
+      options:
+        - area:trident
+        - area:modules
+        - area:inputs
+        - area:outputs
+        - area:updates
+        - area:config-flow
+        - area:auth
+        - area:rest
+        - area:legacy
+        - area:docs
+        - area:devtools
+        - not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: module
+    attributes:
+      label: Specific module (if applicable)
+      description: Pick the primary module involved.
+      options:
+        - module:trident
+        - module:trident-np
+        - module:dos
+        - module:fmm
+        - module:pmup
+        - module:eb832
+        - module:eb8
+        - module:vdm
+        - module:pm2
+        - module:mxm
+        - module:afs
+        - not sure / none
+    validations:
+      required: true
+
+  - type: dropdown
+    id: data_source
+    attributes:
+      label: Data source
+      description: Where should this data come from?
+      options:
+        - REST (/rest/status or /rest/config/*)
+        - Legacy CGI (/cgi-bin/status.xml/json)
+        - Not sure
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: dump
+    attributes:
+      label: Device dump (optional but helpful)
+      description: For module support/parsing requests, a redacted dump helps validate feasibility.
+      options:
+        - label: I can provide a redacted dump from `python3 apex_dev.py dump ...`
+          required: false

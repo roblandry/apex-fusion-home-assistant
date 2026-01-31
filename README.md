@@ -33,6 +33,30 @@ Home Assistant custom integration for local (LAN) polling of an Apex controller.
 - Trident reagent + waste container level sensors (mL)
 - Designed for stable device identity and robust backoff on rate limiting
 
+## Tested / Intended Hardware
+
+This integration is designed for Neptune Apex controllers reachable on your LAN.
+
+- **Written for** controllers that expose the local REST API (for example: `GET /rest/status`, `GET /rest/config/nconf`, `GET /rest/config/mconf`).
+- **Fallback support** for legacy/older firmwares that only expose `GET /cgi-bin/status.xml` (best-effort).
+- **Developed against** real controller payloads including a Trident module (Trident container level sensors are only created when a Trident is detected).
+
+If your controller/modules behave differently, please consider contributing a redacted dump (see Development below) so support can be expanded safely.
+
+### Known working (my setup)
+
+As of 2026-01-31, I actively run this integration against:
+
+- **Controller type:** AC6J (A3 Apex Jr)
+- **Firmware:** 5.12J_CA25
+- **APIs available:** REST (`/rest/*`) is expected; legacy CGI endpoints (`/cgi-bin/status.*`) may also be present and are used only as fallback
+- **Modules observed via REST:**
+  - FMM (Software Version: **24**)
+  - MXM (Software Version: **1**)
+  - Trident ACM (`TRI`) (Software Version: **23**)
+  - PM2 (Software Version: **3**)
+  - VDM (Software Version: **13**)
+
 ## Installation
 
 ### HACS (Custom Repository)
@@ -189,6 +213,32 @@ When a Trident module is present (`hwtype: TRI`), the integration exposes:
 - Create and use `.venv`
 - Run tests: `.venv/bin/pytest -q`
 - Lint: `.venv/bin/ruff check .`
+- Optional (commit messages): `pip install -r requirements.txt` then run `cz commit` for an interactive Conventional Commit prompt
+
+### Contributions
+
+Contributions are welcome. The goal of this integration is to stay compatible with Home Assistant **LATEST** and to only expose entities backed by stable, controller-provided values.
+
+Before opening a PR:
+
+- Run tests: `.venv/bin/pytest -q`
+- Run lint: `.venv/bin/ruff check .`
+- If you change parsing/entity behavior, include updated/added pytest coverage (PRs that break tests won’t be accepted).
+
+If your change depends on real controller payloads (new module support, missing fields, firmware differences), a redacted device dump is the fastest way to validate behavior (see the Device dump helper below). Please do not commit unredacted dumps.
+
+### Device dump helper
+
+The repo includes a local-only helper script for collecting controller payloads to help add support for additional devices/modules:
+
+- Dump one controller (redacted by default): `python3 apex_dev.py dump --ip 192.168.1.50`
+- Scan a subnet (noisy; use carefully): `python3 apex_dev.py scan --cidr 192.168.1.0/24`
+
+Notes:
+
+- Dumps are written under `.dev/dumps/` by default (gitignored).
+- Redaction is enabled by default. Set `APEX_REDACT=0` only if you understand the risks.
+- You can provide credentials via `--username/--password` or `APEX_USERNAME`/`APEX_PASSWORD` (optionally in a `.env`).
 
 ## License
 

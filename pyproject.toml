@@ -21,3 +21,22 @@ extend-select = ["I"]
 known-first-party = ["custom_components", "tests"]
 order-by-type = true
 combine-as-imports = true
+
+[tool.commitizen]
+name = "cz_conventional_commits"
+
+# Keep the interactive prompt aligned with how we categorize changes in this repo.
+# (Without this, cz may only offer feat/fix even though other types are valid.)
+change_type_order = [
+  "feat",
+  "fix",
+  "perf",
+  "refactor",
+  "ci",
+  "build",
+  "docs",
+  "test",
+  "chore",
+  "style",
+  "revert",
+]
