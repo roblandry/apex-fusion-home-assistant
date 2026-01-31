@@ -14,6 +14,14 @@
 
 Home Assistant custom integration for local (LAN) polling of an Apex controller.
 
+> [!WARNING]
+> This project is not affiliated with Neptune Systems and has no connection to the Apex Fusion
+> cloud service. It communicates only with the controller on your local network.
+>
+> Use at your own discretion. Firmware updates are applied via Neptune’s workflow, and this
+> project cannot guarantee update safety. You assume all risk, including potential device
+> malfunction or warranty implications.
+
 ## Features
 
 - REST-first polling with legacy (CGI) fallback
