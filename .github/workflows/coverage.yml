@@ -57,6 +57,7 @@ jobs:
       - name: Generate coverage badge (repo-local)
         if: matrix.ha == '2026.1'
         run: |
+          mkdir -p badges
           python -m coverage_badge -o badges/coverage.svg -f
 
       - name: Upload coverage.xml to Codecov
