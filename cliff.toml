@@ -2,9 +2,9 @@
 # Generates CHANGELOG.md from Conventional Commits.
 
 [changelog]
-header = "# Changelog\n\nAll notable changes to this project will be documented in this file.\n\n"
-body = "{% if version %}## {{ version }}{% else %}## Unreleased{% endif %}\n\n{% if commits | length > 0 %}{% for group, commits in commits | group_by(attribute=\"group\") %}### {{ group }}\n\n{% for commit in commits %}{% set msg = commit.message | trim %}{% set parts = msg | split(pat=\": \") %}- {% if parts | length > 1 %}{{ parts | slice(start=1) | join(sep=\": \") }}{% else %}{{ msg }}{% endif %}\n{% endfor %}{% if not loop.last %}\n{% endif %}{% endfor %}{% else %}- No changes\n{% endif %}"
-trim = true
+header = "# Changelog\n\nAll notable changes to this project will be documented in this file."
+body = "\n{% if version %}## {{ version }}{% else %}## Unreleased{% endif %}\n\n{% if commits | length > 0 %}{% for group, commits in commits | group_by(attribute=\"group\") %}### {{ group }}\n\n{% for commit in commits %}{% set msg = commit.message | trim %}{% set parts = msg | split(pat=\": \") %}- {% if parts | length > 1 %}{{ parts | slice(start=1) | join(sep=\": \") }}{% else %}{{ msg }}{% endif %}\n{% endfor %}{% if not loop.last %}\n{% endif %}{% endfor %}{% else %}- No changes\n{% endif %}"
+trim = false
 
 [git]
 conventional_commits = true

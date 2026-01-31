@@ -21,6 +21,11 @@ ignores:
 config:
   default: true
 
+  # Changelogs commonly repeat headings like "### Fixes" under different
+  # release versions. Only treat headings as duplicates when they are siblings.
+  MD024:
+    siblings_only: true
+
   # Line length: README has many long badge/link lines.
   MD013: false
 
