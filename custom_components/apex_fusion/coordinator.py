@@ -392,6 +392,7 @@ def parse_status_rest(status_obj: dict[str, Any]) -> dict[str, Any]:
             )
 
     # TODO(Trident): Consider exposing a Trident "test status" sensor (not just on/off).
+    # Issue URL: https://github.com/roblandry/apex-neptune-home-assistant/issues/3
     # The REST payload includes `modules[]` entries with `hwtype == "TRI"` and a human-readable
     # progress/status string at `modules[].extra.status` (example seen: "testing Ca/Mg").
     # A future implementation could:
