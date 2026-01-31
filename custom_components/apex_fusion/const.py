@@ -32,4 +32,5 @@ PLATFORMS: Final[list[Platform]] = [
     Platform.SENSOR,
     Platform.SELECT,
     Platform.BINARY_SENSOR,
+    Platform.UPDATE,
 ]

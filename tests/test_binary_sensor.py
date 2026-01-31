@@ -32,10 +32,14 @@ class _CoordinatorStub:
     data: dict[str, Any]
     last_update_success: bool = True
     device_identifier: str = "TEST"
+    listeners: list[Callable[[], None]] | None = None
 
     def async_add_listener(
         self, update_callback: Callable[[], None]
     ) -> Callable[[], None]:
+        if self.listeners is not None:
+            self.listeners.append(update_callback)
+
         # Immediately callable unsub.
         def _unsub() -> None:
             return None
@@ -52,17 +56,19 @@ async def test_binary_sensor_setup_and_updates(hass, enable_custom_integrations)
     )
     entry.add_to_hass(hass)
 
+    listeners: list[Callable[[], None]] = []
     coordinator = _CoordinatorStub(
         data={
             "meta": {"serial": "ABC"},
             "network": {"dhcp": True, "wifi_enable": 1},
-            "trident": {"is_testing": True},
+            "trident": {"present": True, "is_testing": True},
             "probes": {
                 "DI1": {"name": "Door_1", "type": "digital", "value": 0},
             },
         },
         last_update_success=True,
         device_identifier="ABC",
+        listeners=listeners,
     )
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
 
@@ -74,6 +80,11 @@ async def test_binary_sensor_setup_and_updates(hass, enable_custom_integrations)
     from custom_components.apex_fusion import binary_sensor
 
     await binary_sensor.async_setup_entry(hass, cast(Any, entry), _add_entities)
+
+    # Exercise platform listeners before entities are added to hass:
+    # - re-running should be idempotent and cover the guard branch.
+    for cb in list(listeners):
+        cb()
 
     assert len(added) == 4
 
@@ -135,7 +146,7 @@ async def test_binary_sensor_digital_probe_skips_and_fallbacks(
         data={
             "meta": {"serial": "ABC"},
             "network": {"dhcp": True, "wifi_enable": 1},
-            "trident": {"is_testing": False},
+            "trident": {"present": True, "is_testing": False},
             "probes": {
                 "": {"name": "EmptyKey", "type": "digital", "value": 0},
                 "DI_BAD": "nope",
@@ -164,7 +175,7 @@ async def test_binary_sensor_digital_probe_skips_and_fallbacks(
 
     await binary_sensor.async_setup_entry(hass, cast(Any, entry), _add_entities)
 
-    # 3 diagnostic entities + 2 valid digital probes (DI_BOOL, DI_RAW)
+    # 2 network diagnostic entities + Trident Testing + 2 valid digital probes
     assert len(added) == 5
 
     for ent in added:
@@ -192,7 +203,7 @@ async def test_binary_sensor_setup_with_non_dict_probes_still_adds_diagnostics(
         data={
             "meta": {"serial": "ABC"},
             "network": {"dhcp": True, "wifi_enable": 1},
-            "trident": {"is_testing": False},
+            "trident": {"present": False, "is_testing": False},
             "probes": "nope",
         },
         last_update_success=True,
@@ -209,5 +220,41 @@ async def test_binary_sensor_setup_with_non_dict_probes_still_adds_diagnostics(
 
     await binary_sensor.async_setup_entry(hass, cast(Any, entry), _add_entities)
 
-    # Only the 3 diagnostic entities should be added.
-    assert len(added) == 3
+    # Only the 2 network diagnostic entities should be added (no Trident present).
+    assert len(added) == 2
+
+
+async def test_binary_sensor_setup_with_non_dict_trident_adds_no_trident_testing(
+    hass, enable_custom_integrations
+):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "1.2.3.4"},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
+    )
+    entry.add_to_hass(hass)
+
+    coordinator = _CoordinatorStub(
+        data={
+            "meta": {"serial": "ABC"},
+            "network": {"dhcp": True, "wifi_enable": 1},
+            "trident": "nope",
+            "probes": {},
+        },
+        last_update_success=True,
+        device_identifier="ABC",
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
+    added: list[Any] = []
+
+    def _add_entities(new_entities, update_before_add: bool = False):
+        added.extend(list(new_entities))
+
+    from custom_components.apex_fusion import binary_sensor
+
+    await binary_sensor.async_setup_entry(hass, cast(Any, entry), _add_entities)
+
+    # Only the 2 network diagnostic entities should be added.
+    assert len(added) == 2

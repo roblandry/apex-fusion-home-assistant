@@ -144,6 +144,14 @@ async def test_rest_success_with_mconf_and_cookie(hass, enable_custom_integratio
         )
     )
 
+    # nconf payload (contains secrets in real life; ensure we sanitize what we store).
+    session.queue_get(
+        _Resp(
+            200,
+            '{"nconf": {"latestFirmware": "5.12_CA25", "updateFirmware": false, "password": "pw"}}',
+        )
+    )
+
     coord = await _make_coordinator(hass, host="1.2.3.4")
 
     with (
@@ -160,6 +168,178 @@ async def test_rest_success_with_mconf_and_cookie(hass, enable_custom_integratio
 
     assert data["meta"]["source"] == "rest"
     assert "mxm_devices" in data
+
+    config = data.get("config")
+    assert isinstance(config, dict)
+    assert config.get("nconf") == {
+        "latestFirmware": "5.12_CA25",
+        "updateFirmware": False,
+    }
+
+
+async def test_rest_trident_waste_size_from_mconf_and_nconf_404(
+    hass, enable_custom_integrations
+):
+    session = _Session()
+    session.queue_get(_Resp(401, "{}"))
+    session.queue_post(_Resp(200, "{}", cookies={"connect.sid": "abc"}))
+    session.queue_get(
+        _Resp(
+            200,
+            '{"nstat": {"ipaddr": "1.2.3.4"}, "system": {"serial": "ABC"}, "modules": [{"abaddr": 4, "hwtype": "TRI", "present": true, "swrev": 23, "extra": {"levels": [1,2,3,4,5]}}], "inputs": [], "outputs": []}',
+        )
+    )
+    session.queue_get(
+        _Resp(
+            200,
+            '{"mconf": [{"abaddr": 4, "hwtype": "TRI", "extra": {"wasteSize": 450.0}, "update": false, "updateStat": 0}]}',
+        )
+    )
+    # nconf missing -> coordinator should ignore.
+    session.queue_get(_Resp(404, "{}"))
+
+    coord = await _make_coordinator(hass, host="1.2.3.4")
+
+    with (
+        patch(
+            "custom_components.apex_fusion.coordinator.async_get_clientsession",
+            return_value=session,
+        ),
+        patch(
+            "custom_components.apex_fusion.coordinator.async_timeout.timeout",
+            return_value=_NullTimeout(),
+        ),
+    ):
+        data = await coord._async_update_data()
+
+    trident = data.get("trident")
+    assert isinstance(trident, dict)
+    assert trident.get("waste_size_ml") == 450.0
+
+
+async def test_rest_trident_mconf_tri_without_extra_does_not_set_waste_size(
+    hass, enable_custom_integrations
+):
+    session = _Session()
+    session.queue_get(_Resp(401, "{}"))
+    session.queue_post(_Resp(200, "{}", cookies={"connect.sid": "abc"}))
+    session.queue_get(
+        _Resp(
+            200,
+            '{"nstat": {"ipaddr": "1.2.3.4"}, "system": {"serial": "ABC"}, "modules": [{"abaddr": 4, "hwtype": "TRI", "present": true, "swrev": 23, "extra": {"levels": [1,2,3,4,5]}}], "inputs": [], "outputs": []}',
+        )
+    )
+    # TRI module present but no extra in sanitized mconf -> should hit continue branch.
+    session.queue_get(_Resp(200, '{"mconf": [{"abaddr": 4, "hwtype": "TRI"}]}'))
+    session.queue_get(_Resp(404, "{}"))
+
+    coord = await _make_coordinator(hass, host="1.2.3.4")
+
+    with (
+        patch(
+            "custom_components.apex_fusion.coordinator.async_get_clientsession",
+            return_value=session,
+        ),
+        patch(
+            "custom_components.apex_fusion.coordinator.async_timeout.timeout",
+            return_value=_NullTimeout(),
+        ),
+    ):
+        data = await coord._async_update_data()
+
+    trident = data.get("trident")
+    assert isinstance(trident, dict)
+    assert trident.get("waste_size_ml") is None
+
+
+async def test_rest_nconf_bad_json_and_unexpected_error_are_handled(
+    hass, enable_custom_integrations
+):
+    # First run: bad JSON -> JSONDecodeError path.
+    session = _Session()
+    session.queue_get(_Resp(401, "{}"))
+    session.queue_post(_Resp(200, "{}", cookies={"connect.sid": "abc"}))
+    session.queue_get(
+        _Resp(
+            200,
+            '{"nstat": {"ipaddr": "1.2.3.4"}, "system": {"serial": "ABC"}, "inputs": [], "outputs": []}',
+        )
+    )
+    session.queue_get(_Resp(200, '{"mconf": []}'))
+    session.queue_get(_Resp(200, "not-json"))
+
+    coord = await _make_coordinator(hass, host="1.2.3.4")
+    with (
+        patch(
+            "custom_components.apex_fusion.coordinator.async_get_clientsession",
+            return_value=session,
+        ),
+        patch(
+            "custom_components.apex_fusion.coordinator.async_timeout.timeout",
+            return_value=_NullTimeout(),
+        ),
+    ):
+        data = await coord._async_update_data()
+
+    assert data["meta"]["source"] == "rest"
+
+    # Second run: unexpected error from session.get -> generic Exception path.
+    session2 = _Session()
+    session2.queue_get(_Resp(401, "{}"))
+    session2.queue_post(_Resp(200, "{}", cookies={"connect.sid": "abc"}))
+    session2.queue_get(
+        _Resp(
+            200,
+            '{"nstat": {"ipaddr": "1.2.3.4"}, "system": {"serial": "ABC"}, "inputs": [], "outputs": []}',
+        )
+    )
+    session2.queue_get(_Resp(200, '{"mconf": []}'))
+    session2.queue_get(RuntimeError("boom"))
+
+    coord2 = await _make_coordinator(hass, host="1.2.3.4")
+    with (
+        patch(
+            "custom_components.apex_fusion.coordinator.async_get_clientsession",
+            return_value=session2,
+        ),
+        patch(
+            "custom_components.apex_fusion.coordinator.async_timeout.timeout",
+            return_value=_NullTimeout(),
+        ),
+    ):
+        data2 = await coord2._async_update_data()
+
+    assert data2["meta"]["source"] == "rest"
+
+
+async def test_rest_nconf_permission_error_is_handled(hass, enable_custom_integrations):
+    session = _Session()
+    session.queue_get(_Resp(401, "{}"))
+    session.queue_post(_Resp(200, "{}", cookies={"connect.sid": "abc"}))
+    session.queue_get(
+        _Resp(
+            200,
+            '{"nstat": {"ipaddr": "1.2.3.4"}, "system": {"serial": "ABC"}, "inputs": [], "outputs": []}',
+        )
+    )
+    session.queue_get(_Resp(200, '{"mconf": []}'))
+    session.queue_get(_Resp(403, "{}"))
+
+    coord = await _make_coordinator(hass, host="1.2.3.4")
+
+    with (
+        patch(
+            "custom_components.apex_fusion.coordinator.async_get_clientsession",
+            return_value=session,
+        ),
+        patch(
+            "custom_components.apex_fusion.coordinator.async_timeout.timeout",
+            return_value=_NullTimeout(),
+        ),
+    ):
+        data = await coord._async_update_data()
+
+    assert data["meta"]["source"] == "rest"
 
 
 async def test_rest_login_unauthorized_raises_auth_failed(

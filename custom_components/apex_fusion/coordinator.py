@@ -138,6 +138,93 @@ def _parse_mxm_devices_from_mconf(
     return out
 
 
+def _sanitize_mconf_for_storage(mconf_obj: dict[str, Any]) -> list[dict[str, Any]]:
+    """Sanitize `/rest/config/mconf` for storage.
+
+    The raw payload can include a lot of device metadata. For coordinator state,
+    only retain fields needed by this integration (module update flags, a small
+    subset of `extra`, and identity fields).
+    """
+
+    mconf_any: Any = mconf_obj.get("mconf")
+    if not isinstance(mconf_any, list):
+        return []
+
+    out: list[dict[str, Any]] = []
+    for module_any in cast(list[Any], mconf_any):
+        if not isinstance(module_any, dict):
+            continue
+        module = cast(dict[str, Any], module_any)
+
+        hwtype = str(module.get("hwtype") or module.get("hwType") or "").strip().upper()
+        if not hwtype:
+            continue
+
+        item: dict[str, Any] = {"hwtype": hwtype}
+
+        abaddr_any: Any = module.get("abaddr")
+        if isinstance(abaddr_any, int):
+            item["abaddr"] = abaddr_any
+
+        name_any: Any = module.get("name")
+        if isinstance(name_any, str) and name_any.strip():
+            item["name"] = name_any.strip()
+
+        update_any: Any = module.get("update")
+        if isinstance(update_any, bool):
+            item["update"] = update_any
+
+        update_stat_any: Any = module.get("updateStat")
+        if isinstance(update_stat_any, int):
+            item["updateStat"] = update_stat_any
+
+        extra_any: Any = module.get("extra")
+        if isinstance(extra_any, dict):
+            extra = cast(dict[str, Any], extra_any)
+            extra_out: dict[str, Any] = {}
+
+            # Trident waste container size (mL)
+            waste_any: Any = extra.get("wasteSize")
+            if hwtype in {"TRI", "TNP"} and isinstance(waste_any, (int, float)):
+                extra_out["wasteSize"] = float(waste_any)
+
+            # MXM uses a multiline status string listing attached devices.
+            status_any: Any = extra.get("status")
+            if hwtype == "MXM" and isinstance(status_any, str) and status_any.strip():
+                extra_out["status"] = status_any
+
+            if extra_out:
+                item["extra"] = extra_out
+
+        out.append(item)
+
+    return out
+
+
+def _sanitize_nconf_for_storage(nconf_obj: dict[str, Any]) -> dict[str, Any]:
+    """Sanitize `/rest/config/nconf` for storage.
+
+    This payload commonly includes credentials. Keep only update-related fields.
+    """
+
+    nconf_any: Any = nconf_obj.get("nconf")
+    if not isinstance(nconf_any, dict):
+        return {}
+
+    nconf = cast(dict[str, Any], nconf_any)
+    out: dict[str, Any] = {}
+
+    latest_any: Any = nconf.get("latestFirmware")
+    if isinstance(latest_any, str) and latest_any.strip():
+        out["latestFirmware"] = latest_any.strip()
+
+    flag_any: Any = nconf.get("updateFirmware")
+    if isinstance(flag_any, bool):
+        out["updateFirmware"] = flag_any
+
+    return out
+
+
 def _to_number(s: str | None) -> float | None:
     """Convert a string to a float if possible.
 
@@ -398,11 +485,125 @@ def parse_status_rest(status_obj: dict[str, Any]) -> dict[str, Any]:
             )
 
     def _parse_trident_from_modules() -> dict[str, Any]:
+        def _coerce_percent(value: Any) -> int | None:
+            if value is None:
+                return None
+            if isinstance(value, bool):
+                return None
+            if isinstance(value, (int, float)):
+                n = int(value)
+                return n if 0 <= n <= 100 else None
+            t = str(value).strip()
+            if not t:
+                return None
+            if t.endswith("%"):
+                t = t[:-1].strip()
+            if not t.isdigit():
+                return None
+            n = int(t)
+            return n if 0 <= n <= 100 else None
+
+        def _flatten(d: dict[str, Any], *, prefix: str = "") -> list[tuple[str, Any]]:
+            out: list[tuple[str, Any]] = []
+            for k, v in d.items():
+                key = f"{prefix}{k}" if not prefix else f"{prefix}_{k}"
+                if isinstance(v, dict):
+                    out.extend(_flatten(cast(dict[str, Any], v), prefix=key))
+                else:
+                    out.append((key, v))
+            return out
+
+        def _extract_consumables(extra: dict[str, Any]) -> dict[str, Any]:
+            reagent_a: int | None = None
+            reagent_b: int | None = None
+            reagent_c: int | None = None
+            waste_level: int | None = None
+
+            # Some firmwares may expose a single list/tuple for all reagents.
+            reagents_any: Any = extra.get("reagents")
+            if isinstance(reagents_any, (list, tuple)):
+                reagents_list: list[Any]
+                if isinstance(reagents_any, list):
+                    reagents_list = cast(list[Any], reagents_any)
+                else:
+                    reagents_list = list(cast(tuple[Any, ...], reagents_any))
+
+                if len(reagents_list) >= 3:
+                    reagent_a = _coerce_percent(reagents_list[0])
+                    reagent_b = _coerce_percent(reagents_list[1])
+                    reagent_c = _coerce_percent(reagents_list[2])
+
+            for key, value in _flatten(extra):
+                k = str(key).strip().lower().replace(" ", "_")
+                p = _coerce_percent(value)
+                if p is None:
+                    continue
+
+                if "reagent" in k:
+                    if reagent_a is None and (
+                        "reagenta" in k
+                        or "reagent_a" in k
+                        or "reagent1" in k
+                        or "reagent_1" in k
+                        or "reagent-1" in k
+                    ):
+                        reagent_a = p
+                        continue
+                    if reagent_b is None and (
+                        "reagentb" in k
+                        or "reagent_b" in k
+                        or "reagent2" in k
+                        or "reagent_2" in k
+                        or "reagent-2" in k
+                    ):
+                        reagent_b = p
+                        continue
+                    if reagent_c is None and (
+                        "reagentc" in k
+                        or "reagent_c" in k
+                        or "reagent3" in k
+                        or "reagent_3" in k
+                        or "reagent-3" in k
+                    ):
+                        reagent_c = p
+                        continue
+
+                if (
+                    waste_level is None
+                    and "waste" in k
+                    and any(token in k for token in ("level", "pct", "percent"))
+                ):
+                    waste_level = p
+
+            return {
+                "reagent_a_remaining": reagent_a,
+                "reagent_b_remaining": reagent_b,
+                "reagent_c_remaining": reagent_c,
+                "waste_container_level": waste_level,
+            }
+
         modules_any: Any = _find_field(status_obj, "modules")
         if not isinstance(modules_any, list):
-            return {"status": None, "is_testing": None}
+            return {
+                "present": False,
+                "status": None,
+                "is_testing": None,
+                "reagent_a_remaining": None,
+                "reagent_b_remaining": None,
+                "reagent_c_remaining": None,
+                "waste_container_level": None,
+                "levels_ml": None,
+            }
 
         best_status: str | None = None
+        present = False
+        levels_ml: list[float] | None = None
+        consumables: dict[str, Any] = {
+            "reagent_a_remaining": None,
+            "reagent_b_remaining": None,
+            "reagent_c_remaining": None,
+            "waste_container_level": None,
+        }
         for module_any in cast(list[Any], modules_any):
             if not isinstance(module_any, dict):
                 continue
@@ -417,18 +618,41 @@ def parse_status_rest(status_obj: dict[str, Any]) -> dict[str, Any]:
                 .strip()
                 .upper()
             )
-            if hwtype != "TRI":
+            if hwtype not in {"TRI", "TNP"}:
                 continue
             extra_any: Any = module.get("extra")
             if not isinstance(extra_any, dict):
                 continue
             extra = cast(dict[str, Any], extra_any)
+
+            present_any: Any = module.get("present")
+            present = bool(present_any) if isinstance(present_any, bool) else True
+
+            # Newer firmwares expose Trident container levels as a list of numbers.
+            levels_any: Any = extra.get("levels")
+            if isinstance(levels_any, list):
+                parsed_levels: list[float] = []
+                for item_any in cast(list[Any], levels_any):
+                    if item_any is None or isinstance(item_any, bool):
+                        continue
+                    if isinstance(item_any, (int, float)):
+                        parsed_levels.append(float(item_any))
+                        continue
+                    if isinstance(item_any, str):
+                        n = _to_number(item_any)
+                        if n is not None:
+                            parsed_levels.append(n)
+                levels_ml = parsed_levels or None
+
+            # Parse consumables even when status is missing.
+            consumables = _extract_consumables(extra)
+
             status_any: Any = extra.get("status")
             if not isinstance(status_any, str):
-                continue
+                break
             status = status_any.strip()
             if not status:
-                continue
+                break
 
             # Some firmwares return simple statuses like "idle"/"ok".
             # Normalize those to sentence-case while preserving mixed-content
@@ -444,11 +668,23 @@ def parse_status_rest(status_obj: dict[str, Any]) -> dict[str, Any]:
             break
 
         if best_status is None:
-            return {"status": None, "is_testing": None}
+            return {
+                "present": present,
+                "status": None,
+                "is_testing": None,
+                "levels_ml": levels_ml,
+                **consumables,
+            }
 
         lower = best_status.lower()
         is_testing = "testing" in lower
-        return {"status": best_status, "is_testing": is_testing}
+        return {
+            "present": present,
+            "status": best_status,
+            "is_testing": is_testing,
+            "levels_ml": levels_ml,
+            **consumables,
+        }
 
     def _parse_last_alert_statement() -> dict[str, Any]:
         # The Apex REST payload format for alerts/notifications varies by firmware.
@@ -1040,6 +1276,36 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                         json.loads(mconf_text) if mconf_text else {}
                                     )
                                     if isinstance(mconf_any, dict):
+                                        # Persist a sanitized subset of the config (avoid storing secrets).
+                                        data.setdefault("config", {})["mconf"] = (
+                                            _sanitize_mconf_for_storage(
+                                                cast(dict[str, Any], mconf_any)
+                                            )
+                                        )
+
+                                        # Extract Trident waste container size if present.
+                                        trident_any: Any = data.get("trident")
+                                        if isinstance(trident_any, dict):
+                                            for m in cast(
+                                                list[dict[str, Any]],
+                                                data["config"].get("mconf") or [],
+                                            ):
+                                                if str(
+                                                    m.get("hwtype") or ""
+                                                ).strip().upper() not in {"TRI", "TNP"}:
+                                                    continue
+                                                extra_any: Any = m.get("extra")
+                                                if not isinstance(extra_any, dict):
+                                                    continue
+                                                waste_any: Any = cast(
+                                                    dict[str, Any], extra_any
+                                                ).get("wasteSize")
+                                                if isinstance(waste_any, (int, float)):
+                                                    cast(dict[str, Any], trident_any)[
+                                                        "waste_size_ml"
+                                                    ] = float(waste_any)
+                                                    break
+
                                         mxm_devices = _parse_mxm_devices_from_mconf(
                                             cast(dict[str, Any], mconf_any)
                                         )
@@ -1056,6 +1322,48 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 except Exception as err:
                                     _LOGGER.debug(
                                         "Unexpected REST mconf error: %s", err
+                                    )
+
+                                # Optional: fetch network config for controller update flags.
+                                try:
+                                    nconf_url = f"{base_url}/rest/config/nconf"
+                                    _LOGGER.debug(
+                                        "Trying REST nconf update: %s", nconf_url
+                                    )
+                                    async with async_timeout.timeout(timeout_seconds):
+                                        async with session.get(
+                                            nconf_url,
+                                            headers=_cookie_headers(self._rest_sid),
+                                        ) as resp:
+                                            if resp.status == 404:
+                                                raise FileNotFoundError
+                                            if resp.status in (401, 403):
+                                                raise PermissionError
+                                            resp.raise_for_status()
+                                            nconf_text = await resp.text()
+
+                                    nconf_any: Any = (
+                                        json.loads(nconf_text) if nconf_text else {}
+                                    )
+                                    if isinstance(nconf_any, dict):
+                                        sanitized = _sanitize_nconf_for_storage(
+                                            cast(dict[str, Any], nconf_any)
+                                        )
+                                        if sanitized:
+                                            data.setdefault("config", {})["nconf"] = (
+                                                sanitized
+                                            )
+                                except (FileNotFoundError, PermissionError):
+                                    pass
+                                except (
+                                    asyncio.TimeoutError,
+                                    aiohttp.ClientError,
+                                    json.JSONDecodeError,
+                                ) as err:
+                                    _LOGGER.debug("REST nconf fetch failed: %s", err)
+                                except Exception as err:
+                                    _LOGGER.debug(
+                                        "Unexpected REST nconf error: %s", err
                                     )
 
                                 return self._apply_serial_cache(data)

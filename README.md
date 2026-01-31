@@ -17,8 +17,12 @@ Home Assistant custom integration for local (LAN) polling of an Apex controller.
 ## Features
 
 - REST-first polling with legacy (CGI) fallback
-- Entities for common Apex/EB832 outlets and sensors
 - Config flow (UI setup)
+- Input/probe sensors (Temp, pH, Cond, Trident results, etc)
+- Digital inputs as binary sensors (leak/float switches, etc)
+- Output control via 3-way selects (Off / Auto / On)
+- Firmware update entities (controller + modules)
+- Trident reagent + waste container level sensors (mL)
 - Designed for stable device identity and robust backoff on rate limiting
 
 ## Installation
@@ -52,10 +56,29 @@ Add the integration from Home Assistant UI:
    > Recommend using `admin` user with default password of `1234` or changing the password.
    > It is known that the user logged in will log out any users using the local webpages.
 
-## Notes
+## Entities
 
-Outputs are exposed as 3 way selects. They have attributes that can be used in UI.
-ex.
+This integration provides entities across these Home Assistant platforms:
+
+- **Sensors**
+  - Probes/inputs from the controller (temperature, pH, conductivity, Trident readings, etc)
+  - Trident container levels from `status.modules[].extra.levels` (mL)
+    - Trident Waste Used (mL)
+    - Trident Reagent A/B/C Remaining (mL)
+    - Trident Auxiliary Level (mL)
+- **Binary sensors**
+  - Digital inputs (leak/float switches)
+  - Trident Testing (when a Trident is present)
+- **Selects**
+  - One select per controllable output: Off / Auto / On
+  - Sends control via the local REST API (`PUT /rest/status/outputs/<did>`)
+- **Updates**
+  - Controller firmware update entity, named by controller type (example: `AC6J Firmware`)
+  - Module firmware update entities (FMM, PM2, VDM, TRI, etc)
+
+### Entity attributes (examples)
+
+Select entities expose useful attributes for dashboards/automations:
 
 ```yaml
 state: Auto
@@ -81,13 +104,12 @@ effective_state: On
 output_id: 21
 type: serial
 gid: null
-status: AON, 100, OK, 
+status: AON, 100, OK,
 icon: mdi:power-socket-us
 friendly_name: 80g_Frag_Tank WhtLED 6 6
 ```
 
-Binary sensors have the following attributes
-ex.
+Binary sensors have attributes like:
 
 ```yaml
 state: off
@@ -98,7 +120,7 @@ icon: mdi:toggle-switch-outline
 friendly_name: 80g_Frag_Tank Level
 ```
 
-Sensors have the following attributes
+Sensors have attributes like:
 
 ```yaml
 state: 33.6
@@ -108,23 +130,51 @@ icon: mdi:flash
 friendly_name: 80g_Frag_Tank Cond
 ```
 
-The following diagnostic information is also exposed
-ex.
+Diagnostic sensors expose network/controller state (examples):
 
 ```yaml
 DHCP Enabled: On
 Gateway: 10.0.30.1
 IP Address: 10.0.30.40
 Last Alert Statement: Unknown
-Latest Firmware: 5.12_CA25
 Netmask: 255.255.255.0
-Trident Status: Idle
-Trident Testing: Off
 Wi-Fi Enabled: On
 Wi-Fi Quality: 99.0%
 Wi-Fi SSID: MySSID-IoT-2.4
 Wi-Fi Strength: 100.0%
 ```
+
+## Firmware Updates
+
+Home Assistant has a first-class Update platform; this integration exposes firmware
+updates there.
+
+> Important: The Update entities are **informational only**. This integration does not
+> initiate or install firmware updates. Apply firmware updates using Neptune’s own
+> workflow (Fusion/app/controller UI).
+
+- **Controller update** uses controller-reported values (prefers `/rest/config/nconf` when
+  available, otherwise `/rest/status`):
+  - Installed version from `system.software`
+  - Latest version from `nconf.latestFirmware` / `nstat.latestFirmware`
+  - Update flag from `nconf.updateFirmware` / `nstat.updateFirmware`
+- **Module update** support varies by firmware. This integration uses (in priority order):
+  - Module config flags from `/rest/config/mconf` when present
+  - Module status signals from `/rest/status.modules[]` (`swrev` and `swstat`)
+
+If a module doesn't report a concrete latest version, the integration will still surface
+useful state:
+
+- `swstat: OK` -> assumes up-to-date (latest == installed)
+- `swstat: UPDATE` -> reports update available even if no version string is provided
+
+## Trident Support
+
+When a Trident module is present (`hwtype: TRI`), the integration exposes:
+
+- Trident Status sensor
+- Trident Testing binary sensor
+- Trident container levels (mL) from `modules[].extra.levels`
 
 ## Development
 

@@ -134,12 +134,6 @@ async def async_setup_entry(
             icon="mdi:wifi",
             value_fn=_network_bool("wifi_enable"),
         ),
-        _BinaryRef(
-            key="trident_testing",
-            name="Trident Testing",
-            icon="mdi:test-tube",
-            value_fn=_trident_is_testing,
-        ),
     ]
 
     entities: list[BinarySensorEntity] = [
@@ -184,6 +178,34 @@ async def async_setup_entry(
     entry.async_on_unload(remove)
 
     async_add_entities(entities)
+
+    added_trident_testing = False
+
+    def _add_trident_testing_entity() -> None:
+        nonlocal added_trident_testing
+        if added_trident_testing:
+            return
+
+        data = coordinator.data or {}
+        trident_any: Any = data.get("trident")
+        if not isinstance(trident_any, dict):
+            return
+        trident = cast(dict[str, Any], trident_any)
+        if not trident.get("present"):
+            return
+
+        ref = _BinaryRef(
+            key="trident_testing",
+            name="Trident Testing",
+            icon="mdi:test-tube",
+            value_fn=_trident_is_testing,
+        )
+        async_add_entities([ApexBinarySensor(coordinator, entry, ref=ref)])
+        added_trident_testing = True
+
+    _add_trident_testing_entity()
+    remove_trident = coordinator.async_add_listener(_add_trident_testing_entity)
+    entry.async_on_unload(remove_trident)
 
 
 class ApexDigitalProbeBinarySensor(BinarySensorEntity):
@@ -326,3 +348,26 @@ class ApexDiagnosticBinarySensor(BinarySensorEntity):
             self._coordinator.async_add_listener(self._handle_coordinator_update)
         )
         self._handle_coordinator_update()
+
+
+class ApexBinarySensor(ApexDiagnosticBinarySensor):
+    """Binary sensor exposing non-diagnostic controller state."""
+
+    _attr_entity_category = None
+
+    def __init__(
+        self,
+        coordinator: ApexNeptuneDataUpdateCoordinator,
+        entry: ConfigEntry,
+        *,
+        ref: _BinaryRef,
+    ) -> None:
+        super().__init__(coordinator, entry, ref=ref)
+
+        host = str(entry.data.get(CONF_HOST, ""))
+        meta_any: Any = (coordinator.data or {}).get("meta", {})
+        meta = cast(dict[str, Any], meta_any) if isinstance(meta_any, dict) else {}
+        serial = str(meta.get("serial") or host or "apex").replace(":", "_")
+
+        # Use a distinct unique_id prefix so entity ids differ from diagnostics.
+        self._attr_unique_id = f"{serial}_bool_{ref.key}".lower()

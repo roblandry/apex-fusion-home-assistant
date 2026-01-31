@@ -23,6 +23,7 @@ from homeassistant.const import (
     EntityCategory,
     UnitOfElectricCurrent,
     UnitOfTemperature,
+    UnitOfVolume,
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
@@ -250,19 +251,6 @@ def _network_field(field: str) -> Callable[[dict[str, Any]], Any]:
     return _get
 
 
-def _meta_field(field: str) -> Callable[[dict[str, Any]], Any]:
-    """Return a function that extracts a meta field from coordinator data."""
-
-    def _get(data: dict[str, Any]) -> Any:
-        meta_any = data.get("meta")
-        if isinstance(meta_any, dict):
-            meta = cast(dict[str, Any], meta_any)
-            return meta.get(field)
-        return None
-
-    return _get
-
-
 def _section_field(section: str, field: str) -> Callable[[dict[str, Any]], Any]:
     """Return a function that extracts a field from a nested section dict."""
 
@@ -272,6 +260,25 @@ def _section_field(section: str, field: str) -> Callable[[dict[str, Any]], Any]:
             section_dict = cast(dict[str, Any], section_any)
             return section_dict.get(field)
         return None
+
+    return _get
+
+
+def _trident_level_ml(index: int) -> Callable[[dict[str, Any]], Any]:
+    """Return a function that extracts a Trident container level by index."""
+
+    def _get(data: dict[str, Any]) -> Any:
+        trident_any: Any = data.get("trident")
+        if not isinstance(trident_any, dict):
+            return None
+        trident = cast(dict[str, Any], trident_any)
+        levels_any: Any = trident.get("levels_ml")
+        if not isinstance(levels_any, list):
+            return None
+        levels = cast(list[Any], levels_any)
+        if index < 0 or index >= len(levels):
+            return None
+        return levels[index]
 
     return _get
 
@@ -403,19 +410,33 @@ async def async_setup_entry(
             ApexDiagnosticSensor(
                 coordinator,
                 entry,
-                unique_id=f"{serial_for_ids}_diag_latest_firmware".lower(),
-                name="Latest Firmware",
-                icon="mdi:update",
-                value_fn=_meta_field("firmware_latest"),
-            ),
-            ApexDiagnosticSensor(
-                coordinator,
-                entry,
                 unique_id=f"{serial_for_ids}_diag_last_alert_statement".lower(),
                 name="Last Alert Statement",
                 icon="mdi:alert-circle-outline",
                 value_fn=_section_field("alerts", "last_statement"),
             ),
+        ]
+    )
+
+    if diagnostic_entities:
+        async_add_entities(diagnostic_entities)
+
+    added_trident_diags = False
+
+    def _add_trident_diagnostics() -> None:
+        nonlocal added_trident_diags
+        if added_trident_diags:
+            return
+
+        data = coordinator.data or {}
+        trident_any: Any = data.get("trident")
+        if not isinstance(trident_any, dict):
+            return
+        trident = cast(dict[str, Any], trident_any)
+        if not trident.get("present"):
+            return
+
+        new_entities: list[SensorEntity] = [
             ApexDiagnosticSensor(
                 coordinator,
                 entry,
@@ -423,12 +444,58 @@ async def async_setup_entry(
                 name="Trident Status",
                 icon="mdi:flask-outline",
                 value_fn=_section_field("trident", "status"),
-            ),
+                entity_category=None,
+            )
         ]
-    )
 
-    if diagnostic_entities:
-        async_add_entities(diagnostic_entities)
+        # Trident exposes `extra.levels` as a 5-element list.
+        # Best-known mapping (see: itchannel/apex-ha#51):
+        # - index 0: waste used (counts up, resets to 0)
+        # - indices 2-4: reagent C/B/A remaining in mL (count down, reset to ~250)
+        # - index 1: unknown/aux value (varies by firmware)
+        levels_any: Any = trident.get("levels_ml")
+        if isinstance(levels_any, list):
+            levels = cast(list[Any], levels_any)
+            for i in range(len(levels)):
+                name = f"Trident Container {i + 1} Level"
+                icon = "mdi:beaker-outline"
+                state_class: SensorStateClass | None = SensorStateClass.TOTAL
+
+                if i == 0:
+                    name = "Trident Waste Used"
+                    icon = "mdi:trash-can-outline"
+                    state_class = SensorStateClass.TOTAL_INCREASING
+                elif i == 1:
+                    name = "Trident Auxiliary Level"
+                elif i == 2:
+                    name = "Trident Reagent C Remaining"
+                elif i == 3:
+                    name = "Trident Reagent B Remaining"
+                elif i == 4:
+                    name = "Trident Reagent A Remaining"
+
+                new_entities.append(
+                    ApexDiagnosticSensor(
+                        coordinator,
+                        entry,
+                        unique_id=f"{serial_for_ids}_diag_trident_container_{i + 1}_level".lower(),
+                        name=name,
+                        icon=icon,
+                        native_unit=UnitOfVolume.MILLILITERS,
+                        device_class=SensorDeviceClass.VOLUME,
+                        state_class=state_class,
+                        value_fn=_trident_level_ml(i),
+                        entity_category=None,
+                    )
+                )
+
+        if new_entities:
+            async_add_entities(new_entities)
+            added_trident_diags = True
+
+    _add_trident_diagnostics()
+    remove_trident = coordinator.async_add_listener(_add_trident_diagnostics)
+    entry.async_on_unload(remove_trident)
 
 
 def build_device_info(
@@ -555,6 +622,9 @@ class ApexDiagnosticSensor(SensorEntity):
         value_fn: Callable[[dict[str, Any]], Any],
         native_unit: str | None = None,
         icon: str | None = None,
+        device_class: SensorDeviceClass | None = None,
+        state_class: SensorStateClass | None = None,
+        entity_category: EntityCategory | None = EntityCategory.DIAGNOSTIC,
     ) -> None:
         """Initialize the diagnostic sensor.
 
@@ -578,6 +648,9 @@ class ApexDiagnosticSensor(SensorEntity):
         self._attr_name = name
         self._attr_native_unit_of_measurement = native_unit
         self._attr_icon = icon
+        self._attr_device_class = device_class
+        self._attr_state_class = state_class
+        self._attr_entity_category = entity_category
         self._attr_device_info = build_device_info(
             host=host,
             meta=meta,
@@ -595,6 +668,12 @@ class ApexDiagnosticSensor(SensorEntity):
         value = self._value_fn(data)
         if value is None:
             return None
+        # For numeric diagnostics (percentage, volumes, etc.), prefer native numeric
+        # values so HA can handle units/statistics.
+        if self._attr_native_unit_of_measurement is not None:
+            numeric = _as_float(value)
+            if numeric is not None:
+                return cast(StateType, numeric)
         if self._attr_native_unit_of_measurement == PERCENTAGE:
             return _as_float(value)
         return str(value)

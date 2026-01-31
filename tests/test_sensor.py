@@ -17,10 +17,14 @@ class _CoordinatorStub:
     data: dict[str, Any]
     last_update_success: bool = True
     device_identifier: str = "TEST"
+    listeners: list[Callable[[], None]] | None = None
 
     def async_add_listener(
         self, update_callback: Callable[[], None]
     ) -> Callable[[], None]:
+        if self.listeners is not None:
+            self.listeners.append(update_callback)
+
         def _unsub() -> None:
             return None
 
@@ -117,14 +121,46 @@ def test_sensor_helpers_cover_all_branches():
 
     # network/meta field helpers
     nf = sensor._network_field("ipaddr")
-    mf = sensor._meta_field("firmware_latest")
     assert nf({"network": {"ipaddr": "1.2.3.4"}}) == "1.2.3.4"
     assert nf({"network": "nope"}) is None
-    assert mf({"meta": {"firmware_latest": "1.0"}}) == "1.0"
-    assert mf({"meta": "nope"}) is None
     sf = sensor._section_field("alerts", "last_statement")
     assert sf({"alerts": "nope"}) is None
     assert sf({"alerts": {"last_statement": "x"}}) == "x"
+
+
+def test_trident_level_ml_helper_covers_branches():
+    from custom_components.apex_fusion import sensor
+
+    get0 = sensor._trident_level_ml(0)
+    get1 = sensor._trident_level_ml(1)
+
+    assert get0({}) is None
+    assert get0({"trident": "nope"}) is None
+    assert get0({"trident": {"levels_ml": "nope"}}) is None
+    assert get0({"trident": {"levels_ml": []}}) is None
+    assert get0({"trident": {"levels_ml": [1.0]}}) == 1.0
+    assert get1({"trident": {"levels_ml": [1.0]}}) is None
+    assert sensor._trident_level_ml(-1)({"trident": {"levels_ml": [1.0]}}) is None
+
+
+def test_diagnostic_sensor_percentage_fallback_branch():
+    from custom_components.apex_fusion import sensor
+
+    coordinator = _CoordinatorStub(data={"meta": {"serial": "ABC"}})
+    entry = cast(Any, MockConfigEntry(domain=DOMAIN, data={CONF_HOST: "1.2.3.4"}))
+
+    ent = sensor.ApexDiagnosticSensor(
+        cast(Any, coordinator),
+        entry,
+        unique_id="abc_diag_bad_pct",
+        name="Bad Pct",
+        icon=None,
+        native_unit=PERCENTAGE,
+        value_fn=lambda _data: "nope",
+    )
+
+    # native_unit is percentage but value is non-numeric -> explicit percentage path returns None
+    assert ent.native_value is None
 
 
 async def test_sensor_setup_creates_entities_and_updates(
@@ -138,10 +174,16 @@ async def test_sensor_setup_creates_entities_and_updates(
     )
     entry.add_to_hass(hass)
 
+    listeners: list[Callable[[], None]] = []
     coordinator = _CoordinatorStub(
         data={
             "meta": {"serial": "ABC", "firmware_latest": "9.99", "hostname": "apex"},
             "network": {"ipaddr": "1.2.3.4", "strength": "75", "quality": 80},
+            "trident": {
+                "present": True,
+                "status": "Idle",
+                "levels_ml": [232.7, 159.2, 226.63, 226.92, 222.94],
+            },
             "probes": {
                 "": {"name": "", "type": "Tmp", "value": "25", "value_raw": None},
                 "T1": {"name": "Tmp", "type": "Tmp", "value": "25", "value_raw": None},
@@ -170,6 +212,7 @@ async def test_sensor_setup_creates_entities_and_updates(
             "mxm_devices": {"Nero_5_F": {"rev": "1", "serial": "S", "status": "OK"}},
         },
         last_update_success=True,
+        listeners=listeners,
     )
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
 
@@ -181,6 +224,11 @@ async def test_sensor_setup_creates_entities_and_updates(
     from custom_components.apex_fusion import sensor
 
     await sensor.async_setup_entry(hass, cast(Any, entry), _add_entities)
+
+    # Exercise platform listeners before entities are added to hass:
+    # - re-running the callback should be idempotent and cover the guard branch.
+    for cb in list(listeners):
+        cb()
 
     # Probes + diagnostics
     assert len(added) >= 3
@@ -194,6 +242,19 @@ async def test_sensor_setup_creates_entities_and_updates(
     # "DI1" is digital and excluded from sensor platform; "BAD" is invalid but is still
     # represented as a probe entity to exercise error-tolerant behavior.
     assert len(probe_entities) == 3
+
+    trident_diags = [e for e in added if isinstance(e, sensor.ApexDiagnosticSensor)]
+    waste = next(
+        (e for e in trident_diags if e._attr_name == "Trident Waste Used"), None
+    )
+    assert waste is not None
+    assert waste.entity_category is None
+    assert waste._attr_device_class == sensor.SensorDeviceClass.VOLUME
+    assert waste._attr_state_class == sensor.SensorStateClass.TOTAL_INCREASING
+
+    status = next((e for e in trident_diags if e._attr_name == "Trident Status"), None)
+    assert status is not None
+    assert status.entity_category is None
 
     # Update probe values to hit coercion/branches.
     coordinator.data["probes"]["T1"]["value"] = 26
@@ -219,6 +280,43 @@ async def test_sensor_setup_creates_entities_and_updates(
             await ent.async_will_remove_from_hass()
 
 
+async def test_sensor_setup_trident_not_dict_is_ignored(
+    hass, enable_custom_integrations
+):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "1.2.3.4"},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
+    )
+    entry.add_to_hass(hass)
+
+    coordinator = _CoordinatorStub(
+        data={
+            "meta": {"serial": "ABC", "firmware_latest": "9.99", "hostname": "apex"},
+            "network": {"ipaddr": "1.2.3.4"},
+            "trident": "nope",
+            "probes": {},
+            "outlets": [],
+            "mxm_devices": {},
+        },
+        last_update_success=True,
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
+    added: list[Any] = []
+
+    def _add_entities(new_entities, update_before_add: bool = False):
+        added.extend(list(new_entities))
+
+    from custom_components.apex_fusion import sensor
+
+    await sensor.async_setup_entry(hass, cast(Any, entry), _add_entities)
+
+    # Trident is not a dict -> no Trident entities should be created.
+    assert all(getattr(e, "_attr_name", "") not in {"Trident Status"} for e in added)
+
+
 async def test_sensor_setup_without_network_or_firmware_adds_no_diagnostics(
     hass, enable_custom_integrations
 ):
@@ -234,6 +332,7 @@ async def test_sensor_setup_without_network_or_firmware_adds_no_diagnostics(
         data={
             "meta": {"serial": "ABC"},
             "network": {},
+            "trident": {"present": False},
             "probes": {},
             "outlets": [],
         },
@@ -252,7 +351,7 @@ async def test_sensor_setup_without_network_or_firmware_adds_no_diagnostics(
 
     # Diagnostic entities are always created (even if values are None) so they
     # don't disappear when the first poll falls back to legacy data.
-    assert len(added) == 9
+    assert len(added) == 7
 
 
 async def test_sensor_simple_rest_debug_mode_creates_one_entity_and_updates(

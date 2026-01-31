@@ -70,6 +70,48 @@ def test_parse_mxm_devices_from_mconf_variants():
     assert coordinator._parse_mxm_devices_from_mconf(mconf2) == {}
 
 
+def test_sanitize_config_helpers_cover_branches():
+    assert coordinator._sanitize_mconf_for_storage({"mconf": "nope"}) == []
+
+    out = coordinator._sanitize_mconf_for_storage(
+        {
+            "mconf": [
+                "nope",
+                {},
+                {"hwtype": "", "abaddr": 1},
+                {
+                    "abaddr": 4,
+                    "hwtype": "TRI",
+                    "name": "TRI_4",
+                    "update": False,
+                    "updateStat": 0,
+                    "extra": {"wasteSize": 450.0},
+                },
+                {
+                    "hwtype": "MXM",
+                    "extra": {"status": "Nero 5(x) - Rev 1 Ser #: S1 - OK"},
+                },
+            ]
+        }
+    )
+    assert any(m.get("hwtype") == "TRI" for m in out)
+    tri = next(m for m in out if m.get("hwtype") == "TRI")
+    assert tri["extra"]["wasteSize"] == 450.0
+    mxm = next(m for m in out if m.get("hwtype") == "MXM")
+    assert "status" in mxm["extra"]
+
+    assert coordinator._sanitize_nconf_for_storage({"nconf": "nope"}) == {}
+    assert coordinator._sanitize_nconf_for_storage(
+        {
+            "nconf": {
+                "latestFirmware": "5.12_CA25",
+                "updateFirmware": False,
+                "password": "pw",
+            }
+        }
+    ) == {"latestFirmware": "5.12_CA25", "updateFirmware": False}
+
+
 def test_to_number_and_url_builders():
     assert coordinator._to_number(None) is None
     assert coordinator._to_number("") is None
@@ -139,7 +181,18 @@ def test_parse_status_xml_and_rest_and_cgi_json():
         ],
         "modules": [
             {"hwtype": "EB832", "extra": {"status": "ignored"}},
-            {"hwtype": "TRI", "extra": {"status": "testing Ca/Mg"}},
+            {
+                "hwtype": "TRI",
+                "present": True,
+                "extra": {
+                    "status": "testing Ca/Mg",
+                    "reagentA": "75%",
+                    "reagentB": 50,
+                    "reagentC": "25",
+                    "wasteLevel": "10",
+                    "levels": ["232.7", True, None, 159.2],
+                },
+            },
         ],
         "notifications": [
             {"statement": "pH is less than 7.8"},
@@ -152,6 +205,12 @@ def test_parse_status_xml_and_rest_and_cgi_json():
     assert rest_parsed["outlets"][0]["device_id"] == "O1"
     assert rest_parsed["trident"]["status"] == "testing Ca/Mg"
     assert rest_parsed["trident"]["is_testing"] is True
+    assert rest_parsed["trident"]["present"] is True
+    assert rest_parsed["trident"]["reagent_a_remaining"] == 75
+    assert rest_parsed["trident"]["reagent_b_remaining"] == 50
+    assert rest_parsed["trident"]["reagent_c_remaining"] == 25
+    assert rest_parsed["trident"]["waste_container_level"] == 10
+    assert rest_parsed["trident"]["levels_ml"] == [232.7, 159.2]
     assert rest_parsed["alerts"]["last_statement"] == "pH is less than 7.8"
 
     # Nested containers + int IDs + fallback from inputs->probes and outputs->outlets.
@@ -168,7 +227,9 @@ def test_parse_status_xml_and_rest_and_cgi_json():
                     "status": "AON",  # non-list -> status None
                 }
             ],
-            "modules": [{"hwtype": "TRI", "extra": {"status": "idle"}}],
+            "modules": [
+                {"hwtype": "TRI", "present": True, "extra": {"status": "idle"}}
+            ],
             "alerts": ["Apex Fusion Alarm: X Statement: Alk is low"],
         }
     }
@@ -178,6 +239,7 @@ def test_parse_status_xml_and_rest_and_cgi_json():
     assert rest_nested_parsed["outlets"][0]["status"] is None
     assert rest_nested_parsed["trident"]["status"] == "Idle"
     assert rest_nested_parsed["trident"]["is_testing"] is False
+    assert rest_nested_parsed["trident"]["present"] is True
     assert rest_nested_parsed["alerts"]["last_statement"] == "Alk is low"
 
     cgi_obj = {
@@ -233,6 +295,62 @@ def test_parse_status_xml_and_rest_and_cgi_json():
 def test_parse_status_rest_with_non_dict_sections():
     out = coordinator.parse_status_rest({"nstat": "x", "system": "y"})
     assert out["meta"]["source"] == "rest"
+
+
+def test_parse_status_rest_trident_consumables_variants():
+    rest_obj = {
+        "system": {"serial": "ABC"},
+        "modules": [
+            {
+                "hwtype": "TRI",
+                "extra": {
+                    # Non-string status should not prevent consumables parsing.
+                    "status": 1,
+                    # Tuple path
+                    "reagents": (10, "20%", 30),
+                    # Nested dict path for flattening
+                    "nested": {"waste_percent": "40%"},
+                    # Edge cases for percent coercion
+                    "reagentA": True,
+                    "reagentB": None,
+                    "wasteLevel": "",
+                    "reagentC": "nope",
+                    "reagent_2": "999",
+                },
+            }
+        ],
+    }
+
+    out = coordinator.parse_status_rest(rest_obj)
+    assert out["trident"]["status"] is None
+    assert out["trident"]["is_testing"] is None
+    assert out["trident"]["reagent_a_remaining"] == 10
+    assert out["trident"]["reagent_b_remaining"] == 20
+    assert out["trident"]["reagent_c_remaining"] == 30
+    assert out["trident"]["waste_container_level"] == 40
+
+
+def test_parse_status_rest_trident_consumables_reagents_list_and_empty_status():
+    rest_obj = {
+        "system": {"serial": "ABC"},
+        "modules": [
+            {
+                "hwtype": "TRI",
+                "extra": {
+                    "status": " ",
+                    "reagents": [11, 22, 33],
+                    "waste_pct": "44%",
+                },
+            }
+        ],
+    }
+
+    out = coordinator.parse_status_rest(rest_obj)
+    assert out["trident"]["status"] is None
+    assert out["trident"]["reagent_a_remaining"] == 11
+    assert out["trident"]["reagent_b_remaining"] == 22
+    assert out["trident"]["reagent_c_remaining"] == 33
+    assert out["trident"]["waste_container_level"] == 44
 
 
 def test_parse_status_cgi_json_with_non_dict_istat():
