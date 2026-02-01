@@ -113,6 +113,52 @@ class InvalidAuth(HomeAssistantError):
     """Error to indicate there is invalid auth."""
 
 
+def _coerce_serial(candidate: Any) -> str | None:
+    if isinstance(candidate, str) and candidate.strip():
+        return candidate.strip()
+    if isinstance(candidate, int):
+        return str(candidate)
+    return None
+
+
+def _extract_serial_from_status_obj(status_obj: dict[str, Any]) -> str | None:
+    """Best-effort serial extraction from various status JSON shapes."""
+
+    def _maybe_from_dict(d: dict[str, Any]) -> str | None:
+        for k in ("serial", "serialNo", "serialNO", "serial_number"):
+            s = _coerce_serial(d.get(k))
+            if s:
+                return s
+        system_any: Any = d.get("system")
+        if isinstance(system_any, dict):
+            s = _coerce_serial(cast(dict[str, Any], system_any).get("serial"))
+            if s:
+                return s
+        istat_any: Any = d.get("istat")
+        if isinstance(istat_any, dict):
+            istat = cast(dict[str, Any], istat_any)
+            for k in ("serial", "serialNo", "serialNO", "serial_number"):
+                s = _coerce_serial(istat.get(k))
+                if s:
+                    return s
+        return None
+
+    # Direct fields.
+    s = _maybe_from_dict(status_obj)
+    if s:
+        return s
+
+    # Common nesting patterns.
+    for container_key in ("data", "status", "result", "systat"):
+        container_any: Any = status_obj.get(container_key)
+        if isinstance(container_any, dict):
+            s = _maybe_from_dict(cast(dict[str, Any], container_any))
+            if s:
+                return s
+
+    return None
+
+
 async def _async_validate_input(
     hass: HomeAssistant, data: dict[str, Any]
 ) -> dict[str, str]:
@@ -174,6 +220,9 @@ async def _async_validate_input(
                     login_cookie_sid = ""
                     login_body = ""
 
+                    # Try the provided username first.
+                    # If that fails, fall back to the default "admin" account
+                    # (common on Apex controllers) to keep setup easy.
                     login_candidates: list[str] = []
                     if username:
                         login_candidates.append(username)
@@ -291,10 +340,16 @@ async def _async_validate_input(
                         raise KeyError("rest_not_supported")
 
                     # Ensure it's JSON.
-                    json.loads(status_text) if status_text else {}
+                    status_any: Any = json.loads(status_text) if status_text else {}
+                    status_obj: dict[str, Any] = (
+                        cast(dict[str, Any], status_any)
+                        if isinstance(status_any, dict)
+                        else {}
+                    )
+                    serial = _extract_serial_from_status_obj(status_obj)
 
                     title = f"Apex ({host})"
-                    return {"title": title, "unique_id": host}
+                    return {"title": title, "unique_id": serial or host}
 
                 except (asyncio.TimeoutError, aiohttp.ClientError) as err:
                     _LOGGER.debug("Transient REST validation error: %s", err)
@@ -324,7 +379,8 @@ async def _async_validate_input(
                 resp.raise_for_status()
                 body = await resp.text()
 
-        ET.fromstring(body)
+        root = ET.fromstring(body)
+        serial = (root.findtext("./serial") or "").strip() or None
 
     except InvalidAuth:
         if rest_invalid_auth:
@@ -338,7 +394,7 @@ async def _async_validate_input(
         raise CannotConnect from err
 
     title = f"Apex ({host})"
-    return {"title": title, "unique_id": host}
+    return {"title": title, "unique_id": serial or host}
 
 
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -360,8 +416,13 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
+            normalized_input = dict(user_input)
+            normalized_input[CONF_HOST] = _normalize_host(
+                str(normalized_input.get(CONF_HOST, ""))
+            )
+
             try:
-                info = await _async_validate_input(self.hass, user_input)
+                info = await _async_validate_input(self.hass, normalized_input)
             except CannotConnect:
                 errors["base"] = "cannot_connect"
             except InvalidAuth:
@@ -371,8 +432,28 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "unknown"
             else:
                 await self.async_set_unique_id(info["unique_id"])
-                self._abort_if_unique_id_configured()
-                return self.async_create_entry(title=info["title"], data=user_input)
+
+                # If this controller is already configured, treat running the flow
+                # again as a "re-login": update credentials/host and reload.
+                existing = next(
+                    (
+                        e
+                        for e in self._async_current_entries()
+                        if str(e.unique_id or "") == info["unique_id"]
+                    ),
+                    None,
+                )
+                if existing is not None:
+                    merged = dict(existing.data)
+                    merged.update(normalized_input)
+                    self.hass.config_entries.async_update_entry(existing, data=merged)
+                    self.hass.config_entries.async_schedule_reload(existing.entry_id)
+                    return self.async_abort(reason="already_configured")
+
+                return self.async_create_entry(
+                    title=info["title"],
+                    data=normalized_input,
+                )
 
         return self.async_show_form(
             step_id="user", data_schema=STEP_USER_SCHEMA, errors=errors
@@ -426,6 +507,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "unknown"
             else:
                 self.hass.config_entries.async_update_entry(entry, data=merged)
+                self.hass.config_entries.async_schedule_reload(entry.entry_id)
                 return self.async_abort(reason="reauth_successful")
 
         return self.async_show_form(

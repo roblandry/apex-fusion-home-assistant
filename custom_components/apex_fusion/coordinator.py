@@ -1194,6 +1194,8 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         )
 
                         try:
+                            # Try configured username first; fall back to "admin"
+                            # (common default) for convenience.
                             login_candidates: list[str] = []
                             if username:
                                 login_candidates.append(username)

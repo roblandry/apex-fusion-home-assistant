@@ -84,9 +84,14 @@ Add the integration from Home Assistant UI:
 1. Settings → Devices & services → Add integration
 2. Search for **Apex Fusion (Local)**
 
-   > [!TIP]
-   > Recommend using `admin` user with default password of `1234` or changing the password.
-   > It is known that the user logged in will log out any users using the local webpages.
+    > [!TIP]
+    > `admin` (default password `1234`) is recommended because it's commonly preconfigured, but it is not required.
+    >
+    > Best practice is to create a **dedicated Apex account** for Home Assistant and avoid using the same account in the
+    > Apex **local web UI** at the same time (shared local logins can cause session conflicts).
+    >
+    > If you run more than one local integration / Home Assistant instance against the same controller, use **separate
+    > Apex accounts** for each.
 
 ## Entities
 

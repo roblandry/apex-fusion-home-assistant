@@ -335,6 +335,7 @@ class ApexOutletModeSelect(SelectEntity):
 
         try:
             if not sid:
+                # Try configured username first; fall back to "admin" (common default).
                 login_candidates: list[str] = []
                 if username:
                     login_candidates.append(username)
