@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## v0.1.0-rc.2
+
+### Chores
+
+- keep git-cliff output markdownlint-clean
+
+### Features
+
+- allow re-login by removing and adding integration. this helps with using different user. update readme and strings to reflect best practices
+- add reconfigure step to allow different login
+
+### Fixes
+
+- change 0 to open and 1 to closed to properly represent status
+
 ## v0.1.0-rc.1
 
 ### CI
