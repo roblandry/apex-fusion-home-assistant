@@ -17,10 +17,21 @@
           "username": "Username",
           "password": "Password"
         }
+      },
+      "reconfigure_confirm": {
+        "title": "Reconfigure Apex",
+        "description": "Update host and/or credentials for {host}.",
+        "data": {
+          "host": "Host (IP)",
+          "username": "Username",
+          "password": "Password"
+        }
       }
     },
     "abort": {
       "already_configured": "This Apex controller is already configured. Credentials were updated and the entry will reload.",
+      "different_device": "This entry is already bound to a different Apex controller. Remove the integration and add it again to switch devices.",
+      "reconfigure_successful": "Reconfiguration successful",
       "reauth_successful": "Reauthentication successful"
     },
     "error": {

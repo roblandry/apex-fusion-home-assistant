@@ -109,6 +109,55 @@ async def test_reauth_flow_is_supported_and_updates_entry(
     assert updated.data[CONF_PASSWORD] == "new"
 
 
+async def test_reconfigure_flow_is_supported_and_updates_entry(
+    hass, enable_custom_integrations
+):
+    """Reconfigure flow exists and updates stored host/credentials."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Apex (1.2.3.4)",
+        data={
+            CONF_HOST: "1.2.3.4",
+            CONF_USERNAME: "admin",
+            CONF_PASSWORD: "old",
+        },
+        unique_id="1.2.3.4",
+    )
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": "reconfigure", "entry_id": entry.entry_id},
+        data=None,
+    )
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "reconfigure_confirm"
+
+    with patch(
+        "custom_components.apex_fusion.config_flow._async_validate_input",
+        new=AsyncMock(
+            return_value={"title": "Apex (apex.local)", "unique_id": "1.2.3.4"}
+        ),
+    ):
+        result2 = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            user_input={
+                CONF_HOST: "apex.local",
+                CONF_USERNAME: "admin",
+                CONF_PASSWORD: "new",
+            },
+        )
+
+    assert result2["type"] == FlowResultType.ABORT
+    assert result2["reason"] == "reconfigure_successful"
+
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert updated is not None
+    assert updated.data[CONF_HOST] == "apex.local"
+    assert updated.data[CONF_PASSWORD] == "new"
+
+
 async def test_rest_validation_accepts_cookie_from_set_cookie(hass, aioclient_mock):
     """REST validation sends connect.sid from Set-Cookie."""
     host = "1.2.3.4"

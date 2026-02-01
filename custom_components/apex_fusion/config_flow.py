@@ -81,6 +81,23 @@ STEP_REAUTH_SCHEMA = vol.Schema(
 )
 
 
+def _step_reconfigure_schema(existing: dict[str, Any]) -> vol.Schema:
+    """Build the reconfigure schema with sensible defaults."""
+    host_default = _normalize_host(str(existing.get(CONF_HOST, "")))
+    username_default = str(
+        existing.get(CONF_USERNAME, DEFAULT_USERNAME) or DEFAULT_USERNAME
+    )
+
+    # Password has no default so leaving it blank won't overwrite an existing one.
+    return vol.Schema(
+        {
+            vol.Required(CONF_HOST, default=host_default): str,
+            vol.Optional(CONF_USERNAME, default=username_default): str,
+            vol.Optional(CONF_PASSWORD): str,
+        }
+    )
+
+
 def _normalize_host(host: str) -> str:
     """Normalize a host field to a hostname/IP.
 
@@ -401,6 +418,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Apex Fusion."""
 
     VERSION = 1
+    reconfigure_supported = True
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -513,6 +531,97 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="reauth_confirm",
             data_schema=STEP_REAUTH_SCHEMA,
+            errors=errors,
+            description_placeholders={CONF_HOST: str(entry.data.get(CONF_HOST, ""))},
+        )
+
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Handle config entry reconfiguration.
+
+        Home Assistant will show a "Reconfigure" button for integrations that
+        support it.
+        """
+
+        # Home Assistant may call this step with `user_input=None`.
+        entry_id = None
+        if isinstance(user_input, dict):
+            entry_id = user_input.get("entry_id")
+        if not entry_id:
+            entry_id = (self.context or {}).get("entry_id")
+
+        self._apex_reconfigure_entry_id = str(entry_id or "") or None
+        return await self.async_step_reconfigure_confirm()
+
+    async def async_step_reconfigure_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Prompt for updated host/credentials and reload the entry."""
+
+        entry_id = getattr(self, "_apex_reconfigure_entry_id", None)
+        if not entry_id:
+            return self.async_abort(reason="unknown")
+
+        entry = self.hass.config_entries.async_get_entry(entry_id)
+        if entry is None:
+            return self.async_abort(reason="unknown")
+
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            merged: dict[str, Any] = dict(entry.data)
+            merged.update(user_input)
+
+            # If the user leaves password empty/omitted, keep the existing one.
+            # The HA frontend commonly submits empty strings for optional fields.
+            pw_any: Any = user_input.get(CONF_PASSWORD)
+            if CONF_PASSWORD not in user_input or (
+                isinstance(pw_any, str) and not pw_any.strip()
+            ):
+                merged[CONF_PASSWORD] = entry.data.get(CONF_PASSWORD, DEFAULT_PASSWORD)
+
+            try:
+                info = await _async_validate_input(self.hass, merged)
+            except CannotConnect:
+                errors["base"] = "cannot_connect"
+            except InvalidAuth:
+                errors["base"] = "invalid_auth"
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("Unexpected exception during reconfigure")
+                errors["base"] = "unknown"
+            else:
+                # Prevent accidentally repointing an existing entry that already
+                # has a stable unique_id (serial) to a different controller.
+                old_host = _normalize_host(str(entry.data.get(CONF_HOST, "")))
+                entry_uid = str(entry.unique_id or "")
+                if (
+                    entry_uid
+                    and entry_uid != old_host
+                    and info["unique_id"] != entry_uid
+                ):
+                    return self.async_abort(reason="different_device")
+
+                # If we learned a better unique_id (serial), apply it unless it
+                # would collide with an existing entry.
+                if info["unique_id"] and info["unique_id"] != entry.unique_id:
+                    if any(
+                        e.entry_id != entry.entry_id
+                        and str(e.unique_id or "") == info["unique_id"]
+                        for e in self.hass.config_entries.async_entries(DOMAIN)
+                    ):
+                        return self.async_abort(reason="already_configured")
+                    self.hass.config_entries.async_update_entry(
+                        entry, unique_id=info["unique_id"]
+                    )
+
+                self.hass.config_entries.async_update_entry(entry, data=merged)
+                self.hass.config_entries.async_schedule_reload(entry.entry_id)
+                return self.async_abort(reason="reconfigure_successful")
+
+        return self.async_show_form(
+            step_id="reconfigure_confirm",
+            data_schema=_step_reconfigure_schema(dict(entry.data)),
             errors=errors,
             description_placeholders={CONF_HOST: str(entry.data.get(CONF_HOST, ""))},
         )
