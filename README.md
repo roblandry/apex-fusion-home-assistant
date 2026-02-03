@@ -14,6 +14,10 @@
 
 Home Assistant custom integration for local (LAN) polling of an Apex controller.
 
+If you’ve tried other Apex options and found gaps (cloud dependence, stale support, or missing local REST/module support), I’d love feedback on what you need—this project aims to close those gaps with a local-first approach.
+
+Contributors are welcome (issues, testing feedback, and PRs).
+
 > [!WARNING]
 > This project is not affiliated with Neptune Systems and has no connection to the Apex Fusion
 > cloud service. It communicates only with the controller on your local network.
@@ -109,6 +113,11 @@ This integration provides entities across these Home Assistant platforms:
 - **Selects**
   - One select per controllable output: Off / Auto / On
   - Sends control via the local REST API (`PUT /rest/status/outputs/<did>`)
+- **Switches**
+  - Feed Mode switches: Feed A / Feed B / Feed C / Feed D
+  - Turning a feed switch **on** starts that feed cycle (timer).
+  - Turning a feed switch **off** cancels the active feed cycle.
+  - Control is REST-first (`PUT /rest/status/feed/<id>`), with legacy CGI fallback (`POST /cgi-bin/status.cgi`).
 - **Updates**
   - Controller firmware update entity, named by controller type (example: `AC6J Firmware`)
   - Module firmware update entities (FMM, PM2, VDM, TRI, etc)

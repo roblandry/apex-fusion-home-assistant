@@ -162,6 +162,7 @@ def test_parse_status_xml_and_rest_and_cgi_json():
             "quality": 80,
         },
         "system": {"software": "1", "hardware": "Apex", "serial": "ABC", "type": "A3"},
+        "feed": {"name": 2, "active": 1},
         "inputs": [
             {"did": "T1", "name": "Tmp", "type": "Tmp", "value": "25"},
             "nope",
@@ -212,12 +213,15 @@ def test_parse_status_xml_and_rest_and_cgi_json():
     assert rest_parsed["trident"]["waste_container_level"] == 10
     assert rest_parsed["trident"]["levels_ml"] == [232.7, 159.2]
     assert rest_parsed["alerts"]["last_statement"] == "pH is less than 7.8"
+    assert rest_parsed["feed"]["name"] == 2
+    assert rest_parsed["feed"]["active"] is True
 
     # Nested containers + int IDs + fallback from inputs->probes and outputs->outlets.
     rest_nested = {
         "data": {
             "nstat": {"ipaddr": "1.2.3.4"},
             "system": {"serial": "ABC"},
+            "feed": {"name": "0", "active": 92},
             "probes": [{"id": 123, "name": "Tmp", "type": "Tmp", "value": "25"}],
             "outlets": [
                 {
@@ -241,6 +245,8 @@ def test_parse_status_xml_and_rest_and_cgi_json():
     assert rest_nested_parsed["trident"]["is_testing"] is False
     assert rest_nested_parsed["trident"]["present"] is True
     assert rest_nested_parsed["alerts"]["last_statement"] == "Alk is low"
+    assert rest_nested_parsed["feed"]["name"] == 0
+    assert rest_nested_parsed["feed"]["active"] is False
 
     cgi_obj = {
         "istat": {
@@ -248,6 +254,7 @@ def test_parse_status_xml_and_rest_and_cgi_json():
             "hardware": "Apex",
             "date": "now",
             "serialNO": 123,
+            "feed": {"name": 3, "active": 1},
             "inputs": [
                 {"did": "T1", "name": "Tmp", "type": "Tmp", "value": "25"},
                 {"did": "", "name": "Tmp"},
@@ -272,6 +279,8 @@ def test_parse_status_xml_and_rest_and_cgi_json():
     assert cgi_parsed["meta"]["serial"] == "123"
     assert "T1" in cgi_parsed["probes"]
     assert cgi_parsed["outlets"][0]["device_id"] == "O1"
+    assert cgi_parsed["feed"]["name"] == 3
+    assert cgi_parsed["feed"]["active"] is True
 
     # serial can also come from top-level system
     cgi_obj2 = {"system": {"serial": "SYS"}, "istat": {"outputs": [], "inputs": []}}
@@ -412,6 +421,85 @@ def test_parse_status_rest_trident_and_alert_variants():
     )
     assert out2b["trident"]["status"] == "OK"
     assert out2b["trident"]["is_testing"] is False
+
+
+def test_parse_feed_variants_cover_uncovered_branches():
+    # REST feed: float should coerce to int.
+    rest_float = {"system": {"serial": "ABC"}, "feed": 2.0}
+    out_float = coordinator.parse_status_rest(rest_float)
+    assert out_float["feed"]["name"] == 2
+    assert out_float["feed"]["active"] is True
+
+    # REST feed: bad string should return None.
+    rest_bad = {"system": {"serial": "ABC"}, "feed": "nope"}
+    out_bad = coordinator.parse_status_rest(rest_bad)
+    assert out_bad["feed"] is None
+
+    # REST feed: list branch picks first active item, skips non-dicts.
+    rest_list = {
+        "system": {"serial": "ABC"},
+        "feed": [
+            "nope",
+            {"name": 1, "active": 0},
+            {"name": 3, "active": True},
+        ],
+    }
+    out_list = coordinator.parse_status_rest(rest_list)
+    assert out_list["feed"]["name"] == 3
+    assert out_list["feed"]["active"] is True
+
+    # REST feed: dict boolean active.
+    rest_bool = {"system": {"serial": "ABC"}, "feed": {"name": 1, "active": False}}
+    out_rest_bool = coordinator.parse_status_rest(rest_bool)
+    assert out_rest_bool["feed"]["name"] == 1
+    assert out_rest_bool["feed"]["active"] is False
+
+    # REST feed: dict without active uses feed_id-in-(1..4) fallback.
+    rest_fallback = {"system": {"serial": "ABC"}, "feed": {"name": 2}}
+    out_rest_fallback = coordinator.parse_status_rest(rest_fallback)
+    assert out_rest_fallback["feed"]["name"] == 2
+    assert out_rest_fallback["feed"]["active"] is True
+
+    # REST feed: list branch int active uses numeric coercion.
+    rest_list_int = {
+        "system": {"serial": "ABC"},
+        "feed": [
+            {"name": 4, "active": 1},
+        ],
+    }
+    out_list_int = coordinator.parse_status_rest(rest_list_int)
+    assert out_list_int["feed"]["name"] == 4
+    assert out_list_int["feed"]["active"] is True
+
+    # CGI feed: float should coerce to int.
+    cgi_float = {"istat": {"outputs": [], "inputs": [], "feed": 3.0}}
+    out_cgi_float = coordinator.parse_status_cgi_json(cgi_float)
+    assert out_cgi_float["feed"]["name"] == 3
+    assert out_cgi_float["feed"]["active"] is True
+
+    # CGI feed: dict with boolean active.
+    cgi_bool = {
+        "istat": {"outputs": [], "inputs": [], "feed": {"name": 1, "active": False}}
+    }
+    out_cgi_bool = coordinator.parse_status_cgi_json(cgi_bool)
+    assert out_cgi_bool["feed"]["name"] == 1
+    assert out_cgi_bool["feed"]["active"] is False
+
+    # CGI feed: string digit should coerce.
+    cgi_str = {"istat": {"outputs": [], "inputs": [], "feed": "3"}}
+    out_cgi_str = coordinator.parse_status_cgi_json(cgi_str)
+    assert out_cgi_str["feed"]["name"] == 3
+
+    # CGI feed: bad string should return None.
+    cgi_bad = {"istat": {"outputs": [], "inputs": [], "feed": "nope"}}
+    out_cgi_bad = coordinator.parse_status_cgi_json(cgi_bad)
+    assert out_cgi_bad["feed"] is None
+
+    # CGI feed: dict without active uses feed_id-in-(1..4) fallback.
+    cgi_fallback = {"istat": {"outputs": [], "inputs": [], "feed": {"name": 2}}}
+    out_cgi_fallback = coordinator.parse_status_cgi_json(cgi_fallback)
+    assert out_cgi_fallback["feed"]["name"] == 2
+    assert out_cgi_fallback["feed"]["active"] is True
 
     # Alert parsing: dict message with Statement extraction, dict message without Statement,
     # and string message without Statement.

@@ -23,6 +23,7 @@ async def test_async_setup_entry_stores_coordinator_and_forwards_platforms(
 
     coordinator = AsyncMock()
     coordinator.async_config_entry_first_refresh = AsyncMock(return_value=None)
+    coordinator.data = {}
 
     with (
         patch(
@@ -92,3 +93,83 @@ async def test_async_unload_entry_keeps_data_when_not_unloaded(
         assert await async_unload_entry(hass, cast(Any, entry)) is False
 
     assert hass.data[DOMAIN][entry.entry_id] is sentinel
+
+
+async def test_async_setup_entry_updates_unique_id_to_serial(
+    hass, enable_custom_integrations
+):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "1.2.3.4"},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
+    )
+    entry.add_to_hass(hass)
+
+    coordinator = AsyncMock()
+    coordinator.data = {"meta": {"serial": "SER123"}}
+    coordinator.async_config_entry_first_refresh = AsyncMock(return_value=None)
+
+    with (
+        patch(
+            "custom_components.apex_fusion.ApexNeptuneDataUpdateCoordinator",
+            return_value=coordinator,
+        ),
+        patch.object(
+            hass.config_entries,
+            "async_forward_entry_setups",
+            new=AsyncMock(return_value=None),
+        ),
+        patch.object(hass.config_entries, "async_entries", return_value=[entry]),
+        patch.object(hass.config_entries, "async_update_entry") as update,
+    ):
+        from custom_components.apex_fusion import async_setup_entry
+
+        assert await async_setup_entry(hass, cast(Any, entry)) is True
+
+    update.assert_called_once()
+    assert update.call_args.kwargs.get("unique_id") == "SER123"
+
+
+async def test_async_setup_entry_duplicate_serial_logs_warning(
+    hass, enable_custom_integrations, caplog
+):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "1.2.3.4"},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
+    )
+    entry.add_to_hass(hass)
+
+    other = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "1.2.3.5"},
+        unique_id="SER123",
+        title="Apex (1.2.3.5)",
+    )
+    other.add_to_hass(hass)
+
+    coordinator = AsyncMock()
+    coordinator.data = {"meta": {"serial": "SER123"}}
+    coordinator.async_config_entry_first_refresh = AsyncMock(return_value=None)
+
+    with (
+        patch(
+            "custom_components.apex_fusion.ApexNeptuneDataUpdateCoordinator",
+            return_value=coordinator,
+        ),
+        patch.object(
+            hass.config_entries,
+            "async_forward_entry_setups",
+            new=AsyncMock(return_value=None),
+        ),
+        patch.object(hass.config_entries, "async_entries", return_value=[entry, other]),
+        patch.object(hass.config_entries, "async_update_entry") as update,
+    ):
+        from custom_components.apex_fusion import async_setup_entry
+
+        assert await async_setup_entry(hass, cast(Any, entry)) is True
+
+    assert "Duplicate Apex config entries detected" in caplog.text
+    update.assert_not_called()

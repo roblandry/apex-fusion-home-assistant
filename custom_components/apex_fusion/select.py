@@ -17,31 +17,23 @@ Control is via the local REST API:
 
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
 from dataclasses import dataclass
 from typing import Any, Callable, cast
 
-import aiohttp
-import async_timeout
 from homeassistant.components.select import SelectEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from yarl import URL
 
 from .const import (
     CONF_HOST,
     CONF_PASSWORD,
-    CONF_USERNAME,
-    DEFAULT_TIMEOUT_SECONDS,
     DOMAIN,
     LOGGER_NAME,
 )
-from .coordinator import ApexNeptuneDataUpdateCoordinator, build_base_url
+from .coordinator import ApexNeptuneDataUpdateCoordinator
 from .sensor import build_device_info, friendly_outlet_name
 
 _LOGGER = logging.getLogger(LOGGER_NAME)
@@ -293,110 +285,13 @@ class ApexOutletModeSelect(SelectEntity):
         await self._async_set_mode(mode)
 
     async def _async_set_mode(self, mode: str) -> None:
-        host = str(self._entry.data.get(CONF_HOST, ""))
-        username = str(self._entry.data.get(CONF_USERNAME, "") or "admin")
         password = str(self._entry.data.get(CONF_PASSWORD, "") or "")
-
         if not password:
             raise HomeAssistantError("Password is required to control outlets via REST")
-
-        base_url = build_base_url(host)
-        session = async_get_clientsession(self.hass)
-        timeout_seconds = DEFAULT_TIMEOUT_SECONDS
 
         desired = (mode or "").strip().upper()
         if desired not in {"AUTO", "ON", "OFF"}:
             raise HomeAssistantError(f"Invalid outlet mode: {mode}")
-
-        sid: str | None = None
-        sid_morsel = session.cookie_jar.filter_cookies(URL(base_url)).get("connect.sid")
-        if sid_morsel is not None and sid_morsel.value:
-            sid = sid_morsel.value
-
-        def _retry_after_seconds(headers: Any) -> float | None:
-            try:
-                value = headers.get("Retry-After")
-                if value is None:
-                    return None
-                t = str(value).strip()
-                if not t:
-                    return None
-                return float(int(t))
-            except Exception:
-                return None
-
-        def _note_rate_limited(*, seconds: float) -> None:
-            try:
-                disable = getattr(self._coordinator, "_disable_rest", None)
-                if callable(disable):
-                    disable(seconds=seconds, reason="rate_limited_control")
-            except Exception:
-                pass
-
-        try:
-            if not sid:
-                # Try configured username first; fall back to "admin" (common default).
-                login_candidates: list[str] = []
-                if username:
-                    login_candidates.append(username)
-                if "admin" not in login_candidates:
-                    login_candidates.append("admin")
-
-                login_text = ""
-                for login_user in login_candidates:
-                    async with async_timeout.timeout(timeout_seconds):
-                        async with session.post(
-                            f"{base_url}/rest/login",
-                            json={
-                                "login": login_user,
-                                "password": password,
-                                "remember_me": False,
-                            },
-                            headers={
-                                "Accept": "*/*",
-                                "Content-Type": "application/json",
-                            },
-                        ) as resp:
-                            _LOGGER.debug(
-                                "REST login for control host=%s HTTP %s user=%s",
-                                host,
-                                resp.status,
-                                login_user,
-                            )
-                            if resp.status == 404:
-                                raise HomeAssistantError(
-                                    "REST API not supported on this device"
-                                )
-                            if resp.status in (401, 403):
-                                continue
-                            if resp.status == 429:
-                                retry_after = _retry_after_seconds(resp.headers)
-                                backoff = (
-                                    float(retry_after)
-                                    if retry_after is not None
-                                    else 300.0
-                                )
-                                _note_rate_limited(seconds=backoff)
-                                raise HomeAssistantError(
-                                    f"Controller rate limited REST login; retry after ~{int(backoff)}s"
-                                )
-                            resp.raise_for_status()
-                            login_text = await resp.text()
-                            break
-
-                login_any: Any = json.loads(login_text) if login_text else {}
-                if isinstance(login_any, dict):
-                    sid_any: Any = cast(dict[str, Any], login_any).get("connect.sid")
-                    if isinstance(sid_any, str) and sid_any:
-                        sid = sid_any
-        except (asyncio.TimeoutError, aiohttp.ClientError, json.JSONDecodeError) as err:
-            raise HomeAssistantError(
-                f"Error logging into Apex REST API: {err}"
-            ) from err
-
-        headers: dict[str, str] = {"Accept": "*/*"}
-        if sid:
-            headers["Cookie"] = f"connect.sid={sid}"
 
         payload = {
             "did": self._ref.did,
@@ -404,33 +299,13 @@ class ApexOutletModeSelect(SelectEntity):
             "type": "outlet",
         }
 
-        _LOGGER.debug(
-            "Setting outlet mode host=%s did=%s mode=%s", host, self._ref.did, desired
-        )
-
         try:
-            async with async_timeout.timeout(timeout_seconds):
-                async with session.put(
-                    f"{base_url}/rest/status/outputs/{self._ref.did}",
-                    json=payload,
-                    headers=headers,
-                ) as resp:
-                    _LOGGER.debug("REST output PUT host=%s HTTP %s", host, resp.status)
-                    if resp.status in (401, 403):
-                        raise HomeAssistantError("Not authorized to control output")
-                    if resp.status == 429:
-                        retry_after = _retry_after_seconds(resp.headers)
-                        backoff = (
-                            float(retry_after) if retry_after is not None else 300.0
-                        )
-                        _note_rate_limited(seconds=backoff)
-                        raise HomeAssistantError(
-                            f"Controller rate limited REST control; retry after ~{int(backoff)}s"
-                        )
-                    resp.raise_for_status()
-                    await resp.text()
-        except (asyncio.TimeoutError, aiohttp.ClientError) as err:
-            raise HomeAssistantError(f"Error setting output mode: {err}") from err
+            await self._coordinator.async_rest_put_json(
+                path=f"/rest/status/outputs/{self._ref.did}",
+                payload=payload,
+            )
+        except FileNotFoundError as err:
+            raise HomeAssistantError("REST API not supported on this device") from err
 
         # Ensure state updates promptly.
         await self._coordinator.async_request_refresh()

@@ -20,7 +20,7 @@ import aiohttp
 import async_timeout
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from yarl import URL
@@ -732,11 +732,84 @@ def parse_status_rest(status_obj: dict[str, Any]) -> dict[str, Any]:
 
         return {"last_statement": None, "last_message": None}
 
+    def _parse_feed() -> dict[str, Any] | None:
+        """Extract feed-mode status from common REST payload variants."""
+
+        def _to_int(v: Any) -> int | None:
+            if isinstance(v, int):
+                return v
+            if isinstance(v, float) and v.is_integer():
+                return int(v)
+            if isinstance(v, str):
+                t = v.strip()
+                if t.isdigit():
+                    return int(t)
+            return None
+
+        feed_any: Any = _find_field(status_obj, "feed")
+        if feed_any is None:
+            feed_any = _find_field(status_obj, "feeds")
+
+        if isinstance(feed_any, (int, float, str)):
+            feed_id = _to_int(feed_any)
+            if feed_id is None:
+                return None
+            return {"name": feed_id, "active": bool(feed_id), "active_raw": None}
+
+        if isinstance(feed_any, dict):
+            feed = cast(dict[str, Any], feed_any)
+            feed_id = _to_int(feed.get("name") or feed.get("id") or feed.get("sel"))
+
+            active_raw: Any = feed.get("active")
+            active: bool | None = None
+            if isinstance(active_raw, bool):
+                active = active_raw
+            else:
+                active_int = _to_int(active_raw)
+                if active_int is not None:
+                    active = active_int == 1
+
+            if active is None and feed_id is not None:
+                active = feed_id in (1, 2, 3, 4)
+
+            return {"name": feed_id, "active": active, "active_raw": active_raw}
+
+        if isinstance(feed_any, list):
+            active_id: int | None = None
+            active_raw: Any = None
+            for item_any in cast(list[Any], feed_any):
+                if not isinstance(item_any, dict):
+                    continue
+                item = cast(dict[str, Any], item_any)
+                item_id = _to_int(item.get("name") or item.get("id"))
+                item_active_raw: Any = item.get("active") or item.get("running")
+                item_active: bool | None = None
+                if isinstance(item_active_raw, bool):
+                    item_active = item_active_raw
+                else:
+                    item_active_int = _to_int(item_active_raw)
+                    if item_active_int is not None:
+                        item_active = item_active_int == 1
+
+                if item_active:
+                    active_id = item_id
+                    active_raw = item_active_raw
+                    break
+
+            return {
+                "name": active_id or 0,
+                "active": bool(active_id),
+                "active_raw": active_raw,
+            }
+
+        return None
+
     return {
         "meta": meta,
         "network": network,
         "probes": probes,
         "outlets": outlets,
+        "feed": _parse_feed(),
         "alerts": _parse_last_alert_statement(),
         "trident": _parse_trident_from_modules(),
         "raw": status_obj,
@@ -847,10 +920,53 @@ def parse_status_cgi_json(status_obj: dict[str, Any]) -> dict[str, Any]:
                 }
             )
 
+    def _parse_feed() -> dict[str, Any] | None:
+        def _to_int(v: Any) -> int | None:
+            if isinstance(v, int):
+                return v
+            if isinstance(v, float) and v.is_integer():
+                return int(v)
+            if isinstance(v, str):
+                t = v.strip()
+                if t.isdigit():
+                    return int(t)
+            return None
+
+        feed_any: Any = istat.get("feed")
+        if feed_any is None:
+            feed_any = status_obj.get("feed")
+
+        if isinstance(feed_any, (int, float, str)):
+            feed_id = _to_int(feed_any)
+            if feed_id is None:
+                return None
+            return {"name": feed_id, "active": bool(feed_id), "active_raw": None}
+
+        if isinstance(feed_any, dict):
+            feed = cast(dict[str, Any], feed_any)
+            feed_id = _to_int(feed.get("name") or feed.get("id") or feed.get("sel"))
+
+            active_raw: Any = feed.get("active")
+            active: bool | None = None
+            if isinstance(active_raw, bool):
+                active = active_raw
+            else:
+                active_int = _to_int(active_raw)
+                if active_int is not None:
+                    active = active_int == 1
+
+            if active is None and feed_id is not None:
+                active = feed_id in (1, 2, 3, 4)
+
+            return {"name": feed_id, "active": active, "active_raw": active_raw}
+
+        return None
+
     return {
         "meta": meta,
         "probes": probes,
         "outlets": outlets,
+        "feed": _parse_feed(),
         "alerts": {"last_statement": None, "last_message": None},
         "trident": {"status": None, "is_testing": None},
         "raw": status_obj,
@@ -918,6 +1034,203 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             int(max(0.0, seconds)),
             reason,
         )
+
+    def _parse_retry_after_seconds(self, headers: Any) -> float | None:
+        try:
+            value = headers.get("Retry-After")
+            if value is None:
+                return None
+            t = str(value).strip()
+            if not t:
+                return None
+            # Retry-After can be seconds or an HTTP date; handle seconds.
+            return float(int(t))
+        except Exception:
+            return None
+
+    async def _async_rest_login(self, *, session: aiohttp.ClientSession) -> str:
+        """Ensure a REST session cookie exists and return connect.sid.
+
+        Raises:
+            FileNotFoundError: If REST is not supported.
+            HomeAssistantError: If login fails.
+        """
+        host = str(self.entry.data.get(CONF_HOST, ""))
+        username = str(self.entry.data.get(CONF_USERNAME, "") or "admin")
+        password = str(self.entry.data.get(CONF_PASSWORD, "") or "")
+        if not password:
+            raise HomeAssistantError("Password is required for REST control")
+
+        base_url = build_base_url(host)
+
+        # Prefer cached SID.
+        if self._rest_sid:
+            return self._rest_sid
+
+        # Prefer cookie jar.
+        sid_morsel = session.cookie_jar.filter_cookies(URL(base_url)).get("connect.sid")
+        if sid_morsel is not None and sid_morsel.value:
+            self._rest_sid = sid_morsel.value
+            return sid_morsel.value
+
+        login_url = f"{base_url}/rest/login"
+        timeout_seconds = DEFAULT_TIMEOUT_SECONDS
+
+        login_candidates: list[str] = []
+        if username:
+            login_candidates.append(username)
+        if "admin" not in login_candidates:
+            login_candidates.append("admin")
+
+        last_status: int | None = None
+        last_error: Exception | None = None
+        for login_user in login_candidates:
+            try:
+                async with async_timeout.timeout(timeout_seconds):
+                    async with session.post(
+                        login_url,
+                        json={
+                            "login": login_user,
+                            "password": password,
+                            "remember_me": False,
+                        },
+                        headers={
+                            "Accept": "*/*",
+                            "Content-Type": "application/json",
+                        },
+                    ) as resp:
+                        last_status = resp.status
+                        if resp.status == 404:
+                            raise FileNotFoundError
+                        if resp.status in (401, 403):
+                            continue
+                        if resp.status == 429:
+                            retry_after = self._parse_retry_after_seconds(resp.headers)
+                            backoff = (
+                                float(retry_after) if retry_after is not None else 300.0
+                            )
+                            self._disable_rest(
+                                seconds=backoff, reason="rate_limited_control"
+                            )
+                            raise HomeAssistantError(
+                                f"Controller rate limited REST login; retry after ~{int(backoff)}s"
+                            )
+
+                        resp.raise_for_status()
+                        body = await resp.text()
+
+                # Prefer Set-Cookie.
+                morsel = resp.cookies.get("connect.sid")
+                if morsel is not None and morsel.value:
+                    self._rest_sid = morsel.value
+                    _set_connect_sid_cookie(
+                        session, base_url=base_url, sid=morsel.value
+                    )
+                    return morsel.value
+
+                # Fallback: JSON body.
+                login_any: Any = json.loads(body) if body else {}
+                if isinstance(login_any, dict):
+                    sid_any: Any = cast(dict[str, Any], login_any).get("connect.sid")
+                    if isinstance(sid_any, str) and sid_any:
+                        self._rest_sid = sid_any
+                        _set_connect_sid_cookie(session, base_url=base_url, sid=sid_any)
+                        return sid_any
+            except FileNotFoundError:
+                raise
+            except (
+                asyncio.TimeoutError,
+                aiohttp.ClientError,
+                json.JSONDecodeError,
+            ) as err:
+                last_error = err
+                continue
+
+        self._rest_sid = None
+        if last_error is not None:
+            raise HomeAssistantError(
+                f"Error logging into Apex REST API: {last_error}"
+            ) from last_error
+        raise HomeAssistantError(
+            f"REST login rejected (HTTP {last_status})"
+            if last_status
+            else "REST login rejected"
+        )
+
+    async def async_rest_put_json(self, *, path: str, payload: dict[str, Any]) -> None:
+        """Send a REST control PUT with coordinator-managed auth and rate limiting.
+
+        Args:
+            path: URL path starting with `/rest/...`.
+            payload: JSON payload.
+
+        Raises:
+            FileNotFoundError: If the endpoint does not exist (REST unsupported/variant).
+            HomeAssistantError: On auth, rate limit, or network failures.
+        """
+        now = time.monotonic()
+        if now < self._rest_disabled_until:
+            raise HomeAssistantError(
+                f"REST temporarily disabled (retry in ~{int(self._rest_disabled_until - now)}s)"
+            )
+
+        host = str(self.entry.data.get(CONF_HOST, ""))
+        password = str(self.entry.data.get(CONF_PASSWORD, "") or "")
+        if not password:
+            raise HomeAssistantError("Password is required for REST control")
+
+        base_url = build_base_url(host)
+        if not path.startswith("/"):
+            path = "/" + path
+        url = f"{base_url}{path}"
+
+        session = async_get_clientsession(self.hass)
+        timeout_seconds = DEFAULT_TIMEOUT_SECONDS
+
+        async def _do_put(*, sid: str | None) -> None:
+            headers: dict[str, str] = {"Accept": "*/*"}
+            if sid:
+                headers["Cookie"] = f"connect.sid={sid}"
+            async with async_timeout.timeout(timeout_seconds):
+                async with session.put(url, json=payload, headers=headers) as resp:
+                    if resp.status == 404:
+                        raise FileNotFoundError
+                    if resp.status == 429:
+                        retry_after = self._parse_retry_after_seconds(resp.headers)
+                        backoff = (
+                            float(retry_after) if retry_after is not None else 300.0
+                        )
+                        self._disable_rest(
+                            seconds=backoff, reason="rate_limited_control"
+                        )
+                        raise HomeAssistantError(
+                            f"Controller rate limited REST control; retry after ~{int(backoff)}s"
+                        )
+                    if resp.status in (401, 403):
+                        raise PermissionError
+                    if _is_transient_http_status(resp.status):
+                        raise HomeAssistantError(
+                            f"Transient REST control HTTP error (status={resp.status})"
+                        )
+                    resp.raise_for_status()
+                    await resp.text()
+
+        try:
+            sid = await self._async_rest_login(session=session)
+            await _do_put(sid=sid)
+            return
+        except PermissionError:
+            # Session may have expired; clear and try once more.
+            self._rest_sid = None
+            sid2 = await self._async_rest_login(session=session)
+            await _do_put(sid=sid2)
+            return
+        except FileNotFoundError:
+            raise
+        except HomeAssistantError:
+            raise
+        except (asyncio.TimeoutError, aiohttp.ClientError) as err:
+            raise HomeAssistantError(f"Error sending REST control: {err}") from err
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch and parse controller status.

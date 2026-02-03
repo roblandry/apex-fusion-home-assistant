@@ -42,6 +42,27 @@ def test_config_flow_cookie_helpers_cover_exception_and_noop():
     config_flow._set_connect_sid_cookie(sess, base_url="http://x", sid="")
 
 
+def test_extract_serial_helpers_cover_branches():
+    from custom_components.apex_fusion.config_flow import (
+        _coerce_serial,
+        _extract_serial_from_status_obj,
+    )
+
+    assert _coerce_serial("  ABC ") == "ABC"
+    assert _coerce_serial(123) == "123"
+    assert _coerce_serial(None) is None
+
+    assert _extract_serial_from_status_obj({"serial": "  S1  "}) == "S1"
+    assert _extract_serial_from_status_obj({"system": {"serial": 999}}) == "999"
+    assert _extract_serial_from_status_obj({"istat": {"serialNO": 888}}) == "888"
+
+    nested = {"data": {"system": {"serial": "NEST"}}}
+    assert _extract_serial_from_status_obj(nested) == "NEST"
+
+    assert _extract_serial_from_status_obj({"data": "nope"}) is None
+    assert _extract_serial_from_status_obj({"status": {}}) is None
+
+
 async def test_user_flow_creates_entry(hass, enable_custom_integrations):
     """User flow creates a config entry when validation succeeds."""
     with patch(
