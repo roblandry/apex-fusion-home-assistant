@@ -68,7 +68,12 @@ async def test_binary_sensor_setup_and_updates(hass, enable_custom_integrations)
         data={
             "meta": {"serial": "ABC"},
             "network": {"dhcp": True, "wifi_enable": 1},
-            "trident": {"present": True, "is_testing": True, "waste_full": True},
+            "trident": {
+                "present": True,
+                "abaddr": 5,
+                "is_testing": True,
+                "waste_full": True,
+            },
             "probes": {
                 "DI1": {"name": "Door_1", "type": "digital", "value": 0},
             },
@@ -100,6 +105,21 @@ async def test_binary_sensor_setup_and_updates(hass, enable_custom_integrations)
         None,
     )
     assert digital is not None
+
+    # Trident binary sensors should be grouped under the Trident device when abaddr is known.
+    trident_testing = next(
+        (
+            e
+            for e in added
+            if isinstance(e, binary_sensor.ApexDiagnosticBinarySensor)
+            and getattr(e, "_attr_name", "") == "Testing"
+        ),
+        None,
+    )
+    assert trident_testing is not None
+    assert trident_testing.device_info is not None
+    assert trident_testing.device_info.get("name") == "Trident (Addr 5)"
+    assert trident_testing.device_info.get("via_device") == (DOMAIN, "ABC")
 
     for ent in added:
         # Avoid requiring full entity platform state machine.

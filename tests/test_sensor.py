@@ -181,8 +181,9 @@ async def test_sensor_setup_creates_entities_and_updates(
             "network": {"ipaddr": "1.2.3.4", "strength": "75", "quality": 80},
             "trident": {
                 "present": True,
+                "abaddr": 5,
                 "status": "Idle",
-                "levels_ml": [232.7, 159.2, 226.63, 226.92, 222.94],
+                "levels_ml": [232.7, 159.2, 226.63, 226.92, 222.94, 111.0],
             },
             "probes": {
                 "": {"name": "", "type": "Tmp", "value": "25", "value_raw": None},
@@ -212,6 +213,7 @@ async def test_sensor_setup_creates_entities_and_updates(
             "mxm_devices": {"Nero_5_F": {"rev": "1", "serial": "S", "status": "OK"}},
         },
         last_update_success=True,
+        device_identifier="ABC",
         listeners=listeners,
     )
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
@@ -244,17 +246,20 @@ async def test_sensor_setup_creates_entities_and_updates(
     assert len(probe_entities) == 3
 
     trident_diags = [e for e in added if isinstance(e, sensor.ApexDiagnosticSensor)]
-    waste = next(
-        (e for e in trident_diags if e._attr_name == "Trident Waste Used"), None
-    )
+    waste = next((e for e in trident_diags if e._attr_name == "Waste Used"), None)
     assert waste is not None
     assert waste.entity_category is None
     assert waste._attr_device_class == sensor.SensorDeviceClass.VOLUME
     assert waste._attr_state_class == sensor.SensorStateClass.TOTAL_INCREASING
 
-    status = next((e for e in trident_diags if e._attr_name == "Trident Status"), None)
+    status = next((e for e in trident_diags if e._attr_name == "Status"), None)
     assert status is not None
     assert status.entity_category is None
+
+    # Trident diagnostics should be grouped under the Trident device when abaddr is known.
+    assert waste.device_info is not None
+    assert waste.device_info.get("name") == "Trident (Addr 5)"
+    assert waste.device_info.get("via_device") == (DOMAIN, "ABC")
 
     # Update probe values to hit coercion/branches.
     coordinator.data["probes"]["T1"]["value"] = 26

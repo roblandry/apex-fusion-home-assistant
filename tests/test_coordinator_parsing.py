@@ -257,29 +257,24 @@ def test_parse_status_xml_and_rest_and_cgi_json():
                 "status": ["AON"],
                 "type": "EB8",
                 "gid": "g",
-            },
-            {"did": "", "name": ""},
-            "nope",
+            }
         ],
         "modules": [
-            {"hwtype": "EB832", "extra": {"status": "ignored"}},
             {
                 "hwtype": "TRI",
                 "present": True,
+                "abaddr": 4,
                 "extra": {
                     "status": "testing Ca/Mg",
-                    "reagentA": "75%",
-                    "reagentB": 50,
-                    "reagentC": "25",
-                    "wasteLevel": "10",
-                    "levels": ["232.7", True, None, 159.2],
+                    "levels": [232.7, 159.2],
+                    "reagents": [75, 50, 25],
+                    "waste_pct": "10%",
                 },
-            },
+            }
         ],
-        "notifications": [
-            {"statement": "pH is less than 7.8"},
-        ],
+        "notifications": [{"statement": "pH is less than 7.8"}],
     }
+
     rest_parsed = coordinator.parse_status_rest(rest_obj)
     assert rest_parsed["meta"]["source"] == "rest"
     assert rest_parsed["network"]["ipaddr"] == "1.2.3.4"
@@ -441,6 +436,61 @@ def test_parse_status_rest_trident_consumables_reagents_list_and_empty_status():
     assert out["trident"]["reagent_b_remaining"] == 22
     assert out["trident"]["reagent_c_remaining"] == 33
     assert out["trident"]["waste_container_level"] == 44
+
+
+def test_parse_status_rest_trident_consumables_from_flattened_keys_and_module_ids():
+    rest_obj = {
+        "system": {"serial": "ABC"},
+        "modules": [
+            {
+                "hwtype": "TRI",
+                "hwrev": " Rev-1 ",
+                "swrev": 123,
+                "serial": " TRI-SERIAL ",
+                "present": True,
+                "abaddr": 4,
+                "extra": {
+                    # Status not a string triggers the "status None" path, but should
+                    # still parse levels + consumables.
+                    "status": 1,
+                    # Exercise levels parsing skips/coercions.
+                    "levels": [None, True, 1, "2.5", "nope"],
+                    # Exercise flattened-key parsing (no `reagents` list/tuple provided).
+                    "nested": {"reagent_a_pct": "10%"},
+                    "reagent2": 20,
+                    "reagent-3": "30",
+                    "wasteLevelPercent": "40%",
+                },
+            }
+        ],
+    }
+
+    out = coordinator.parse_status_rest(rest_obj)
+    trident = cast(dict[str, Any], out["trident"])
+    assert trident["status"] is None
+    assert trident["hwtype"] == "TRI"
+    assert trident["hwrev"] == "Rev-1"
+    assert trident["swrev"] == "123"
+    assert trident["serial"] == "TRI-SERIAL"
+    assert trident["levels_ml"] == [1.0, 2.5]
+    assert trident["reagent_a_remaining"] == 10
+    assert trident["reagent_b_remaining"] == 20
+    assert trident["reagent_c_remaining"] == 30
+    assert trident["waste_container_level"] == 40
+
+
+def test_parse_status_rest_outputs_skips_invalid_entries_and_uses_name_fallback():
+    out = coordinator.parse_status_rest(
+        {
+            "outputs": [
+                "nope",  # non-dict -> skipped
+                {"did": "", "name": ""},  # no did + no name -> skipped
+                {"name": "Outlet", "status": ["AON"]},  # name fallback for did
+            ]
+        }
+    )
+    assert out["outlets"][0]["device_id"] == "Outlet"
+    assert out["outlets"][0]["state"] == "AON"
 
 
 def test_parse_status_cgi_json_with_non_dict_istat():

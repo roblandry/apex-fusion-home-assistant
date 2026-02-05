@@ -45,6 +45,7 @@ def test_config_flow_cookie_helpers_cover_exception_and_noop():
 def test_extract_serial_helpers_cover_branches():
     from custom_components.apex_fusion.config_flow import (
         _coerce_serial,
+        _extract_hostname_from_status_obj,
         _extract_serial_from_status_obj,
     )
 
@@ -61,6 +62,50 @@ def test_extract_serial_helpers_cover_branches():
 
     assert _extract_serial_from_status_obj({"data": "nope"}) is None
     assert _extract_serial_from_status_obj({"status": {}}) is None
+
+    assert _extract_hostname_from_status_obj({"hostname": "  200XL  "}) == "200XL"
+    assert _extract_hostname_from_status_obj({"system": {"hostname": "SYS"}}) == "SYS"
+    assert _extract_hostname_from_status_obj({"nstat": {"hostname": "NST"}}) == "NST"
+    assert _extract_hostname_from_status_obj({"istat": {"hostname": "IST"}}) == "IST"
+    assert (
+        _extract_hostname_from_status_obj({"data": {"system": {"hostname": "NEST"}}})
+        == "NEST"
+    )
+    assert _extract_hostname_from_status_obj({"data": "nope"}) is None
+
+
+async def test_rest_validation_uses_hostname_from_config_when_missing_in_status(
+    hass, aioclient_mock
+):
+    host = "1.2.3.4"
+
+    aioclient_mock.post(
+        f"http://{host}/rest/login",
+        status=200,
+        text="{}",
+        cookies={"connect.sid": "abc"},
+    )
+    aioclient_mock.get(
+        f"http://{host}/rest/status",
+        status=200,
+        text="{}",
+    )
+    aioclient_mock.get(
+        f"http://{host}/rest/config",
+        status=200,
+        text='{"nconf": {"hostname": "200XL"}}',
+    )
+
+    info = await _async_validate_input(
+        hass,
+        {
+            CONF_HOST: host,
+            CONF_USERNAME: "admin",
+            CONF_PASSWORD: "pw",
+        },
+    )
+
+    assert info["title"] == "200XL (1.2.3.4)"
 
 
 async def test_user_flow_creates_entry(hass, enable_custom_integrations):

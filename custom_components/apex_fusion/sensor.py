@@ -26,11 +26,17 @@ from homeassistant.const import (
     UnitOfVolume,
 )
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import StateType
+from homeassistant.util import slugify
 
 from .const import CONF_HOST, DOMAIN
-from .coordinator import ApexNeptuneDataUpdateCoordinator, build_device_info
+from .coordinator import (
+    ApexNeptuneDataUpdateCoordinator,
+    build_device_info,
+    build_trident_device_info,
+)
 
 _SIMPLE_REST_SINGLE_SENSOR_MODE = False
 
@@ -435,15 +441,45 @@ async def async_setup_entry(
         if not trident.get("present"):
             return
 
+        trident_device_info: DeviceInfo | None = None
+        trident_abaddr_any: Any = trident.get("abaddr")
+        if isinstance(trident_abaddr_any, int):
+            host = str(entry.data.get(CONF_HOST, ""))
+            meta_any: Any = (coordinator.data or {}).get("meta", {})
+            meta = cast(dict[str, Any], meta_any) if isinstance(meta_any, dict) else {}
+            trident_device_info = build_trident_device_info(
+                host=host,
+                meta=meta,
+                controller_device_identifier=coordinator.device_identifier,
+                trident_abaddr=trident_abaddr_any,
+                trident_hwtype=(
+                    str(trident.get("hwtype") or "").strip().upper() or None
+                ),
+                trident_hwrev=(str(trident.get("hwrev") or "").strip() or None),
+                trident_swrev=(str(trident.get("swrev") or "").strip() or None),
+                trident_serial=(str(trident.get("serial") or "").strip() or None),
+            )
+
+        trident_prefix = "" if trident_device_info is not None else "Trident "
+
+        tank_slug = slugify(str(entry.title or "tank").strip())
+        trident_addr_slug = (
+            f"trident_addr{trident_abaddr_any}"
+            if isinstance(trident_abaddr_any, int)
+            else "trident"
+        )
+
         new_entities: list[SensorEntity] = [
             ApexDiagnosticSensor(
                 coordinator,
                 entry,
                 unique_id=f"{serial_for_ids}_diag_trident_status".lower(),
-                name="Trident Status",
+                name=f"{trident_prefix}Status".strip(),
+                suggested_object_id=f"{tank_slug}_{trident_addr_slug}_status",
                 icon="mdi:flask-outline",
                 value_fn=_section_field("trident", "status"),
                 entity_category=None,
+                device_info=trident_device_info,
             )
         ]
 
@@ -456,22 +492,29 @@ async def async_setup_entry(
         if isinstance(levels_any, list):
             levels = cast(list[Any], levels_any)
             for i in range(len(levels)):
-                name = f"Trident Container {i + 1} Level"
+                name = f"{trident_prefix}Container {i + 1} Level".strip()
                 icon = "mdi:beaker-outline"
                 state_class: SensorStateClass | None = SensorStateClass.TOTAL
 
                 if i == 0:
-                    name = "Trident Waste Used"
+                    name = f"{trident_prefix}Waste Used".strip()
                     icon = "mdi:trash-can-outline"
                     state_class = SensorStateClass.TOTAL_INCREASING
+                    object_suffix = "waste_used"
                 elif i == 1:
-                    name = "Trident Auxiliary Level"
+                    name = f"{trident_prefix}Auxiliary Level".strip()
+                    object_suffix = "auxiliary_level"
                 elif i == 2:
-                    name = "Trident Reagent C Remaining"
+                    name = f"{trident_prefix}Reagent C Remaining".strip()
+                    object_suffix = "reagent_c_remaining"
                 elif i == 3:
-                    name = "Trident Reagent B Remaining"
+                    name = f"{trident_prefix}Reagent B Remaining".strip()
+                    object_suffix = "reagent_b_remaining"
                 elif i == 4:
-                    name = "Trident Reagent A Remaining"
+                    name = f"{trident_prefix}Reagent A Remaining".strip()
+                    object_suffix = "reagent_a_remaining"
+                else:
+                    object_suffix = f"container_{i + 1}_level"
 
                 new_entities.append(
                     ApexDiagnosticSensor(
@@ -479,12 +522,14 @@ async def async_setup_entry(
                         entry,
                         unique_id=f"{serial_for_ids}_diag_trident_container_{i + 1}_level".lower(),
                         name=name,
+                        suggested_object_id=f"{tank_slug}_{trident_addr_slug}_{object_suffix}",
                         icon=icon,
                         native_unit=UnitOfVolume.MILLILITERS,
                         device_class=SensorDeviceClass.VOLUME,
                         state_class=state_class,
                         value_fn=_trident_level_ml(i),
                         entity_category=None,
+                        device_info=trident_device_info,
                     )
                 )
 
@@ -590,11 +635,13 @@ class ApexDiagnosticSensor(SensorEntity):
         unique_id: str,
         name: str,
         value_fn: Callable[[dict[str, Any]], Any],
+        suggested_object_id: str | None = None,
         native_unit: str | None = None,
         icon: str | None = None,
         device_class: SensorDeviceClass | None = None,
         state_class: SensorStateClass | None = None,
         entity_category: EntityCategory | None = EntityCategory.DIAGNOSTIC,
+        device_info: DeviceInfo | None = None,
     ) -> None:
         """Initialize the diagnostic sensor.
 
@@ -616,12 +663,14 @@ class ApexDiagnosticSensor(SensorEntity):
 
         self._attr_unique_id = unique_id
         self._attr_name = name
+        if suggested_object_id:
+            self._attr_suggested_object_id = suggested_object_id
         self._attr_native_unit_of_measurement = native_unit
         self._attr_icon = icon
         self._attr_device_class = device_class
         self._attr_state_class = state_class
         self._attr_entity_category = entity_category
-        self._attr_device_info = build_device_info(
+        self._attr_device_info = device_info or build_device_info(
             host=host,
             meta=meta,
             device_identifier=coordinator.device_identifier,

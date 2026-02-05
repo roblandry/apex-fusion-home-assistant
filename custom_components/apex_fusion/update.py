@@ -18,9 +18,14 @@ from homeassistant.components.update import UpdateDeviceClass, UpdateEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.util import slugify
 
 from .const import CONF_HOST, DOMAIN
-from .coordinator import ApexNeptuneDataUpdateCoordinator, build_device_info
+from .coordinator import (
+    ApexNeptuneDataUpdateCoordinator,
+    build_device_info,
+    build_trident_device_info,
+)
 
 
 def _raw_nstat(data: dict[str, Any]) -> dict[str, Any]:
@@ -91,6 +96,40 @@ def _config_mconf_modules(data: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+def _find_status_module(
+    data: dict[str, Any], *, hwtype: str, module_id: str
+) -> dict[str, Any] | None:
+    for m in _raw_modules(data):
+        m_hw = str(m.get("hwtype") or m.get("hwType") or "").strip().upper()
+        if m_hw != hwtype:
+            continue
+        m_ab = m.get("abaddr")
+        m_id = str(m_ab) if isinstance(m_ab, int) else str(m_ab or "").strip()
+        if not m_id:
+            m_id = str(m.get("did") or m.get("id") or hwtype).strip()
+        if m_id != module_id:
+            continue
+        return m
+    return None
+
+
+def _find_mconf_module(
+    data: dict[str, Any], *, hwtype: str, module_id: str
+) -> dict[str, Any] | None:
+    for m in _config_mconf_modules(data):
+        m_hw = str(m.get("hwtype") or m.get("hwType") or "").strip().upper()
+        if m_hw != hwtype:
+            continue
+        m_ab = m.get("abaddr")
+        m_id = str(m_ab) if isinstance(m_ab, int) else str(m_ab or "").strip()
+        if not m_id:
+            m_id = str(m.get("did") or m.get("id") or hwtype).strip()
+        if m_id != module_id:
+            continue
+        return m
+    return None
+
+
 def _controller_update_firmware_flag(data: dict[str, Any]) -> bool | None:
     # Prefer sanitized config (from /rest/config) when present.
     flag_any: Any = _config_nconf(data).get("updateFirmware")
@@ -109,6 +148,8 @@ class _UpdateRef:
     installed_fn: Callable[[dict[str, Any]], str | None]
     latest_fn: Callable[[dict[str, Any]], str | None]
     release_summary_fn: Callable[[dict[str, Any]], str | None]
+    module_hwtype: str | None = None
+    module_abaddr: int | None = None
 
 
 class ApexUpdateEntity(UpdateEntity):
@@ -134,11 +175,40 @@ class ApexUpdateEntity(UpdateEntity):
 
         self._attr_unique_id = ref.unique_id
         self._attr_name = ref.name
-        self._attr_device_info = build_device_info(
-            host=host,
-            meta=meta,
-            device_identifier=coordinator.device_identifier,
-        )
+
+        # Suggest entity ids that remain unique across multiple tanks.
+        tank_slug = slugify(str(entry.title or "tank").strip())
+
+        # Only attach Trident-family modules by explicit hwtype (no heuristics).
+        if ref.module_hwtype in {"TRI", "TNP"} and isinstance(ref.module_abaddr, int):
+            self._attr_suggested_object_id = (
+                f"{tank_slug}_trident_addr{ref.module_abaddr}_firmware"
+            )
+
+            trident_any: Any = (coordinator.data or {}).get("trident")
+            trident = (
+                cast(dict[str, Any], trident_any)
+                if isinstance(trident_any, dict)
+                else {}
+            )
+            self._attr_device_info = build_trident_device_info(
+                host=host,
+                meta=meta,
+                controller_device_identifier=coordinator.device_identifier,
+                trident_abaddr=ref.module_abaddr,
+                trident_hwtype=ref.module_hwtype,
+                trident_hwrev=(str(trident.get("hwrev") or "").strip() or None),
+                trident_swrev=(str(trident.get("swrev") or "").strip() or None),
+                trident_serial=(str(trident.get("serial") or "").strip() or None),
+            )
+        else:
+            # Controller update entity ids should also be tank-prefixed.
+            self._attr_suggested_object_id = f"{tank_slug}_controller_firmware"
+            self._attr_device_info = build_device_info(
+                host=host,
+                meta=meta,
+                device_identifier=coordinator.device_identifier,
+            )
 
         self._refresh_attrs()
 
@@ -245,48 +315,6 @@ def _module_refs(data: dict[str, Any], serial_for_ids: str) -> list[_UpdateRef]:
             module_id = str(abaddr_any) if isinstance(abaddr_any, int) else ""
             if not module_id:
                 module_id = str(mconf.get("did") or mconf.get("id") or hwtype).strip()
-
-            def _find_status_module(
-                _data: dict[str, Any],
-                *,
-                hwtype: str = hwtype,
-                module_id: str = module_id,
-            ) -> dict[str, Any] | None:
-                for m in _raw_modules(_data):
-                    m_hw = str(m.get("hwtype") or m.get("hwType") or "").strip().upper()
-                    if m_hw != hwtype:
-                        continue
-                    m_ab = m.get("abaddr")
-                    m_id = (
-                        str(m_ab) if isinstance(m_ab, int) else str(m_ab or "").strip()
-                    )
-                    if not m_id:
-                        m_id = str(m.get("did") or m.get("id") or hwtype).strip()
-                    if m_id != module_id:
-                        continue
-                    return m
-                return None
-
-            def _find_mconf_module(
-                _data: dict[str, Any],
-                *,
-                hwtype: str = hwtype,
-                module_id: str = module_id,
-            ) -> dict[str, Any] | None:
-                for m in _config_mconf_modules(_data):
-                    m_hw = str(m.get("hwtype") or m.get("hwType") or "").strip().upper()
-                    if m_hw != hwtype:
-                        continue
-                    m_ab = m.get("abaddr")
-                    m_id = (
-                        str(m_ab) if isinstance(m_ab, int) else str(m_ab or "").strip()
-                    )
-                    if not m_id:
-                        m_id = str(m.get("did") or m.get("id") or hwtype).strip()
-                    if m_id != module_id:
-                        continue
-                    return m
-                return None
 
             def _installed_from_status_fn(
                 _data: dict[str, Any],
@@ -413,6 +441,8 @@ def _module_refs(data: dict[str, Any], serial_for_ids: str) -> list[_UpdateRef]:
                     installed_fn=_installed_from_status_fn,
                     latest_fn=_latest_effective_fn,
                     release_summary_fn=_release_summary_fn_config,
+                    module_hwtype=hwtype,
+                    module_abaddr=abaddr_any if isinstance(abaddr_any, int) else None,
                 )
             )
 
@@ -510,6 +540,8 @@ def _module_refs(data: dict[str, Any], serial_for_ids: str) -> list[_UpdateRef]:
                 installed_fn=_installed_fn,
                 latest_fn=_latest_fn,
                 release_summary_fn=_release_summary_fn,
+                module_hwtype=hwtype,
+                module_abaddr=abaddr if isinstance(abaddr, int) else None,
             )
         )
 

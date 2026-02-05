@@ -95,7 +95,7 @@ def build_device_info(
     """
     serial = str(meta.get("serial") or "").strip() or None
     model = str(meta.get("type") or meta.get("hardware") or "Apex").strip() or "Apex"
-    name = str(meta.get("hostname") or f"Apex ({host})")
+    name = "Apex"
 
     identifiers = {(DOMAIN, device_identifier)}
     return DeviceInfo(
@@ -107,6 +107,40 @@ def build_device_info(
         hw_version=(str(meta.get("hardware") or "").strip() or None),
         sw_version=(str(meta.get("software") or "").strip() or None),
         configuration_url=f"http://{host}",
+    )
+
+
+def build_trident_device_info(
+    *,
+    host: str,
+    meta: dict[str, Any],
+    controller_device_identifier: str,
+    trident_abaddr: int,
+    trident_hwtype: str | None = None,
+    trident_hwrev: str | None = None,
+    trident_swrev: str | None = None,
+    trident_serial: str | None = None,
+) -> DeviceInfo:
+    """Build DeviceInfo for a Trident module.
+
+    The Trident is a distinct physical module; grouping its entities under a
+    separate device keeps the controller device page manageable.
+    """
+
+    identifiers = {(DOMAIN, f"{controller_device_identifier}_trident_{trident_abaddr}")}
+    model = str(trident_hwtype).strip().upper() or None if trident_hwtype else None
+    name = f"Trident (Addr {trident_abaddr})"
+
+    return DeviceInfo(
+        identifiers=identifiers,
+        name=name,
+        manufacturer="Neptune Systems",
+        model=model,
+        hw_version=(str(trident_hwrev).strip() or None if trident_hwrev else None),
+        sw_version=(str(trident_swrev).strip() or None if trident_swrev else None),
+        serial_number=(str(trident_serial).strip() or None if trident_serial else None),
+        configuration_url=f"http://{host}",
+        via_device=(DOMAIN, controller_device_identifier),
     )
 
 
@@ -227,7 +261,7 @@ def _sanitize_mconf_for_storage(mconf_obj: dict[str, Any]) -> list[dict[str, Any
 
             # Trident waste container size (mL)
             waste_any: Any = extra.get("wasteSize")
-            if hwtype in {"TRI", "TNP"} and isinstance(waste_any, (int, float)):
+            if isinstance(waste_any, (int, float)):
                 extra_out["wasteSize"] = float(waste_any)
 
             # MXM uses a multiline status string listing attached devices.
@@ -642,6 +676,10 @@ def parse_status_rest(status_obj: dict[str, Any]) -> dict[str, Any]:
         present = False
         abaddr: int | None = None
         levels_ml: list[float] | None = None
+        trident_hwtype: str | None = None
+        trident_hwrev: str | None = None
+        trident_swrev: str | None = None
+        trident_serial: str | None = None
         consumables: dict[str, Any] = {
             "reagent_a_remaining": None,
             "reagent_b_remaining": None,
@@ -662,17 +700,56 @@ def parse_status_rest(status_obj: dict[str, Any]) -> dict[str, Any]:
                 .strip()
                 .upper()
             )
-            if hwtype not in {"TRI", "TNP"}:
-                continue
-
-            abaddr_any: Any = module.get("abaddr")
-            if isinstance(abaddr_any, int):
-                abaddr = abaddr_any
 
             extra_any: Any = module.get("extra")
             if not isinstance(extra_any, dict):
                 continue
             extra = cast(dict[str, Any], extra_any)
+
+            # TODO: Identify ACTUAL Triden NP hwtype; requires dump
+            # Only treat explicitly-known hardware types as Trident-family.
+            # Avoid heuristic detection to prevent false positives across different
+            # firmware families/modules.
+            if hwtype not in {"TRI", "TNP"}:
+                continue
+
+            trident_hwtype = hwtype or None
+
+            hwrev_any: Any = (
+                module.get("hwrev")
+                or module.get("hwRev")
+                or module.get("hw_version")
+                or module.get("hwVersion")
+                or module.get("rev")
+            )
+            if isinstance(hwrev_any, (str, int, float)):
+                t = str(hwrev_any).strip()
+                trident_hwrev = t or trident_hwrev
+
+            swrev_any: Any = (
+                module.get("software")
+                or module.get("swrev")
+                or module.get("swRev")
+                or module.get("sw_version")
+                or module.get("swVersion")
+            )
+            if isinstance(swrev_any, (str, int, float)):
+                t = str(swrev_any).strip()
+                trident_swrev = t or trident_swrev
+
+            serial_any: Any = (
+                module.get("serial")
+                or module.get("serialNo")
+                or module.get("serialNO")
+                or module.get("serial_number")
+            )
+            if isinstance(serial_any, (str, int, float)):
+                t = str(serial_any).strip()
+                trident_serial = t or trident_serial
+
+            abaddr_any: Any = module.get("abaddr")
+            if isinstance(abaddr_any, int):
+                abaddr = abaddr_any
 
             present_any: Any = module.get("present")
             present = bool(present_any) if isinstance(present_any, bool) else True
@@ -722,6 +799,10 @@ def parse_status_rest(status_obj: dict[str, Any]) -> dict[str, Any]:
                 "status": None,
                 "is_testing": None,
                 "abaddr": abaddr,
+                "hwtype": trident_hwtype,
+                "hwrev": trident_hwrev,
+                "swrev": trident_swrev,
+                "serial": trident_serial,
                 "levels_ml": levels_ml,
                 **consumables,
             }
@@ -733,6 +814,10 @@ def parse_status_rest(status_obj: dict[str, Any]) -> dict[str, Any]:
             "status": best_status,
             "is_testing": is_testing,
             "abaddr": abaddr,
+            "hwtype": trident_hwtype,
+            "hwrev": trident_hwrev,
+            "swrev": trident_swrev,
+            "serial": trident_serial,
             "levels_ml": levels_ml,
             **consumables,
         }
@@ -1636,8 +1721,6 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         trident_any: Any = data.get("trident")
         if isinstance(trident_any, dict):
             for m in sanitized_mconf:
-                if str(m.get("hwtype") or "").strip().upper() not in {"TRI", "TNP"}:
-                    continue
                 extra_any: Any = m.get("extra")
                 if not isinstance(extra_any, dict):
                     continue

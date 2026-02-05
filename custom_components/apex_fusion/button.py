@@ -14,9 +14,14 @@ from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.util import slugify
 
 from .const import CONF_HOST, CONF_PASSWORD, DOMAIN
-from .coordinator import ApexNeptuneDataUpdateCoordinator, build_device_info
+from .coordinator import (
+    ApexNeptuneDataUpdateCoordinator,
+    build_device_info,
+    build_trident_device_info,
+)
 
 
 @dataclass(frozen=True)
@@ -82,50 +87,50 @@ async def async_setup_entry(
         refs: list[_TridentButtonRef] = [
             _TridentButtonRef(
                 key="trident_prime_reagent_a",
-                name="Trident Prime Reagent A",
+                name="Prime Reagent A",
                 icon="mdi:pump",
                 press_fn=lambda c: c.async_trident_prime_channel(channel_index=0),
             ),
             _TridentButtonRef(
                 key="trident_prime_reagent_b",
-                name="Trident Prime Reagent B",
+                name="Prime Reagent B",
                 icon="mdi:pump",
                 press_fn=lambda c: c.async_trident_prime_channel(channel_index=1),
             ),
             _TridentButtonRef(
                 key="trident_prime_reagent_c",
-                name="Trident Prime Reagent C",
+                name="Prime Reagent C",
                 icon="mdi:pump",
                 press_fn=lambda c: c.async_trident_prime_channel(channel_index=2),
             ),
             _TridentButtonRef(
                 key="trident_prime_sample",
-                name="Trident Prime Sample",
+                name="Prime Sample",
                 icon="mdi:pump",
                 press_fn=lambda c: c.async_trident_prime_channel(channel_index=3),
             ),
             _TridentButtonRef(
                 key="trident_reset_reagent_a",
-                name="Trident Reset Reagent A",
+                name="Reset Reagent A",
                 icon="mdi:flask-empty-plus-outline",
                 press_fn=lambda c: c.async_trident_reset_reagent(reagent_index=0),
             ),
             _TridentButtonRef(
                 key="trident_reset_reagent_b",
-                name="Trident Reset Reagent B",
+                name="Reset Reagent B",
                 icon="mdi:flask-empty-plus-outline",
                 press_fn=lambda c: c.async_trident_reset_reagent(reagent_index=1),
             ),
             _TridentButtonRef(
                 key="trident_reset_reagent_c",
-                name="Trident Reset Reagent C",
+                name="Reset Reagent C",
                 icon="mdi:flask-empty-plus-outline",
                 press_fn=lambda c: c.async_trident_reset_reagent(reagent_index=2),
             ),
             _TridentButtonRef(
                 key="trident_reset_waste",
-                name="Trident Reset Waste",
-                icon="mdi:trash-can-arrow-up",
+                name="Reset Waste",
+                icon="mdi:cup-outline",
                 press_fn=lambda c: c.async_trident_reset_waste(),
             ),
         ]
@@ -164,11 +169,73 @@ class ApexTridentButton(ButtonEntity):
         self._attr_unique_id = f"{serial}_{ref.key}".lower()
         self._attr_name = ref.name
         self._attr_icon = ref.icon
-        self._attr_device_info = build_device_info(
-            host=host,
-            meta=meta,
-            device_identifier=coordinator.device_identifier,
+        data = coordinator.data or {}
+        trident_any: Any = data.get("trident")
+        trident_abaddr_any: Any = (
+            cast(dict[str, Any], trident_any).get("abaddr")
+            if isinstance(trident_any, dict)
+            else None
         )
+        if isinstance(trident_abaddr_any, int):
+            trident_hwtype_any: Any = (
+                cast(dict[str, Any], trident_any).get("hwtype")
+                if isinstance(trident_any, dict)
+                else None
+            )
+            trident_hwrev_any: Any = (
+                cast(dict[str, Any], trident_any).get("hwrev")
+                if isinstance(trident_any, dict)
+                else None
+            )
+            trident_swrev_any: Any = (
+                cast(dict[str, Any], trident_any).get("swrev")
+                if isinstance(trident_any, dict)
+                else None
+            )
+            trident_serial_any: Any = (
+                cast(dict[str, Any], trident_any).get("serial")
+                if isinstance(trident_any, dict)
+                else None
+            )
+            self._attr_device_info = build_trident_device_info(
+                host=host,
+                meta=meta,
+                controller_device_identifier=coordinator.device_identifier,
+                trident_abaddr=trident_abaddr_any,
+                trident_hwtype=(
+                    str(trident_hwtype_any).strip().upper()
+                    if isinstance(trident_hwtype_any, str)
+                    and trident_hwtype_any.strip()
+                    else None
+                ),
+                trident_hwrev=(
+                    str(trident_hwrev_any).strip() or None
+                    if trident_hwrev_any is not None
+                    else None
+                ),
+                trident_swrev=(
+                    str(trident_swrev_any).strip() or None
+                    if trident_swrev_any is not None
+                    else None
+                ),
+                trident_serial=(
+                    str(trident_serial_any).strip() or None
+                    if trident_serial_any is not None
+                    else None
+                ),
+            )
+
+            tank_slug = slugify(str(entry.title or "tank").strip())
+            suffix = str(ref.key).removeprefix("trident_")
+            self._attr_suggested_object_id = (
+                f"{tank_slug}_trident_addr{trident_abaddr_any}_{suffix}"
+            )
+        else:
+            self._attr_device_info = build_device_info(
+                host=host,
+                meta=meta,
+                device_identifier=coordinator.device_identifier,
+            )
 
         self._attr_available = bool(
             getattr(self._coordinator, "last_update_success", True)

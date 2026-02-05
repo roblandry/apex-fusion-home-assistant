@@ -15,10 +15,16 @@ from homeassistant.components.binary_sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.util import slugify
 
 from .const import CONF_HOST, DOMAIN
-from .coordinator import ApexNeptuneDataUpdateCoordinator, build_device_info
+from .coordinator import (
+    ApexNeptuneDataUpdateCoordinator,
+    build_device_info,
+    build_trident_device_info,
+)
 
 
 @dataclass(frozen=True)
@@ -178,6 +184,26 @@ async def async_setup_entry(
     added_trident_waste_full = False
     added_trident_reagent_empty = False
 
+    def _get_trident_device_info(trident: dict[str, Any]) -> DeviceInfo | None:
+        abaddr_any: Any = trident.get("abaddr")
+        if not isinstance(abaddr_any, int):
+            return None
+
+        host = str(entry.data.get(CONF_HOST, ""))
+        meta_any: Any = (coordinator.data or {}).get("meta", {})
+        meta = cast(dict[str, Any], meta_any) if isinstance(meta_any, dict) else {}
+
+        return build_trident_device_info(
+            host=host,
+            meta=meta,
+            controller_device_identifier=coordinator.device_identifier,
+            trident_abaddr=abaddr_any,
+            trident_hwtype=(str(trident.get("hwtype") or "").strip().upper() or None),
+            trident_hwrev=(str(trident.get("hwrev") or "").strip() or None),
+            trident_swrev=(str(trident.get("swrev") or "").strip() or None),
+            trident_serial=(str(trident.get("serial") or "").strip() or None),
+        )
+
     def _add_trident_testing_entity() -> None:
         nonlocal added_trident_testing
         if added_trident_testing:
@@ -191,13 +217,33 @@ async def async_setup_entry(
         if not trident.get("present"):
             return
 
+        trident_device_info = _get_trident_device_info(trident)
+        trident_prefix = "" if trident_device_info is not None else "Trident "
+
         ref = _BinaryRef(
             key="trident_testing",
-            name="Trident Testing",
+            name=f"{trident_prefix}Testing".strip(),
             icon="mdi:test-tube",
             value_fn=_trident_is_testing,
         )
-        async_add_entities([ApexBinarySensor(coordinator, entry, ref=ref)])
+        tank_slug = slugify(str(entry.title or "tank").strip())
+        abaddr = (
+            cast(int, trident.get("abaddr"))
+            if isinstance(trident.get("abaddr"), int)
+            else None
+        )
+        addr_slug = f"trident_addr{abaddr}" if isinstance(abaddr, int) else "trident"
+        async_add_entities(
+            [
+                ApexBinarySensor(
+                    coordinator,
+                    entry,
+                    ref=ref,
+                    device_info=trident_device_info,
+                    suggested_object_id=f"{tank_slug}_{addr_slug}_testing",
+                )
+            ]
+        )
         added_trident_testing = True
 
     _add_trident_testing_entity()
@@ -217,14 +263,32 @@ async def async_setup_entry(
         if not trident.get("present"):
             return
 
+        trident_device_info = _get_trident_device_info(trident)
+        trident_prefix = "" if trident_device_info is not None else "Trident "
+
         ref = _BinaryRef(
             key="trident_waste_full",
-            name="Trident Waste Full",
+            name=f"{trident_prefix}Waste Full".strip(),
             icon="mdi:trash-can-alert",
             value_fn=_trident_waste_full,
         )
+        tank_slug = slugify(str(entry.title or "tank").strip())
+        abaddr = (
+            cast(int, trident.get("abaddr"))
+            if isinstance(trident.get("abaddr"), int)
+            else None
+        )
+        addr_slug = f"trident_addr{abaddr}" if isinstance(abaddr, int) else "trident"
         async_add_entities(
-            [ApexTridentWasteFullBinarySensor(coordinator, entry, ref=ref)]
+            [
+                ApexTridentWasteFullBinarySensor(
+                    coordinator,
+                    entry,
+                    ref=ref,
+                    device_info=trident_device_info,
+                    suggested_object_id=f"{tank_slug}_{addr_slug}_waste_full",
+                )
+            ]
         )
         added_trident_waste_full = True
 
@@ -247,30 +311,47 @@ async def async_setup_entry(
         if not trident.get("present"):
             return
 
+        trident_device_info = _get_trident_device_info(trident)
+        trident_prefix = "" if trident_device_info is not None else "Trident "
+
         refs = [
             _BinaryRef(
                 key="trident_reagent_a_empty",
-                name="Trident Reagent A Empty",
+                name=f"{trident_prefix}Reagent A Empty".strip(),
                 icon="mdi:flask-empty",
                 value_fn=_trident_reagent_empty("reagent_a_empty"),
             ),
             _BinaryRef(
                 key="trident_reagent_b_empty",
-                name="Trident Reagent B Empty",
+                name=f"{trident_prefix}Reagent B Empty".strip(),
                 icon="mdi:flask-empty",
                 value_fn=_trident_reagent_empty("reagent_b_empty"),
             ),
             _BinaryRef(
                 key="trident_reagent_c_empty",
-                name="Trident Reagent C Empty",
+                name=f"{trident_prefix}Reagent C Empty".strip(),
                 icon="mdi:flask-empty",
                 value_fn=_trident_reagent_empty("reagent_c_empty"),
             ),
         ]
 
+        tank_slug = slugify(str(entry.title or "tank").strip())
+        abaddr = (
+            cast(int, trident.get("abaddr"))
+            if isinstance(trident.get("abaddr"), int)
+            else None
+        )
+        addr_slug = f"trident_addr{abaddr}" if isinstance(abaddr, int) else "trident"
+
         async_add_entities(
             [
-                ApexTridentReagentEmptyBinarySensor(coordinator, entry, ref=r)
+                ApexTridentReagentEmptyBinarySensor(
+                    coordinator,
+                    entry,
+                    ref=r,
+                    device_info=trident_device_info,
+                    suggested_object_id=f"{tank_slug}_{addr_slug}_{r.key.removeprefix('trident_')}",
+                )
                 for r in refs
             ]
         )
@@ -383,6 +464,8 @@ class ApexDiagnosticBinarySensor(BinarySensorEntity):
         entry: ConfigEntry,
         *,
         ref: _BinaryRef,
+        device_info: DeviceInfo | None = None,
+        suggested_object_id: str | None = None,
     ) -> None:
         """Initialize the binary sensor."""
         super().__init__()
@@ -397,8 +480,10 @@ class ApexDiagnosticBinarySensor(BinarySensorEntity):
 
         self._attr_unique_id = f"{serial}_diag_bool_{ref.key}".lower()
         self._attr_name = ref.name
+        if suggested_object_id:
+            self._attr_suggested_object_id = suggested_object_id
         self._attr_icon = ref.icon
-        self._attr_device_info = build_device_info(
+        self._attr_device_info = device_info or build_device_info(
             host=host,
             meta=meta,
             device_identifier=coordinator.device_identifier,
@@ -441,8 +526,16 @@ class ApexBinarySensor(ApexDiagnosticBinarySensor):
         entry: ConfigEntry,
         *,
         ref: _BinaryRef,
+        device_info: DeviceInfo | None = None,
+        suggested_object_id: str | None = None,
     ) -> None:
-        super().__init__(coordinator, entry, ref=ref)
+        super().__init__(
+            coordinator,
+            entry,
+            ref=ref,
+            device_info=device_info,
+            suggested_object_id=suggested_object_id,
+        )
 
         host = str(entry.data.get(CONF_HOST, ""))
         meta_any: Any = (coordinator.data or {}).get("meta", {})

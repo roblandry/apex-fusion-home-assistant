@@ -12,7 +12,7 @@ from typing import Any, cast
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN, LOGGER_NAME, PLATFORMS
+from .const import CONF_HOST, DOMAIN, LOGGER_NAME, PLATFORMS
 from .coordinator import ApexNeptuneDataUpdateCoordinator
 
 _LOGGER = logging.getLogger(LOGGER_NAME)
@@ -31,15 +31,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator = ApexNeptuneDataUpdateCoordinator(hass, entry=entry)
     await coordinator.async_config_entry_first_refresh()
 
+    # Prefer the controller-reported hostname as the tank name.
+    host = str(entry.data.get(CONF_HOST, ""))
+    data: dict[str, Any] = coordinator.data or {}
+    meta_any: Any = data.get("meta")
+    meta = cast(dict[str, Any], meta_any) if isinstance(meta_any, dict) else {}
+    hostname = str(meta.get("hostname") or "").strip() or None
+    if not hostname:
+        config_any: Any = data.get("config")
+        if isinstance(config_any, dict):
+            nconf_any: Any = cast(dict[str, Any], config_any).get("nconf")
+            if isinstance(nconf_any, dict):
+                hostname = (
+                    str(cast(dict[str, Any], nconf_any).get("hostname") or "").strip()
+                    or None
+                )
+
+    desired_title = (
+        f"{hostname} ({host})"
+        if hostname
+        else str(entry.title or "").strip() or f"Apex ({host})"
+    )
+    if desired_title and str(entry.title or "") != desired_title:
+        hass.config_entries.async_update_entry(entry, title=desired_title)
+
     # Prefer controller serial as a stable, non-IP unique_id.
     # This prevents duplicate entries (and entity collisions) when the same
     # controller is added under different hostnames/IPs.
-    serial: str | None = None
-    data: dict[str, Any] = coordinator.data or {}
-    meta_any: Any = data.get("meta")
-    if isinstance(meta_any, dict):
-        meta = cast(dict[str, Any], meta_any)
-        serial = str(meta.get("serial") or "").strip() or None
+    serial: str | None = str(meta.get("serial") or "").strip() or None
 
     if serial and entry.unique_id != serial:
         other_entries = hass.config_entries.async_entries(DOMAIN)

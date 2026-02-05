@@ -118,6 +118,13 @@ async def test_update_setup_creates_module_update_entity_when_outdated(
                         "swrev": 3,
                         "swstat": "OK",
                     },
+                    {
+                        "abaddr": 5,
+                        "hwtype": "TRI",
+                        "present": True,
+                        "swrev": 1,
+                        "swstat": "OK",
+                    },
                 ],
             },
         },
@@ -136,10 +143,10 @@ async def test_update_setup_creates_module_update_entity_when_outdated(
     await update.async_setup_entry(hass, cast(Any, entry), _add_entities)
 
     # Controller firmware update + module updates.
-    assert len(added) == 3
+    assert len(added) == 4
 
     names = sorted(e.name for e in added)
-    assert names == ["AC6J Firmware", "FMM Firmware", "PM2 Firmware"]
+    assert names == ["AC6J Firmware", "FMM Firmware", "PM2 Firmware", "TRI Firmware"]
 
     fmm = next(e for e in added if e.name == "FMM Firmware")
     assert fmm.installed_version == "24"
@@ -150,6 +157,12 @@ async def test_update_setup_creates_module_update_entity_when_outdated(
     assert pm2.installed_version == "3"
     assert pm2.latest_version == "3"
     assert pm2.state == "off"
+
+    tri = next(e for e in added if e.name == "TRI Firmware")
+    assert tri.installed_version == "1"
+    assert tri.device_info is not None
+    assert tri.device_info.get("name") == "Trident (Addr 5)"
+    assert tri.device_info.get("via_device") == (DOMAIN, "TEST")
 
     fmm.async_write_ha_state = lambda *args, **kwargs: None
     await fmm.async_added_to_hass()

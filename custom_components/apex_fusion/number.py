@@ -13,9 +13,14 @@ from homeassistant.const import EntityCategory, UnitOfVolume
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.util import slugify
 
 from .const import CONF_HOST, CONF_PASSWORD, DOMAIN
-from .coordinator import ApexNeptuneDataUpdateCoordinator, build_device_info
+from .coordinator import (
+    ApexNeptuneDataUpdateCoordinator,
+    build_device_info,
+    build_trident_device_info,
+)
 
 
 async def async_setup_entry(
@@ -78,12 +83,59 @@ class ApexTridentWasteSizeNumber(NumberEntity):
         serial = str(meta.get("serial") or host or "apex").replace(":", "_")
 
         self._attr_unique_id = f"{serial}_trident_waste_size_ml".lower()
+        # If we can attach to a Trident device, keep the entity name short.
+        # If we have to fall back to the controller device, include the prefix.
         self._attr_name = "Trident Waste Container Size"
-        self._attr_device_info = build_device_info(
-            host=host,
-            meta=meta,
-            device_identifier=coordinator.device_identifier,
+
+        trident_any: Any = (coordinator.data or {}).get("trident")
+        trident_abaddr_any: Any = (
+            cast(dict[str, Any], trident_any).get("abaddr")
+            if isinstance(trident_any, dict)
+            else None
         )
+        if isinstance(trident_abaddr_any, int):
+            trident_hwtype_any: Any = (
+                cast(dict[str, Any], trident_any).get("hwtype")
+                if isinstance(trident_any, dict)
+                else None
+            )
+
+            tank_slug = slugify(str(entry.title or "tank").strip())
+            self._attr_suggested_object_id = (
+                f"{tank_slug}_trident_addr{trident_abaddr_any}_waste_container_size"
+            )
+
+            self._attr_device_info = build_trident_device_info(
+                host=host,
+                meta=meta,
+                controller_device_identifier=coordinator.device_identifier,
+                trident_abaddr=trident_abaddr_any,
+                trident_hwtype=(
+                    str(trident_hwtype_any).strip().upper()
+                    if isinstance(trident_hwtype_any, str)
+                    and trident_hwtype_any.strip()
+                    else None
+                ),
+                trident_hwrev=(
+                    str(cast(dict[str, Any], trident_any).get("hwrev") or "").strip()
+                    or None
+                ),
+                trident_swrev=(
+                    str(cast(dict[str, Any], trident_any).get("swrev") or "").strip()
+                    or None
+                ),
+                trident_serial=(
+                    str(cast(dict[str, Any], trident_any).get("serial") or "").strip()
+                    or None
+                ),
+            )
+            self._attr_name = "Waste Container Size"
+        else:
+            self._attr_device_info = build_device_info(
+                host=host,
+                meta=meta,
+                device_identifier=coordinator.device_identifier,
+            )
 
         self._attr_available = bool(
             getattr(self._coordinator, "last_update_success", True)

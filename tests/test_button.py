@@ -259,6 +259,44 @@ async def test_button_press_reraises_home_assistant_error(
     )
     entry.add_to_hass(hass)
 
+
+async def test_trident_button_device_info_falls_back_without_abaddr(
+    hass, enable_custom_integrations
+):
+    """Cover defensive device_info fallback when Trident abaddr is missing."""
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "1.2.3.4", CONF_PASSWORD: "pw"},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
+    )
+    entry.add_to_hass(hass)
+
+    coordinator = _CoordinatorStub(
+        data={
+            "meta": {"serial": "ABC"},
+            "trident": {"present": True},
+        },
+        device_identifier="ABC",
+    )
+
+    from custom_components.apex_fusion.button import (
+        ApexTridentButton,
+        _TridentButtonRef,
+    )
+
+    async def _noop(_c):
+        return None
+
+    ent = ApexTridentButton(
+        cast(Any, coordinator),
+        cast(Any, entry),
+        ref=_TridentButtonRef(key="x", name="X", icon="mdi:test", press_fn=_noop),
+    )
+    assert ent.device_info is not None
+    assert ent.device_info.get("identifiers") == {(DOMAIN, "ABC")}
+
     coordinator = _CoordinatorStub(
         data={"meta": {"serial": "ABC"}, "trident": {"present": True, "abaddr": 5}}
     )

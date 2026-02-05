@@ -98,6 +98,54 @@ def _step_reconfigure_schema(existing: dict[str, Any]) -> vol.Schema:
     )
 
 
+def _extract_hostname_from_status_obj(status_obj: dict[str, Any]) -> str | None:
+    """Best-effort hostname extraction from various REST status JSON shapes."""
+
+    def _coerce(v: Any) -> str | None:
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+        return None
+
+    def _maybe_from_dict(d: dict[str, Any]) -> str | None:
+        for k in ("hostname", "hostName", "host_name"):
+            s = _coerce(d.get(k))
+            if s:
+                return s
+
+        system_any: Any = d.get("system")
+        if isinstance(system_any, dict):
+            s = _coerce(cast(dict[str, Any], system_any).get("hostname"))
+            if s:
+                return s
+
+        nstat_any: Any = d.get("nstat")
+        if isinstance(nstat_any, dict):
+            s = _coerce(cast(dict[str, Any], nstat_any).get("hostname"))
+            if s:
+                return s
+
+        istat_any: Any = d.get("istat")
+        if isinstance(istat_any, dict):
+            s = _coerce(cast(dict[str, Any], istat_any).get("hostname"))
+            if s:
+                return s
+
+        return None
+
+    s = _maybe_from_dict(status_obj)
+    if s:
+        return s
+
+    for container_key in ("data", "status", "result", "systat"):
+        container_any: Any = status_obj.get(container_key)
+        if isinstance(container_any, dict):
+            s = _maybe_from_dict(cast(dict[str, Any], container_any))
+            if s:
+                return s
+
+    return None
+
+
 def _normalize_host(host: str) -> str:
     """Normalize a host field to a hostname/IP.
 
@@ -365,7 +413,38 @@ async def _async_validate_input(
                     )
                     serial = _extract_serial_from_status_obj(status_obj)
 
-                    title = f"Apex ({host})"
+                    # Prefer the controller-reported hostname for tank naming.
+                    hostname = _extract_hostname_from_status_obj(status_obj)
+                    if not hostname:
+                        try:
+                            async with async_timeout.timeout(10):
+                                async with session.get(
+                                    f"{base_url}/rest/config", headers=request_headers
+                                ) as resp:
+                                    if resp.status == 200:
+                                        config_text = await resp.text()
+                                        config_any: Any = (
+                                            json.loads(config_text)
+                                            if config_text
+                                            else {}
+                                        )
+                                        if isinstance(config_any, dict):
+                                            nconf_any: Any = cast(
+                                                dict[str, Any], config_any
+                                            ).get("nconf")
+                                            if isinstance(nconf_any, dict):
+                                                hostname = (
+                                                    str(
+                                                        cast(
+                                                            dict[str, Any], nconf_any
+                                                        ).get("hostname")
+                                                        or ""
+                                                    ).strip()
+                                                    or None
+                                                )
+                        except Exception:  # noqa: BLE001
+                            hostname = hostname
+                    title = f"{hostname} ({host})" if hostname else f"Apex ({host})"
                     return {"title": title, "unique_id": serial or host}
 
                 except (asyncio.TimeoutError, aiohttp.ClientError) as err:
@@ -398,6 +477,7 @@ async def _async_validate_input(
 
         root = ET.fromstring(body)
         serial = (root.findtext("./serial") or "").strip() or None
+        hostname = (root.findtext("./hostname") or "").strip() or None
 
     except InvalidAuth:
         if rest_invalid_auth:
@@ -410,7 +490,7 @@ async def _async_validate_input(
     except (asyncio.TimeoutError, aiohttp.ClientError, ET.ParseError) as err:
         raise CannotConnect from err
 
-    title = f"Apex ({host})"
+    title = f"{hostname} ({host})" if hostname else f"Apex ({host})"
     return {"title": title, "unique_id": serial or host}
 
 
@@ -435,6 +515,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             normalized_input = dict(user_input)
+
             normalized_input[CONF_HOST] = _normalize_host(
                 str(normalized_input.get(CONF_HOST, ""))
             )
@@ -464,7 +545,10 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 if existing is not None:
                     merged = dict(existing.data)
                     merged.update(normalized_input)
-                    self.hass.config_entries.async_update_entry(existing, data=merged)
+
+                    self.hass.config_entries.async_update_entry(
+                        existing, data=merged, title=info["title"]
+                    )
                     self.hass.config_entries.async_schedule_reload(existing.entry_id)
                     return self.async_abort(reason="already_configured")
 
@@ -615,7 +699,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         entry, unique_id=info["unique_id"]
                     )
 
-                self.hass.config_entries.async_update_entry(entry, data=merged)
+                self.hass.config_entries.async_update_entry(
+                    entry, data=merged, title=info["title"]
+                )
                 self.hass.config_entries.async_schedule_reload(entry.entry_id)
                 return self.async_abort(reason="reconfigure_successful")
 
