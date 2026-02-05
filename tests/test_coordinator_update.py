@@ -136,19 +136,12 @@ async def test_rest_success_with_mconf_and_cookie(hass, enable_custom_integratio
         )
     )
 
-    # mconf payload with MXM.
+    # /rest/config payload (contains mconf+nconf among other fields).
     session.queue_get(
         _Resp(
             200,
-            '{"mconf": [{"hwtype": "MXM", "extra": {"status": "Nero 5(x) - Rev 1 Ser #: S1 - OK"}}]}',
-        )
-    )
-
-    # nconf payload (contains secrets in real life; ensure we sanitize what we store).
-    session.queue_get(
-        _Resp(
-            200,
-            '{"nconf": {"latestFirmware": "5.12_CA25", "updateFirmware": false, "password": "pw"}}',
+            '{"mconf": [{"hwtype": "MXM", "extra": {"status": "Nero 5(x) - Rev 1 Ser #: S1 - OK"}}], '
+            '"nconf": {"latestFirmware": "5.12_CA25", "updateFirmware": false, "password": "pw"}}',
         )
     )
 
@@ -177,7 +170,110 @@ async def test_rest_success_with_mconf_and_cookie(hass, enable_custom_integratio
     }
 
 
-async def test_rest_trident_waste_size_from_mconf_and_nconf_404(
+async def test_rest_config_fallback_mconf_403_is_ignored(
+    hass, enable_custom_integrations
+):
+    session = _Session()
+    session.queue_get(_Resp(401, "{}"))
+    session.queue_post(_Resp(200, "{}", cookies={"connect.sid": "abc"}))
+    session.queue_get(
+        _Resp(
+            200,
+            '{"nstat": {"ipaddr": "1.2.3.4"}, "system": {"serial": "ABC"}, "inputs": [], "outputs": []}',
+        )
+    )
+
+    # /rest/config missing -> coordinator should ignore (no fallback to sub-endpoints).
+    session.queue_get(_Resp(404, "{}"))
+
+    coord = await _make_coordinator(hass, host="1.2.3.4")
+    with (
+        patch(
+            "custom_components.apex_fusion.coordinator.async_get_clientsession",
+            return_value=session,
+        ),
+        patch(
+            "custom_components.apex_fusion.coordinator.async_timeout.timeout",
+            return_value=_NullTimeout(),
+        ),
+    ):
+        data = await coord._async_update_data()
+
+    assert data["meta"]["source"] == "rest"
+
+
+async def test_rest_config_404_does_not_fallback_to_sub_endpoints(
+    hass, enable_custom_integrations
+):
+    session = _Session()
+    session.queue_get(_Resp(401, "{}"))
+    session.queue_post(_Resp(200, "{}", cookies={"connect.sid": "abc"}))
+    session.queue_get(
+        _Resp(
+            200,
+            '{"nstat": {"ipaddr": "1.2.3.4"}, "system": {"serial": "ABC"}, "inputs": [], "outputs": []}',
+        )
+    )
+
+    # /rest/config not available.
+    session.queue_get(_Resp(404, "{}"))
+    # Previously we would fall back to /rest/config/mconf and /rest/config/nconf.
+    # Those endpoints should not be queried anymore.
+    session.queue_get(_Resp(200, '{"mconf": []}'))
+    session.queue_get(_Resp(200, '{"nconf": {"latestFirmware": "5.12_CA25"}}'))
+
+    coord = await _make_coordinator(hass, host="1.2.3.4")
+    with (
+        patch(
+            "custom_components.apex_fusion.coordinator.async_get_clientsession",
+            return_value=session,
+        ),
+        patch(
+            "custom_components.apex_fusion.coordinator.async_timeout.timeout",
+            return_value=_NullTimeout(),
+        ),
+    ):
+        data = await coord._async_update_data()
+
+    assert data.get("config") is None
+    # Ensure the queued sub-endpoint responses were not consumed.
+    assert len(session._get_queue) == 2
+
+
+async def test_rest_config_fallback_nconf_unexpected_error_is_ignored(
+    hass, enable_custom_integrations
+):
+    session = _Session()
+    session.queue_get(_Resp(401, "{}"))
+    session.queue_post(_Resp(200, "{}", cookies={"connect.sid": "abc"}))
+    session.queue_get(
+        _Resp(
+            200,
+            '{"nstat": {"ipaddr": "1.2.3.4"}, "system": {"serial": "ABC"}, "inputs": [], "outputs": []}',
+        )
+    )
+
+    session.queue_get(_Resp(404, "{}"))
+    session.queue_get(_Resp(200, '{"mconf": []}'))
+    session.queue_get(RuntimeError("boom"))
+
+    coord = await _make_coordinator(hass, host="1.2.3.4")
+    with (
+        patch(
+            "custom_components.apex_fusion.coordinator.async_get_clientsession",
+            return_value=session,
+        ),
+        patch(
+            "custom_components.apex_fusion.coordinator.async_timeout.timeout",
+            return_value=_NullTimeout(),
+        ),
+    ):
+        data = await coord._async_update_data()
+
+    assert data["meta"]["source"] == "rest"
+
+
+async def test_rest_trident_waste_size_from_rest_config_mconf(
     hass, enable_custom_integrations
 ):
     session = _Session()
@@ -189,14 +285,13 @@ async def test_rest_trident_waste_size_from_mconf_and_nconf_404(
             '{"nstat": {"ipaddr": "1.2.3.4"}, "system": {"serial": "ABC"}, "modules": [{"abaddr": 4, "hwtype": "TRI", "present": true, "swrev": 23, "extra": {"levels": [1,2,3,4,5]}}], "inputs": [], "outputs": []}',
         )
     )
+    # /rest/config payload contains mconf (and may or may not include nconf).
     session.queue_get(
         _Resp(
             200,
             '{"mconf": [{"abaddr": 4, "hwtype": "TRI", "extra": {"wasteSize": 450.0}, "update": false, "updateStat": 0}]}',
         )
     )
-    # nconf missing -> coordinator should ignore.
-    session.queue_get(_Resp(404, "{}"))
 
     coord = await _make_coordinator(hass, host="1.2.3.4")
 
@@ -229,9 +324,8 @@ async def test_rest_trident_mconf_tri_without_extra_does_not_set_waste_size(
             '{"nstat": {"ipaddr": "1.2.3.4"}, "system": {"serial": "ABC"}, "modules": [{"abaddr": 4, "hwtype": "TRI", "present": true, "swrev": 23, "extra": {"levels": [1,2,3,4,5]}}], "inputs": [], "outputs": []}',
         )
     )
-    # TRI module present but no extra in sanitized mconf -> should hit continue branch.
+    # /rest/config payload contains TRI module but no extra; should not set waste size.
     session.queue_get(_Resp(200, '{"mconf": [{"abaddr": 4, "hwtype": "TRI"}]}'))
-    session.queue_get(_Resp(404, "{}"))
 
     coord = await _make_coordinator(hass, host="1.2.3.4")
 
@@ -252,6 +346,124 @@ async def test_rest_trident_mconf_tri_without_extra_does_not_set_waste_size(
     assert trident.get("waste_size_ml") is None
 
 
+async def test_rest_cached_sid_preserves_cached_config_and_mxm_devices(
+    hass, enable_custom_integrations
+):
+    session = _Session()
+    # First update: probe without login, login, status, mconf, nconf.
+    session.queue_get(_Resp(401, "{}"))
+    session.queue_post(_Resp(200, "{}", cookies={"connect.sid": "abc"}))
+    session.queue_get(
+        _Resp(
+            200,
+            '{"nstat": {"ipaddr": "1.2.3.4"}, "system": {"serial": "ABC"}, "inputs": [], "outputs": []}',
+        )
+    )
+    session.queue_get(
+        _Resp(
+            200,
+            '{"mconf": [{"hwtype": "MXM", "extra": {"status": "Nero 5(x) - Rev 1 Ser #: S1 - OK"}}], '
+            '"nconf": {"latestFirmware": "5.12_CA25", "updateFirmware": false, "password": "pw"}}',
+        )
+    )
+
+    # Second update: should use cached SID and only fetch status; coordinator should
+    # still carry forward cached sanitized config + mxm devices.
+    session.queue_get(
+        _Resp(
+            200,
+            '{"nstat": {"ipaddr": "1.2.3.4"}, "system": {"serial": "ABC"}, "inputs": [], "outputs": []}',
+        )
+    )
+
+    coord = await _make_coordinator(hass, host="1.2.3.4")
+
+    with (
+        patch(
+            "custom_components.apex_fusion.coordinator.async_get_clientsession",
+            return_value=session,
+        ),
+        patch(
+            "custom_components.apex_fusion.coordinator.async_timeout.timeout",
+            return_value=_NullTimeout(),
+        ),
+    ):
+        data1 = await coord._async_update_data()
+        assert "mxm_devices" in data1
+        assert isinstance(data1.get("config"), dict)
+        assert cast(dict[str, Any], data1["config"]).get("nconf") == {
+            "latestFirmware": "5.12_CA25",
+            "updateFirmware": False,
+        }
+
+        data2 = await coord._async_update_data()
+
+    assert "mxm_devices" in data2
+    config2 = data2.get("config")
+    assert isinstance(config2, dict)
+    assert cast(dict[str, Any], config2).get("nconf") == {
+        "latestFirmware": "5.12_CA25",
+        "updateFirmware": False,
+    }
+
+
+async def test_rest_cached_sid_merges_trident_waste_size_from_cached_mconf(
+    hass, enable_custom_integrations
+):
+    session = _Session()
+
+    # First update: establish cache from mconf.
+    session.queue_get(_Resp(401, "{}"))
+    session.queue_post(_Resp(200, "{}", cookies={"connect.sid": "abc"}))
+    session.queue_get(
+        _Resp(
+            200,
+            '{"nstat": {"ipaddr": "1.2.3.4"}, "system": {"serial": "ABC"}, '
+            '"modules": [{"abaddr": 4, "hwtype": "TRI", "present": true, "swrev": 23, "extra": {"levels": [1,2,3,4,5]}}], '
+            '"inputs": [], "outputs": []}',
+        )
+    )
+    # /rest/config returns mconf (nconf omitted) so we can cache waste size.
+    session.queue_get(
+        _Resp(
+            200,
+            '{"mconf": [{"abaddr": 4, "hwtype": "TRI", "extra": {"wasteSize": 450.0}, "update": false, "updateStat": 0}]}',
+        )
+    )
+
+    # Second update: cached SID status-only poll; should carry forward waste size.
+    session.queue_get(
+        _Resp(
+            200,
+            '{"nstat": {"ipaddr": "1.2.3.4"}, "system": {"serial": "ABC"}, '
+            '"modules": [{"abaddr": 4, "hwtype": "TRI", "present": true, "swrev": 23, "extra": {"levels": [10,20,30,40,50]}}], '
+            '"inputs": [], "outputs": []}',
+        )
+    )
+
+    coord = await _make_coordinator(hass, host="1.2.3.4")
+
+    with (
+        patch(
+            "custom_components.apex_fusion.coordinator.async_get_clientsession",
+            return_value=session,
+        ),
+        patch(
+            "custom_components.apex_fusion.coordinator.async_timeout.timeout",
+            return_value=_NullTimeout(),
+        ),
+    ):
+        data1 = await coord._async_update_data()
+        trident1 = data1.get("trident")
+        assert isinstance(trident1, dict)
+        assert trident1.get("waste_size_ml") == 450.0
+
+        data2 = await coord._async_update_data()
+        trident2 = data2.get("trident")
+        assert isinstance(trident2, dict)
+        assert trident2.get("waste_size_ml") == 450.0
+
+
 async def test_rest_nconf_bad_json_and_unexpected_error_are_handled(
     hass, enable_custom_integrations
 ):
@@ -266,6 +478,141 @@ async def test_rest_nconf_bad_json_and_unexpected_error_are_handled(
         )
     )
     session.queue_get(_Resp(200, '{"mconf": []}'))
+    session.queue_get(_Resp(200, "not-json"))
+
+    coord = await _make_coordinator(hass, host="1.2.3.4")
+    with (
+        patch(
+            "custom_components.apex_fusion.coordinator.async_get_clientsession",
+            return_value=session,
+        ),
+        patch(
+            "custom_components.apex_fusion.coordinator.async_timeout.timeout",
+            return_value=_NullTimeout(),
+        ),
+    ):
+        data = await coord._async_update_data()
+
+    assert data["meta"]["source"] == "rest"
+
+
+async def test_rest_config_fallback_mconf_404_is_ignored(
+    hass, enable_custom_integrations
+):
+    session = _Session()
+    session.queue_get(_Resp(401, "{}"))
+    session.queue_post(_Resp(200, "{}", cookies={"connect.sid": "abc"}))
+    session.queue_get(
+        _Resp(
+            200,
+            '{"nstat": {"ipaddr": "1.2.3.4"}, "system": {"serial": "ABC"}, "inputs": [], "outputs": []}',
+        )
+    )
+
+    # Force fallback (no /rest/config)
+    session.queue_get(_Resp(404, "{}"))
+    # /rest/config/mconf missing
+    session.queue_get(_Resp(404, "{}"))
+
+    coord = await _make_coordinator(hass, host="1.2.3.4")
+    with (
+        patch(
+            "custom_components.apex_fusion.coordinator.async_get_clientsession",
+            return_value=session,
+        ),
+        patch(
+            "custom_components.apex_fusion.coordinator.async_timeout.timeout",
+            return_value=_NullTimeout(),
+        ),
+    ):
+        data = await coord._async_update_data()
+
+    assert data["meta"]["source"] == "rest"
+
+
+async def test_rest_config_fallback_nconf_403_is_ignored(
+    hass, enable_custom_integrations
+):
+    session = _Session()
+    session.queue_get(_Resp(401, "{}"))
+    session.queue_post(_Resp(200, "{}", cookies={"connect.sid": "abc"}))
+    session.queue_get(
+        _Resp(
+            200,
+            '{"nstat": {"ipaddr": "1.2.3.4"}, "system": {"serial": "ABC"}, "inputs": [], "outputs": []}',
+        )
+    )
+
+    # Force fallback
+    session.queue_get(_Resp(404, "{}"))
+    session.queue_get(_Resp(200, '{"mconf": []}'))
+    session.queue_get(_Resp(403, "{}"))
+
+    coord = await _make_coordinator(hass, host="1.2.3.4")
+    with (
+        patch(
+            "custom_components.apex_fusion.coordinator.async_get_clientsession",
+            return_value=session,
+        ),
+        patch(
+            "custom_components.apex_fusion.coordinator.async_timeout.timeout",
+            return_value=_NullTimeout(),
+        ),
+    ):
+        data = await coord._async_update_data()
+
+    assert data["meta"]["source"] == "rest"
+
+
+async def test_rest_config_fallback_nconf_bad_json_is_ignored(
+    hass, enable_custom_integrations
+):
+    session = _Session()
+    session.queue_get(_Resp(401, "{}"))
+    session.queue_post(_Resp(200, "{}", cookies={"connect.sid": "abc"}))
+    session.queue_get(
+        _Resp(
+            200,
+            '{"nstat": {"ipaddr": "1.2.3.4"}, "system": {"serial": "ABC"}, "inputs": [], "outputs": []}',
+        )
+    )
+
+    # Force fallback
+    session.queue_get(_Resp(404, "{}"))
+    session.queue_get(_Resp(200, '{"mconf": []}'))
+    session.queue_get(_Resp(200, "not-json"))
+
+    coord = await _make_coordinator(hass, host="1.2.3.4")
+    with (
+        patch(
+            "custom_components.apex_fusion.coordinator.async_get_clientsession",
+            return_value=session,
+        ),
+        patch(
+            "custom_components.apex_fusion.coordinator.async_timeout.timeout",
+            return_value=_NullTimeout(),
+        ),
+    ):
+        data = await coord._async_update_data()
+
+    assert data["meta"]["source"] == "rest"
+
+
+async def test_rest_config_fallback_mconf_bad_json_is_ignored(
+    hass, enable_custom_integrations
+):
+    session = _Session()
+    session.queue_get(_Resp(401, "{}"))
+    session.queue_post(_Resp(200, "{}", cookies={"connect.sid": "abc"}))
+    session.queue_get(
+        _Resp(
+            200,
+            '{"nstat": {"ipaddr": "1.2.3.4"}, "system": {"serial": "ABC"}, "inputs": [], "outputs": []}',
+        )
+    )
+
+    # Force fallback
+    session.queue_get(_Resp(404, "{}"))
     session.queue_get(_Resp(200, "not-json"))
 
     coord = await _make_coordinator(hass, host="1.2.3.4")

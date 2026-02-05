@@ -34,14 +34,14 @@ Contributors are welcome (issues, testing feedback, and PRs).
 - Digital inputs as binary sensors (leak/float switches, etc)
 - Output control via 3-way selects (Off / Auto / On)
 - Firmware update entities (controller + modules)
-- Trident reagent + waste container level sensors (mL)
+- Trident waste/reagent support (levels + alerts + controls, when a Trident is present)
 - Designed for stable device identity and robust backoff on rate limiting
 
 ## Tested / Intended Hardware
 
 This integration is designed for Neptune Apex controllers reachable on your LAN.
 
-- **Written for** controllers that expose the local REST API (for example: `GET /rest/status`, `GET /rest/config/nconf`, `GET /rest/config/mconf`).
+- **Written for** controllers that expose the local REST API (for example: `GET /rest/status`, `GET /rest/config`).
 - **Fallback support** for legacy/older firmwares that only expose `GET /cgi-bin/status.xml` (best-effort).
 - **Developed against** real controller payloads including a Trident module (Trident container level sensors are only created when a Trident is detected).
 
@@ -110,6 +110,8 @@ This integration provides entities across these Home Assistant platforms:
 - **Binary sensors**
   - Digital inputs (leak/float switches)
   - Trident Testing (when a Trident is present)
+  - Trident Waste Full (when a Trident is present)
+  - Trident Reagent A/B/C Empty (when a Trident is present)
 - **Selects**
   - One select per controllable output: Off / Auto / On
   - Sends control via the local REST API (`PUT /rest/status/outputs/<did>`)
@@ -118,9 +120,21 @@ This integration provides entities across these Home Assistant platforms:
   - Turning a feed switch **on** starts that feed cycle (timer).
   - Turning a feed switch **off** cancels the active feed cycle.
   - Control is REST-first (`PUT /rest/status/feed/<id>`), with legacy CGI fallback (`POST /cgi-bin/status.cgi`).
+- **Buttons**
+  - Refresh Config Now (controller)
+  - Trident Prime Reagent A/B/C + Prime Sample
+  - Trident Reset Reagent A/B/C + Reset Waste
+- **Numbers**
+  - Trident Waste Container Size (mL)
 - **Updates**
   - Controller firmware update entity, named by controller type (example: `AC6J Firmware`)
   - Module firmware update entities (FMM, PM2, VDM, TRI, etc)
+
+### Config Refresh
+
+Config is larger and changes less frequently than status, so it is refreshed on a slower cadence than `/rest/status`.
+
+If you need config changes to show up immediately (including after using Trident control entities), use the controller button entity "Refresh Config Now" to force an immediate `/rest/config` refresh.
 
 ### Entity attributes (examples)
 
@@ -199,13 +213,13 @@ updates there.
 > initiate or install firmware updates. Apply firmware updates using Neptune’s own
 > workflow (Fusion/app/controller UI).
 
-- **Controller update** uses controller-reported values (prefers `/rest/config/nconf` when
+- **Controller update** uses controller-reported values (prefers sanitized config from `/rest/config` when
   available, otherwise `/rest/status`):
   - Installed version from `system.software`
   - Latest version from `nconf.latestFirmware` / `nstat.latestFirmware`
   - Update flag from `nconf.updateFirmware` / `nstat.updateFirmware`
 - **Module update** support varies by firmware. This integration uses (in priority order):
-  - Module config flags from `/rest/config/mconf` when present
+  - Module config flags from sanitized config (from `/rest/config`) when present
   - Module status signals from `/rest/status.modules[]` (`swrev` and `swstat`)
 
 If a module doesn't report a concrete latest version, the integration will still surface
@@ -221,6 +235,9 @@ When a Trident module is present (`hwtype: TRI`), the integration exposes:
 - Trident Status sensor
 - Trident Testing binary sensor
 - Trident container levels (mL) from `modules[].extra.levels`
+- Trident Waste Full + Trident Reagent A/B/C Empty binary sensors
+- Trident controls: Prime (A/B/C/Sample), Reset Reagent (A/B/C), Reset Waste
+- Trident Waste Container Size number entity (mL)
 
 ## Development
 

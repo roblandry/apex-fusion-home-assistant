@@ -26,12 +26,11 @@ from homeassistant.const import (
     UnitOfVolume,
 )
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import StateType
 
 from .const import CONF_HOST, DOMAIN
-from .coordinator import ApexNeptuneDataUpdateCoordinator
+from .coordinator import ApexNeptuneDataUpdateCoordinator, build_device_info
 
 _SIMPLE_REST_SINGLE_SENSOR_MODE = False
 
@@ -496,35 +495,6 @@ async def async_setup_entry(
     _add_trident_diagnostics()
     remove_trident = coordinator.async_add_listener(_add_trident_diagnostics)
     entry.async_on_unload(remove_trident)
-
-
-def build_device_info(
-    *, host: str, meta: dict[str, Any], device_identifier: str
-) -> DeviceInfo:
-    """Build DeviceInfo for this controller.
-
-    Args:
-        host: Controller host/IP.
-        meta: Coordinator meta dict.
-
-    Returns:
-        DeviceInfo instance.
-    """
-    serial = str(meta.get("serial") or "").strip() or None
-    model = str(meta.get("type") or meta.get("hardware") or "Apex").strip() or "Apex"
-    name = str(meta.get("hostname") or f"Apex ({host})")
-
-    identifiers = {(DOMAIN, device_identifier)}
-    return DeviceInfo(
-        identifiers=identifiers,
-        name=name,
-        manufacturer="Neptune Systems",
-        model=model,
-        serial_number=serial,
-        hw_version=(str(meta.get("hardware") or "").strip() or None),
-        sw_version=(str(meta.get("software") or "").strip() or None),
-        configuration_url=f"http://{host}",
-    )
 
 
 class ApexRestDebugSensor(SensorEntity):

@@ -15,11 +15,10 @@ from homeassistant.components.binary_sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import CONF_HOST, DOMAIN
-from .coordinator import ApexNeptuneDataUpdateCoordinator
+from .coordinator import ApexNeptuneDataUpdateCoordinator, build_device_info
 
 
 @dataclass(frozen=True)
@@ -55,35 +54,6 @@ def _as_int_0_1(value: Any) -> int | None:
     return None
 
 
-def _build_device_info(
-    *, host: str, meta: dict[str, Any], device_identifier: str
-) -> DeviceInfo:
-    """Build DeviceInfo for this controller.
-
-    Args:
-        host: Controller host/IP.
-        meta: Coordinator meta dict.
-
-    Returns:
-        DeviceInfo instance.
-    """
-    serial = str(meta.get("serial") or "").strip() or None
-    model = str(meta.get("type") or meta.get("hardware") or "Apex").strip() or "Apex"
-    name = str(meta.get("hostname") or f"Apex ({host})")
-
-    identifiers = {(DOMAIN, device_identifier)}
-    return DeviceInfo(
-        identifiers=identifiers,
-        name=name,
-        manufacturer="Neptune Systems",
-        model=model,
-        serial_number=serial,
-        hw_version=(str(meta.get("hardware") or "").strip() or None),
-        sw_version=(str(meta.get("software") or "").strip() or None),
-        configuration_url=f"http://{host}",
-    )
-
-
 def _network_bool(field: str) -> Callable[[dict[str, Any]], bool | None]:
     """Return a function that extracts a boolean-ish network field."""
 
@@ -111,6 +81,31 @@ def _trident_is_testing(data: dict[str, Any]) -> bool | None:
     if isinstance(value, bool):
         return value
     return None
+
+
+def _trident_waste_full(data: dict[str, Any]) -> bool | None:
+    trident_any: Any = data.get("trident")
+    if not isinstance(trident_any, dict):
+        return None
+    trident = cast(dict[str, Any], trident_any)
+    value: Any = trident.get("waste_full")
+    if isinstance(value, bool):
+        return value
+    return None
+
+
+def _trident_reagent_empty(field: str) -> Callable[[dict[str, Any]], bool | None]:
+    def _get(data: dict[str, Any]) -> bool | None:
+        trident_any: Any = data.get("trident")
+        if not isinstance(trident_any, dict):
+            return None
+        trident = cast(dict[str, Any], trident_any)
+        value: Any = trident.get(field)
+        if isinstance(value, bool):
+            return value
+        return None
+
+    return _get
 
 
 async def async_setup_entry(
@@ -180,6 +175,8 @@ async def async_setup_entry(
     async_add_entities(entities)
 
     added_trident_testing = False
+    added_trident_waste_full = False
+    added_trident_reagent_empty = False
 
     def _add_trident_testing_entity() -> None:
         nonlocal added_trident_testing
@@ -206,6 +203,84 @@ async def async_setup_entry(
     _add_trident_testing_entity()
     remove_trident = coordinator.async_add_listener(_add_trident_testing_entity)
     entry.async_on_unload(remove_trident)
+
+    def _add_trident_waste_full_entity() -> None:
+        nonlocal added_trident_waste_full
+        if added_trident_waste_full:
+            return
+
+        data = coordinator.data or {}
+        trident_any: Any = data.get("trident")
+        if not isinstance(trident_any, dict):
+            return
+        trident = cast(dict[str, Any], trident_any)
+        if not trident.get("present"):
+            return
+
+        ref = _BinaryRef(
+            key="trident_waste_full",
+            name="Trident Waste Full",
+            icon="mdi:trash-can-alert",
+            value_fn=_trident_waste_full,
+        )
+        async_add_entities(
+            [ApexTridentWasteFullBinarySensor(coordinator, entry, ref=ref)]
+        )
+        added_trident_waste_full = True
+
+    _add_trident_waste_full_entity()
+    remove_trident_waste = coordinator.async_add_listener(
+        _add_trident_waste_full_entity
+    )
+    entry.async_on_unload(remove_trident_waste)
+
+    def _add_trident_reagent_empty_entities() -> None:
+        nonlocal added_trident_reagent_empty
+        if added_trident_reagent_empty:
+            return
+
+        data = coordinator.data or {}
+        trident_any: Any = data.get("trident")
+        if not isinstance(trident_any, dict):
+            return
+        trident = cast(dict[str, Any], trident_any)
+        if not trident.get("present"):
+            return
+
+        refs = [
+            _BinaryRef(
+                key="trident_reagent_a_empty",
+                name="Trident Reagent A Empty",
+                icon="mdi:flask-empty",
+                value_fn=_trident_reagent_empty("reagent_a_empty"),
+            ),
+            _BinaryRef(
+                key="trident_reagent_b_empty",
+                name="Trident Reagent B Empty",
+                icon="mdi:flask-empty",
+                value_fn=_trident_reagent_empty("reagent_b_empty"),
+            ),
+            _BinaryRef(
+                key="trident_reagent_c_empty",
+                name="Trident Reagent C Empty",
+                icon="mdi:flask-empty",
+                value_fn=_trident_reagent_empty("reagent_c_empty"),
+            ),
+        ]
+
+        async_add_entities(
+            [
+                ApexTridentReagentEmptyBinarySensor(coordinator, entry, ref=r)
+                for r in refs
+            ]
+        )
+        added_trident_reagent_empty = True
+
+    _add_trident_reagent_empty_entities()
+    remove_trident_reagent_empty = coordinator.async_add_listener(
+        _add_trident_reagent_empty_entities
+    )
+    entry.async_on_unload(remove_trident_reagent_empty)
 
 
 class ApexDigitalProbeBinarySensor(BinarySensorEntity):
@@ -243,7 +318,7 @@ class ApexDigitalProbeBinarySensor(BinarySensorEntity):
 
         self._attr_unique_id = f"{serial}_digital_{ref.key}".lower()
         self._attr_name = ref.name
-        self._attr_device_info = _build_device_info(
+        self._attr_device_info = build_device_info(
             host=host,
             meta=meta,
             device_identifier=coordinator.device_identifier,
@@ -323,7 +398,7 @@ class ApexDiagnosticBinarySensor(BinarySensorEntity):
         self._attr_unique_id = f"{serial}_diag_bool_{ref.key}".lower()
         self._attr_name = ref.name
         self._attr_icon = ref.icon
-        self._attr_device_info = _build_device_info(
+        self._attr_device_info = build_device_info(
             host=host,
             meta=meta,
             device_identifier=coordinator.device_identifier,
@@ -376,3 +451,15 @@ class ApexBinarySensor(ApexDiagnosticBinarySensor):
 
         # Use a distinct unique_id prefix so entity ids differ from diagnostics.
         self._attr_unique_id = f"{serial}_bool_{ref.key}".lower()
+
+
+class ApexTridentWasteFullBinarySensor(ApexDiagnosticBinarySensor):
+    """Binary sensor for Trident waste-full condition."""
+
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
+
+
+class ApexTridentReagentEmptyBinarySensor(ApexDiagnosticBinarySensor):
+    """Binary sensor for Trident reagent-empty condition."""
+
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM

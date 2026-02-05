@@ -27,6 +27,13 @@ def test_binary_sensor_int_coercion_helpers_cover_branches():
     assert binary_sensor._as_int_0_1(object()) is None
 
 
+def test_trident_reagent_empty_extractor_returns_bool():
+    from custom_components.apex_fusion import binary_sensor
+
+    fn = binary_sensor._trident_reagent_empty("reagent_a_empty")
+    assert fn({"trident": {"reagent_a_empty": True}}) is True
+
+
 @dataclass
 class _CoordinatorStub:
     data: dict[str, Any]
@@ -61,7 +68,7 @@ async def test_binary_sensor_setup_and_updates(hass, enable_custom_integrations)
         data={
             "meta": {"serial": "ABC"},
             "network": {"dhcp": True, "wifi_enable": 1},
-            "trident": {"present": True, "is_testing": True},
+            "trident": {"present": True, "is_testing": True, "waste_full": True},
             "probes": {
                 "DI1": {"name": "Door_1", "type": "digital", "value": 0},
             },
@@ -86,7 +93,7 @@ async def test_binary_sensor_setup_and_updates(hass, enable_custom_integrations)
     for cb in list(listeners):
         cb()
 
-    assert len(added) == 4
+    assert len(added) == 8
 
     digital = next(
         (e for e in added if isinstance(e, binary_sensor.ApexDigitalProbeBinarySensor)),
@@ -107,6 +114,10 @@ async def test_binary_sensor_setup_and_updates(hass, enable_custom_integrations)
     coordinator.data["network"]["dhcp"] = False
     coordinator.data["network"]["wifi_enable"] = "yes"  # unsupported
     coordinator.data["trident"]["is_testing"] = "nope"  # unsupported -> None
+    coordinator.data["trident"]["waste_full"] = "nope"  # unsupported -> None
+    coordinator.data["trident"]["reagent_a_empty"] = "nope"  # unsupported -> None
+    coordinator.data["trident"]["reagent_b_empty"] = "nope"  # unsupported -> None
+    coordinator.data["trident"]["reagent_c_empty"] = "nope"  # unsupported -> None
     coordinator.data["probes"]["DI1"]["value"] = 1
 
     for ent in added:
@@ -175,8 +186,9 @@ async def test_binary_sensor_digital_probe_skips_and_fallbacks(
 
     await binary_sensor.async_setup_entry(hass, cast(Any, entry), _add_entities)
 
-    # 2 network diagnostic entities + Trident Testing + 2 valid digital probes
-    assert len(added) == 5
+    # 2 network diagnostic entities + Trident Testing + Trident Waste Full
+    # + 3 reagent-empty + 2 valid digital probes
+    assert len(added) == 9
 
     for ent in added:
         ent.async_write_ha_state = lambda *args, **kwargs: None

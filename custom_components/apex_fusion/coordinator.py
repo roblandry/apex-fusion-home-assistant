@@ -22,6 +22,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from yarl import URL
 
@@ -32,10 +33,21 @@ from .const import (
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_STATUS_PATH,
     DEFAULT_TIMEOUT_SECONDS,
+    DOMAIN,
     LOGGER_NAME,
 )
 
 _LOGGER = logging.getLogger(LOGGER_NAME)
+
+
+# Conservative safety margins for Trident derived warnings.
+#
+# Waste: a full sample run can add ~12 mL; warning should trigger before the
+# container is completely full.
+TRIDENT_WASTE_FULL_MARGIN_ML = 20.0
+
+# Reagents: warn conservatively when near-empty.
+TRIDENT_REAGENT_EMPTY_THRESHOLD_ML = 20.0
 
 
 _TRANSIENT_HTTP_STATUSES: set[int] = {
@@ -68,6 +80,36 @@ def _set_connect_sid_cookie(
     session.cookie_jar.update_cookies({"connect.sid": sid}, response_url=URL(base_url))
 
 
+def build_device_info(
+    *, host: str, meta: dict[str, Any], device_identifier: str
+) -> DeviceInfo:
+    """Build DeviceInfo for this controller.
+
+    Args:
+        host: Controller host/IP.
+        meta: Coordinator meta dict.
+        device_identifier: Stable identifier for the HA device registry.
+
+    Returns:
+        DeviceInfo instance.
+    """
+    serial = str(meta.get("serial") or "").strip() or None
+    model = str(meta.get("type") or meta.get("hardware") or "Apex").strip() or "Apex"
+    name = str(meta.get("hostname") or f"Apex ({host})")
+
+    identifiers = {(DOMAIN, device_identifier)}
+    return DeviceInfo(
+        identifiers=identifiers,
+        name=name,
+        manufacturer="Neptune Systems",
+        model=model,
+        serial_number=serial,
+        hw_version=(str(meta.get("hardware") or "").strip() or None),
+        sw_version=(str(meta.get("software") or "").strip() or None),
+        configuration_url=f"http://{host}",
+    )
+
+
 class _RestNotSupported(Exception):
     """Internal signal used to fall back to legacy XML."""
 
@@ -92,13 +134,13 @@ _MXM_STATUS_LINE = re.compile(
 def _parse_mxm_devices_from_mconf(
     mconf_obj: dict[str, Any],
 ) -> dict[str, dict[str, str]]:
-    """Extract MXM device metadata from `/rest/config/mconf`.
+    """Extract MXM device metadata from `mconf` (from `/rest/config`).
 
     The MXM module includes a multiline `extra.status` string listing attached
     devices with revision and serial numbers.
 
     Args:
-        mconf_obj: Parsed JSON from `/rest/config/mconf`.
+        mconf_obj: Parsed JSON from `/rest/config` (expects an `mconf` list).
 
     Returns:
         Mapping of device name -> metadata dict.
@@ -139,7 +181,7 @@ def _parse_mxm_devices_from_mconf(
 
 
 def _sanitize_mconf_for_storage(mconf_obj: dict[str, Any]) -> list[dict[str, Any]]:
-    """Sanitize `/rest/config/mconf` for storage.
+    """Sanitize `mconf` (from `/rest/config`) for storage.
 
     The raw payload can include a lot of device metadata. For coordinator state,
     only retain fields needed by this integration (module update flags, a small
@@ -202,7 +244,7 @@ def _sanitize_mconf_for_storage(mconf_obj: dict[str, Any]) -> list[dict[str, Any
 
 
 def _sanitize_nconf_for_storage(nconf_obj: dict[str, Any]) -> dict[str, Any]:
-    """Sanitize `/rest/config/nconf` for storage.
+    """Sanitize `nconf` (from `/rest/config`) for storage.
 
     This payload commonly includes credentials. Keep only update-related fields.
     """
@@ -588,6 +630,7 @@ def parse_status_rest(status_obj: dict[str, Any]) -> dict[str, Any]:
                 "present": False,
                 "status": None,
                 "is_testing": None,
+                "abaddr": None,
                 "reagent_a_remaining": None,
                 "reagent_b_remaining": None,
                 "reagent_c_remaining": None,
@@ -597,6 +640,7 @@ def parse_status_rest(status_obj: dict[str, Any]) -> dict[str, Any]:
 
         best_status: str | None = None
         present = False
+        abaddr: int | None = None
         levels_ml: list[float] | None = None
         consumables: dict[str, Any] = {
             "reagent_a_remaining": None,
@@ -620,6 +664,11 @@ def parse_status_rest(status_obj: dict[str, Any]) -> dict[str, Any]:
             )
             if hwtype not in {"TRI", "TNP"}:
                 continue
+
+            abaddr_any: Any = module.get("abaddr")
+            if isinstance(abaddr_any, int):
+                abaddr = abaddr_any
+
             extra_any: Any = module.get("extra")
             if not isinstance(extra_any, dict):
                 continue
@@ -672,6 +721,7 @@ def parse_status_rest(status_obj: dict[str, Any]) -> dict[str, Any]:
                 "present": present,
                 "status": None,
                 "is_testing": None,
+                "abaddr": abaddr,
                 "levels_ml": levels_ml,
                 **consumables,
             }
@@ -682,6 +732,7 @@ def parse_status_rest(status_obj: dict[str, Any]) -> dict[str, Any]:
             "present": present,
             "status": best_status,
             "is_testing": is_testing,
+            "abaddr": abaddr,
             "levels_ml": levels_ml,
             **consumables,
         }
@@ -990,6 +1041,17 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._rest_status_path: str | None = None
         self._cached_serial: str | None = None
 
+        # REST config is large and changes infrequently.
+        #
+        # We prefer a single /rest/config fetch (sanitized) on a slower cadence than
+        # /rest/status. When the user changes a config value via HA, we force a
+        # refresh immediately after the PUT (no optimistic "fake" state).
+        self._rest_config_last_fetch: float = 0.0
+        self._rest_config_refresh_seconds: float = 5 * 60
+        self._cached_mconf: list[dict[str, Any]] | None = None
+        self._cached_nconf: dict[str, Any] | None = None
+        self._cached_mxm_devices: dict[str, dict[str, str]] | None = None
+
         super().__init__(
             hass,
             _LOGGER,
@@ -1023,6 +1085,251 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             meta["serial"] = self._cached_serial
 
         return data
+
+    def _merge_cached_rest_config(self, data: dict[str, Any]) -> None:
+        """Merge cached sanitized REST config into the new coordinator data."""
+        if self._cached_mconf is not None or self._cached_nconf is not None:
+            config_any: Any = data.get("config")
+            if not isinstance(config_any, dict):
+                config_any = {}
+                data["config"] = config_any
+            config = cast(dict[str, Any], config_any)
+            if self._cached_mconf is not None and "mconf" not in config:
+                config["mconf"] = self._cached_mconf
+            if self._cached_nconf is not None and "nconf" not in config:
+                config["nconf"] = self._cached_nconf
+
+        if self._cached_mxm_devices and "mxm_devices" not in data:
+            data["mxm_devices"] = self._cached_mxm_devices
+
+        # If Trident waste size was learned from config previously, carry it forward.
+        trident_any: Any = data.get("trident")
+        if isinstance(trident_any, dict):
+            trident = cast(dict[str, Any], trident_any)
+            if trident.get("waste_size_ml") is None:
+                prev = None
+                # Prefer cached mconf-derived value if present in cached mconf.
+                if self._cached_mconf:
+                    for m in self._cached_mconf:
+                        if str(m.get("hwtype") or "").strip().upper() not in {
+                            "TRI",
+                            "TNP",
+                        }:
+                            continue
+                        extra_any: Any = m.get("extra")
+                        if isinstance(extra_any, dict):
+                            waste_any: Any = cast(dict[str, Any], extra_any).get(
+                                "wasteSize"
+                            )
+                            if isinstance(waste_any, (int, float)):
+                                prev = float(waste_any)
+                                break
+                if prev is not None:
+                    trident["waste_size_ml"] = prev
+
+    async def _async_try_refresh_rest_config(
+        self,
+        *,
+        data: dict[str, Any],
+        session: aiohttp.ClientSession,
+        base_url: str,
+        sid: str | None,
+        timeout_seconds: int,
+        host: str,
+        force: bool = False,
+    ) -> None:
+        """Optionally refresh cached config subsets.
+
+        This is best-effort and should never fail the main status poll.
+        """
+
+        def _cookie_headers(sid_value: str | None) -> dict[str, str]:
+            headers = {
+                "Accept": "*/*",
+                "Content-Type": "application/json",
+            }
+            if sid_value:
+                headers["Cookie"] = f"connect.sid={sid_value}"
+            return headers
+
+        now = time.monotonic()
+
+        # If we already have cached values, merge them into this poll's output
+        # regardless of whether we refresh.
+        self._merge_cached_rest_config(data)
+
+        should_refresh = force or (
+            self._cached_mconf is None
+            or (now - self._rest_config_last_fetch) >= self._rest_config_refresh_seconds
+        )
+        if not should_refresh:
+            return
+
+        def _apply_sanitized_config(
+            *,
+            config_obj: dict[str, Any],
+            sanitized_mconf: list[dict[str, Any]] | None,
+            sanitized_nconf: dict[str, Any] | None,
+        ) -> None:
+            if sanitized_mconf is not None:
+                self._cached_mconf = sanitized_mconf
+                data.setdefault("config", {})["mconf"] = sanitized_mconf
+
+                trident_any: Any = data.get("trident")
+                if isinstance(trident_any, dict):
+                    for m in sanitized_mconf:
+                        if str(m.get("hwtype") or "").strip().upper() not in {
+                            "TRI",
+                            "TNP",
+                        }:
+                            continue
+                        extra_any: Any = m.get("extra")
+                        if not isinstance(extra_any, dict):
+                            continue
+                        waste_any: Any = cast(dict[str, Any], extra_any).get(
+                            "wasteSize"
+                        )
+                        if isinstance(waste_any, (int, float)):
+                            cast(dict[str, Any], trident_any)["waste_size_ml"] = float(
+                                waste_any
+                            )
+                            break
+
+                mxm_devices = _parse_mxm_devices_from_mconf(config_obj)
+                if mxm_devices:
+                    self._cached_mxm_devices = mxm_devices
+                    data["mxm_devices"] = mxm_devices
+
+            if sanitized_nconf:
+                self._cached_nconf = sanitized_nconf
+                data.setdefault("config", {})["nconf"] = sanitized_nconf
+
+        # Prefer a single /rest/config GET (contains mconf+nconf among others).
+        try:
+            config_url = f"{base_url}/rest/config"
+            _LOGGER.debug("Trying REST config update: %s", config_url)
+            async with async_timeout.timeout(timeout_seconds):
+                async with session.get(
+                    config_url, headers=_cookie_headers(sid)
+                ) as resp:
+                    if resp.status == 404:
+                        raise FileNotFoundError
+                    if resp.status in (401, 403):
+                        raise PermissionError
+                    resp.raise_for_status()
+                    config_text = await resp.text()
+
+            config_any: Any = json.loads(config_text) if config_text else {}
+            if isinstance(config_any, dict):
+                config_obj = cast(dict[str, Any], config_any)
+                sanitized_mconf = _sanitize_mconf_for_storage(config_obj)
+                sanitized_nconf = _sanitize_nconf_for_storage(config_obj)
+                _apply_sanitized_config(
+                    config_obj=config_obj,
+                    sanitized_mconf=sanitized_mconf,
+                    sanitized_nconf=sanitized_nconf,
+                )
+                self._rest_config_last_fetch = now
+                return
+        except (PermissionError, FileNotFoundError):
+            # Permission/404: either forbidden on this firmware or not present.
+            pass
+        except (asyncio.TimeoutError, aiohttp.ClientError, json.JSONDecodeError) as err:
+            _LOGGER.debug("REST config fetch failed: %s", err)
+        except Exception as err:
+            _LOGGER.debug("Unexpected REST config error: %s", err)
+
+    def _finalize_trident(self, data: dict[str, Any]) -> None:
+        """Compute derived Trident fields from raw status + config."""
+        trident_any: Any = data.get("trident")
+        if not isinstance(trident_any, dict):
+            return
+        trident = cast(dict[str, Any], trident_any)
+
+        levels_any: Any = trident.get("levels_ml")
+        waste_used_ml: float | None = None
+        reagent_a_ml: float | None = None
+        reagent_b_ml: float | None = None
+        reagent_c_ml: float | None = None
+        if isinstance(levels_any, list) and levels_any:
+            levels = cast(list[Any], levels_any)
+            first = levels[0]
+            if isinstance(first, (int, float)) and not isinstance(first, bool):
+                waste_used_ml = float(first)
+
+            # Trident `levels` is most commonly a 5-element list:
+            # - index 0: waste used (counts up)
+            # - index 1: auxiliary/unknown
+            # - index 2: reagent C remaining
+            # - index 3: reagent B remaining
+            # - index 4: reagent A remaining
+            # Some firmwares omit the aux value; handle 4-element lists as
+            # [waste, reagent C, reagent B, reagent A].
+            idx_a: int | None = None
+            idx_b: int | None = None
+            idx_c: int | None = None
+            if len(levels) >= 5:
+                idx_c, idx_b, idx_a = 2, 3, 4
+            elif len(levels) == 4:
+                idx_c, idx_b, idx_a = 1, 2, 3
+
+            def _read_ml(idx: int | None) -> float | None:
+                if idx is None:
+                    return None
+                v = levels[idx]
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    return float(v)
+                return None
+
+            reagent_a_ml = _read_ml(idx_a)
+            reagent_b_ml = _read_ml(idx_b)
+            reagent_c_ml = _read_ml(idx_c)
+
+        trident["waste_used_ml"] = waste_used_ml
+
+        # Reagent bottles are typically ~250 mL when brand new. The controller
+        # reports remaining volume in mL, which we expose directly and use for
+        # conservative near-empty warnings.
+        trident["reagent_a_remaining_ml"] = reagent_a_ml
+        trident["reagent_b_remaining_ml"] = reagent_b_ml
+        trident["reagent_c_remaining_ml"] = reagent_c_ml
+
+        trident["reagent_a_empty"] = (
+            (reagent_a_ml <= TRIDENT_REAGENT_EMPTY_THRESHOLD_ML)
+            if reagent_a_ml is not None
+            else None
+        )
+        trident["reagent_b_empty"] = (
+            (reagent_b_ml <= TRIDENT_REAGENT_EMPTY_THRESHOLD_ML)
+            if reagent_b_ml is not None
+            else None
+        )
+        trident["reagent_c_empty"] = (
+            (reagent_c_ml <= TRIDENT_REAGENT_EMPTY_THRESHOLD_ML)
+            if reagent_c_ml is not None
+            else None
+        )
+
+        waste_size_any: Any = trident.get("waste_size_ml")
+        waste_size_ml: float | None = None
+        if isinstance(waste_size_any, (int, float)) and not isinstance(
+            waste_size_any, bool
+        ):
+            if float(waste_size_any) > 0:
+                waste_size_ml = float(waste_size_any)
+        trident["waste_size_ml"] = waste_size_ml
+
+        if waste_used_ml is None or waste_size_ml is None:
+            trident["waste_percent"] = None
+            trident["waste_full"] = None
+            trident["waste_remaining_ml"] = None
+            return
+
+        remaining = max(0.0, waste_size_ml - waste_used_ml)
+        percent = (waste_used_ml / waste_size_ml) * 100.0
+        trident["waste_percent"] = percent
+        trident["waste_remaining_ml"] = remaining
+        trident["waste_full"] = remaining <= TRIDENT_WASTE_FULL_MARGIN_ML
 
     def _disable_rest(self, *, seconds: float, reason: str) -> None:
         until = time.monotonic() + max(0.0, seconds)
@@ -1231,6 +1538,178 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             raise
         except (asyncio.TimeoutError, aiohttp.ClientError) as err:
             raise HomeAssistantError(f"Error sending REST control: {err}") from err
+
+    async def async_rest_get_json(self, *, path: str) -> dict[str, Any]:
+        """Send a REST GET with coordinator-managed auth and rate limiting."""
+        now = time.monotonic()
+        if now < self._rest_disabled_until:
+            raise HomeAssistantError(
+                f"REST temporarily disabled (retry in ~{int(self._rest_disabled_until - now)}s)"
+            )
+
+        host = str(self.entry.data.get(CONF_HOST, ""))
+        password = str(self.entry.data.get(CONF_PASSWORD, "") or "")
+        if not password:
+            raise HomeAssistantError("Password is required for REST")
+
+        base_url = build_base_url(host)
+        if not path.startswith("/"):
+            path = "/" + path
+        url = f"{base_url}{path}"
+
+        session = async_get_clientsession(self.hass)
+        timeout_seconds = DEFAULT_TIMEOUT_SECONDS
+
+        async def _do_get(*, sid: str | None) -> dict[str, Any]:
+            headers: dict[str, str] = {"Accept": "*/*"}
+            if sid:
+                headers["Cookie"] = f"connect.sid={sid}"
+            async with async_timeout.timeout(timeout_seconds):
+                async with session.get(url, headers=headers) as resp:
+                    if resp.status == 404:
+                        raise FileNotFoundError
+                    if resp.status == 429:
+                        retry_after = self._parse_retry_after_seconds(resp.headers)
+                        backoff = (
+                            float(retry_after) if retry_after is not None else 300.0
+                        )
+                        self._disable_rest(seconds=backoff, reason="rate_limited_get")
+                        raise HomeAssistantError(
+                            f"Controller rate limited REST GET; retry after ~{int(backoff)}s"
+                        )
+                    if resp.status in (401, 403):
+                        raise PermissionError
+                    if _is_transient_http_status(resp.status):
+                        raise HomeAssistantError(
+                            f"Transient REST GET HTTP error (status={resp.status})"
+                        )
+                    resp.raise_for_status()
+                    body = await resp.text()
+
+            any_obj: Any = json.loads(body) if body else {}
+            if not isinstance(any_obj, dict):
+                raise HomeAssistantError("REST response was not a JSON object")
+            return cast(dict[str, Any], any_obj)
+
+        try:
+            sid = await self._async_rest_login(session=session)
+            return await _do_get(sid=sid)
+        except PermissionError:
+            self._rest_sid = None
+            sid2 = await self._async_rest_login(session=session)
+            return await _do_get(sid=sid2)
+        except FileNotFoundError:
+            raise
+        except HomeAssistantError:
+            raise
+        except (asyncio.TimeoutError, aiohttp.ClientError, json.JSONDecodeError) as err:
+            raise HomeAssistantError(f"Error fetching REST data: {err}") from err
+
+    async def async_refresh_config_now(self) -> None:
+        """Force a sanitized /rest/config refresh and update coordinator data.
+
+        This is used by manual refresh buttons and after config-affecting PUTs.
+        """
+        config_obj = await self.async_rest_get_json(path="/rest/config")
+
+        sanitized_mconf = _sanitize_mconf_for_storage(config_obj)
+        sanitized_nconf = _sanitize_nconf_for_storage(config_obj)
+        mxm_devices = _parse_mxm_devices_from_mconf(config_obj)
+
+        self._cached_mconf = sanitized_mconf
+        self._cached_nconf = sanitized_nconf or self._cached_nconf
+        if mxm_devices:
+            self._cached_mxm_devices = mxm_devices
+
+        self._rest_config_last_fetch = time.monotonic()
+
+        # Update current data in-place so entities reflect the fresh config
+        # without waiting for the next poll.
+        data = self.data
+        data.setdefault("config", {})["mconf"] = sanitized_mconf
+        if sanitized_nconf:
+            data["config"]["nconf"] = sanitized_nconf
+        if mxm_devices:
+            data["mxm_devices"] = mxm_devices
+
+        # Ensure Trident derived fields are recomputed with new wasteSize.
+        trident_any: Any = data.get("trident")
+        if isinstance(trident_any, dict):
+            for m in sanitized_mconf:
+                if str(m.get("hwtype") or "").strip().upper() not in {"TRI", "TNP"}:
+                    continue
+                extra_any: Any = m.get("extra")
+                if not isinstance(extra_any, dict):
+                    continue
+                waste_any: Any = cast(dict[str, Any], extra_any).get("wasteSize")
+                if isinstance(waste_any, (int, float)):
+                    cast(dict[str, Any], trident_any)["waste_size_ml"] = float(
+                        waste_any
+                    )
+                    break
+
+        self._finalize_trident(data)
+        self.async_set_updated_data(data)
+
+    def _get_trident_abaddr(self) -> int:
+        data = self.data or {}
+        trident_any: Any = data.get("trident")
+        if not isinstance(trident_any, dict):
+            raise HomeAssistantError("Trident module not detected")
+        trident = cast(dict[str, Any], trident_any)
+        abaddr_any: Any = trident.get("abaddr")
+        if not isinstance(abaddr_any, int):
+            raise HomeAssistantError("Trident module address unavailable")
+        return abaddr_any
+
+    async def _async_trident_put_mconf_extra(self, *, extra: dict[str, Any]) -> None:
+        """Send a REST update for Trident module config/commands.
+
+        We try the per-module endpoint first, then fall back to the bulk endpoint.
+        """
+        abaddr = self._get_trident_abaddr()
+
+        try:
+            await self.async_rest_put_json(
+                path=f"/rest/config/mconf/{abaddr}",
+                payload={"abaddr": abaddr, "extra": extra},
+            )
+        except FileNotFoundError:
+            await self.async_rest_put_json(
+                path="/rest/config/mconf",
+                payload={"mconf": [{"abaddr": abaddr, "extra": extra}]},
+            )
+
+        await self.async_request_refresh()
+
+    async def async_trident_set_waste_size_ml(self, *, size_ml: float) -> None:
+        if size_ml <= 0:
+            raise HomeAssistantError("Waste container size must be > 0")
+
+        await self._async_trident_put_mconf_extra(extra={"wasteSize": float(size_ml)})
+        # Pull fresh config so HA reflects the real controller state.
+        await self.async_refresh_config_now()
+
+    async def async_trident_reset_waste(self) -> None:
+        # Trident exposes `reset` as a 5-element list aligned with `levels`.
+        # Best-known mapping for levels index 0 is waste used.
+        await self._async_trident_put_mconf_extra(
+            extra={"reset": [True, False, False, False, False]}
+        )
+
+    async def async_trident_reset_reagent(self, *, reagent_index: int) -> None:
+        if reagent_index not in (0, 1, 2):
+            raise HomeAssistantError("Invalid reagent index")
+        payload = [False, False, False]
+        payload[reagent_index] = True
+        await self._async_trident_put_mconf_extra(extra={"newReagent": payload})
+
+    async def async_trident_prime_channel(self, *, channel_index: int) -> None:
+        if channel_index not in (0, 1, 2, 3):
+            raise HomeAssistantError("Invalid prime channel")
+        payload = [False, False, False, False]
+        payload[channel_index] = True
+        await self._async_trident_put_mconf_extra(extra={"prime": payload})
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch and parse controller status.
@@ -1459,6 +1938,15 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     len(cast(list[Any], data.get("outlets") or [])),
                                     bool(data.get("network")),
                                 )
+                                await self._async_try_refresh_rest_config(
+                                    data=data,
+                                    session=session,
+                                    base_url=base_url,
+                                    sid=self._rest_sid,
+                                    timeout_seconds=timeout_seconds,
+                                    host=host,
+                                )
+                                self._finalize_trident(data)
                                 return self._apply_serial_cache(data)
 
                             raise _RestNotSupported
@@ -1491,6 +1979,7 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 len(cast(list[Any], data.get("outlets") or [])),
                                 bool(data.get("network")),
                             )
+                            self._finalize_trident(data)
                             return self._apply_serial_cache(data)
                     except _RestStatusUnauthorized:
                         # Expected on controllers that require auth.
@@ -1569,117 +2058,16 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     bool(data.get("network")),
                                 )
 
-                                # Optional: fetch module config for richer MXM device metadata.
-                                try:
-                                    mconf_url = f"{base_url}/rest/config/mconf"
-                                    _LOGGER.debug(
-                                        "Trying REST mconf update: %s", mconf_url
-                                    )
-                                    async with async_timeout.timeout(timeout_seconds):
-                                        async with session.get(
-                                            mconf_url,
-                                            headers=_cookie_headers(self._rest_sid),
-                                        ) as resp:
-                                            if resp.status == 404:
-                                                raise FileNotFoundError
-                                            if resp.status in (401, 403):
-                                                raise PermissionError
-                                            resp.raise_for_status()
-                                            mconf_text = await resp.text()
+                                await self._async_try_refresh_rest_config(
+                                    data=data,
+                                    session=session,
+                                    base_url=base_url,
+                                    sid=self._rest_sid,
+                                    timeout_seconds=timeout_seconds,
+                                    host=host,
+                                )
 
-                                    mconf_any: Any = (
-                                        json.loads(mconf_text) if mconf_text else {}
-                                    )
-                                    if isinstance(mconf_any, dict):
-                                        # Persist a sanitized subset of the config (avoid storing secrets).
-                                        data.setdefault("config", {})["mconf"] = (
-                                            _sanitize_mconf_for_storage(
-                                                cast(dict[str, Any], mconf_any)
-                                            )
-                                        )
-
-                                        # Extract Trident waste container size if present.
-                                        trident_any: Any = data.get("trident")
-                                        if isinstance(trident_any, dict):
-                                            for m in cast(
-                                                list[dict[str, Any]],
-                                                data["config"].get("mconf") or [],
-                                            ):
-                                                if str(
-                                                    m.get("hwtype") or ""
-                                                ).strip().upper() not in {"TRI", "TNP"}:
-                                                    continue
-                                                extra_any: Any = m.get("extra")
-                                                if not isinstance(extra_any, dict):
-                                                    continue
-                                                waste_any: Any = cast(
-                                                    dict[str, Any], extra_any
-                                                ).get("wasteSize")
-                                                if isinstance(waste_any, (int, float)):
-                                                    cast(dict[str, Any], trident_any)[
-                                                        "waste_size_ml"
-                                                    ] = float(waste_any)
-                                                    break
-
-                                        mxm_devices = _parse_mxm_devices_from_mconf(
-                                            cast(dict[str, Any], mconf_any)
-                                        )
-                                        if mxm_devices:
-                                            data["mxm_devices"] = mxm_devices
-                                except (FileNotFoundError, PermissionError):
-                                    pass
-                                except (
-                                    asyncio.TimeoutError,
-                                    aiohttp.ClientError,
-                                    json.JSONDecodeError,
-                                ) as err:
-                                    _LOGGER.debug("REST mconf fetch failed: %s", err)
-                                except Exception as err:
-                                    _LOGGER.debug(
-                                        "Unexpected REST mconf error: %s", err
-                                    )
-
-                                # Optional: fetch network config for controller update flags.
-                                try:
-                                    nconf_url = f"{base_url}/rest/config/nconf"
-                                    _LOGGER.debug(
-                                        "Trying REST nconf update: %s", nconf_url
-                                    )
-                                    async with async_timeout.timeout(timeout_seconds):
-                                        async with session.get(
-                                            nconf_url,
-                                            headers=_cookie_headers(self._rest_sid),
-                                        ) as resp:
-                                            if resp.status == 404:
-                                                raise FileNotFoundError
-                                            if resp.status in (401, 403):
-                                                raise PermissionError
-                                            resp.raise_for_status()
-                                            nconf_text = await resp.text()
-
-                                    nconf_any: Any = (
-                                        json.loads(nconf_text) if nconf_text else {}
-                                    )
-                                    if isinstance(nconf_any, dict):
-                                        sanitized = _sanitize_nconf_for_storage(
-                                            cast(dict[str, Any], nconf_any)
-                                        )
-                                        if sanitized:
-                                            data.setdefault("config", {})["nconf"] = (
-                                                sanitized
-                                            )
-                                except (FileNotFoundError, PermissionError):
-                                    pass
-                                except (
-                                    asyncio.TimeoutError,
-                                    aiohttp.ClientError,
-                                    json.JSONDecodeError,
-                                ) as err:
-                                    _LOGGER.debug("REST nconf fetch failed: %s", err)
-                                except Exception as err:
-                                    _LOGGER.debug(
-                                        "Unexpected REST nconf error: %s", err
-                                    )
+                                self._finalize_trident(data)
 
                                 return self._apply_serial_cache(data)
 
@@ -1773,6 +2161,7 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     meta = data.get("meta")
                     if isinstance(meta, dict):
                         cast(dict[str, Any], meta).setdefault("source", "cgi_json")
+                    self._finalize_trident(data)
                     return self._apply_serial_cache(data)
 
             except FileNotFoundError:
@@ -1810,6 +2199,7 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             meta = data.get("meta")
             if isinstance(meta, dict):
                 cast(dict[str, Any], meta).setdefault("source", "xml")
+            self._finalize_trident(data)
             return self._apply_serial_cache(data)
 
         except ConfigEntryAuthFailed:

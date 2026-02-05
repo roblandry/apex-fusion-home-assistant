@@ -35,8 +35,11 @@ from .const import (
     DOMAIN,
     LOGGER_NAME,
 )
-from .coordinator import ApexNeptuneDataUpdateCoordinator, build_base_url
-from .sensor import build_device_info
+from .coordinator import (
+    ApexNeptuneDataUpdateCoordinator,
+    build_base_url,
+    build_device_info,
+)
 
 _LOGGER = logging.getLogger(LOGGER_NAME)
 

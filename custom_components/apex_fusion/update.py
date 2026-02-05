@@ -20,8 +20,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import CONF_HOST, DOMAIN
-from .coordinator import ApexNeptuneDataUpdateCoordinator
-from .sensor import build_device_info
+from .coordinator import ApexNeptuneDataUpdateCoordinator, build_device_info
 
 
 def _raw_nstat(data: dict[str, Any]) -> dict[str, Any]:
@@ -93,7 +92,7 @@ def _config_mconf_modules(data: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _controller_update_firmware_flag(data: dict[str, Any]) -> bool | None:
-    # Prefer config (/rest/config/nconf) when present.
+    # Prefer sanitized config (from /rest/config) when present.
     flag_any: Any = _config_nconf(data).get("updateFirmware")
     if isinstance(flag_any, bool):
         return flag_any
@@ -181,7 +180,7 @@ def _controller_latest(data: dict[str, Any]) -> str | None:
     if v is not None and str(v).strip():
         return str(v).strip()
 
-    # Some firmwares only expose this under /rest/config/nconf.
+    # Latest firmware may be present in sanitized config (from /rest/config).
     latest_any: Any = _config_nconf(data).get("latestFirmware")
     return str(latest_any).strip() or None if latest_any is not None else None
 
@@ -234,7 +233,7 @@ def _module_refs(data: dict[str, Any], serial_for_ids: str) -> list[_UpdateRef]:
     mconf_modules = _config_mconf_modules(data)
     if mconf_modules:
         # When config is available, prefer it because it includes authoritative
-        # update flags (mconf[].update/updateStat).
+        # update flags (mconf[].update/updateStat). Config is sourced from /rest/config.
         for mconf in mconf_modules:
             hwtype = (
                 str(mconf.get("hwtype") or mconf.get("hwType") or "").strip().upper()

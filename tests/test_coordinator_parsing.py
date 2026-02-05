@@ -5,8 +5,15 @@ from __future__ import annotations
 from typing import Any, cast
 
 import pytest
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.apex_fusion import coordinator
+from custom_components.apex_fusion.const import (
+    CONF_HOST,
+    CONF_PASSWORD,
+    CONF_USERNAME,
+    DOMAIN,
+)
 
 
 def test_cookie_helpers_cover_exception_branches():
@@ -117,6 +124,80 @@ def test_to_number_and_url_builders():
     assert coordinator._to_number("") is None
     assert coordinator._to_number(" 1.25 ") == 1.25
     assert coordinator._to_number("no") is None
+
+
+async def test_finalize_trident_returns_when_trident_missing(
+    hass, enable_custom_integrations
+):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "1.2.3.4", CONF_USERNAME: "user", CONF_PASSWORD: "pw"},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
+    )
+    entry.add_to_hass(hass)
+    coord = coordinator.ApexNeptuneDataUpdateCoordinator(hass, entry=cast(Any, entry))
+
+    data: dict[str, Any] = {"trident": "nope"}
+    coord._finalize_trident(data)
+    assert data["trident"] == "nope"
+
+
+async def test_finalize_trident_computes_waste_fields(hass, enable_custom_integrations):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "1.2.3.4", CONF_USERNAME: "user", CONF_PASSWORD: "pw"},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
+    )
+    entry.add_to_hass(hass)
+    coord = coordinator.ApexNeptuneDataUpdateCoordinator(hass, entry=cast(Any, entry))
+
+    data: dict[str, Any] = {
+        "trident": {
+            "levels_ml": [50.0],
+            "waste_size_ml": 100.0,
+        }
+    }
+    coord._finalize_trident(data)
+
+    trident = cast(dict[str, Any], data["trident"])
+    assert trident["waste_used_ml"] == 50.0
+    assert trident["waste_size_ml"] == 100.0
+    assert trident["waste_percent"] == 50.0
+    assert trident["waste_full"] is False
+    assert trident["waste_remaining_ml"] == 50.0
+
+    # Cover 5-element list mapping and conservative waste-full margin.
+    data2: dict[str, Any] = {
+        "trident": {
+            "levels_ml": [90.0, 123.0, 30.0, 10.0, 5.0],
+            "waste_size_ml": 100.0,
+        }
+    }
+    coord._finalize_trident(data2)
+    trident2 = cast(dict[str, Any], data2["trident"])
+    assert trident2["waste_remaining_ml"] == 10.0
+    assert trident2["waste_full"] is True
+    assert trident2["reagent_a_remaining_ml"] == 5.0
+    assert trident2["reagent_b_remaining_ml"] == 10.0
+    assert trident2["reagent_c_remaining_ml"] == 30.0
+    assert trident2["reagent_a_empty"] is True
+    assert trident2["reagent_b_empty"] is True
+    assert trident2["reagent_c_empty"] is False
+
+    # Cover 4-element list mapping (aux omitted) and invalid-type reagent entry.
+    data3: dict[str, Any] = {
+        "trident": {
+            "levels_ml": [90.0, "nope", 10.0, 5.0],
+            "waste_size_ml": 100.0,
+        }
+    }
+    coord._finalize_trident(data3)
+    trident3 = cast(dict[str, Any], data3["trident"])
+    assert trident3["reagent_c_remaining_ml"] is None
+    assert trident3["reagent_b_remaining_ml"] == 10.0
+    assert trident3["reagent_a_remaining_ml"] == 5.0
 
     assert coordinator.build_base_url("1.2.3.4") == "http://1.2.3.4"
     assert coordinator.build_base_url("http://1.2.3.4/") == "http://1.2.3.4"
