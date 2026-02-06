@@ -87,7 +87,7 @@ def module_abaddr_from_input_did(did: str) -> int | None:
 # container is completely full.
 TRIDENT_WASTE_FULL_MARGIN_ML = 20.0
 
-# TODO: Determine sane value based on real-world usage.
+# TODO: Determine sane value based on real-world usage. (Issue: https://github.com/roblandry/apex-fusion-home-assistant/issues/5)
 # Reagents: warn conservatively when near-empty.
 TRIDENT_REAGENT_EMPTY_THRESHOLD_ML = 20.0
 

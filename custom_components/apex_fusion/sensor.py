@@ -103,7 +103,7 @@ def _friendly_probe_name(*, name: str, probe_type: str | None) -> str:
     if t == "mg":
         return "Magnesium"
 
-    # TODO: validate with real Trident NP data.
+    # TODO: validate with real Trident NP data. (Issue: https://github.com/roblandry/apex-fusion-home-assistant/issues/8)
     # Trident NP (when present) labels.
     if t in {"no3", "nitrate", "nitrogen"}:
         return "Nitrogen"
@@ -166,7 +166,7 @@ def friendly_outlet_name(*, outlet_name: str, outlet_type: str | None) -> str:
         if head == "alk":
             return "Alkalinity Testing"
 
-        # TODO: validate with real Trident NP data; may need more mappings.
+        # TODO: validate with real Trident NP data; may need more mappings. (Issue: https://github.com/roblandry/apex-fusion-home-assistant/issues/7)
         if head in {"tnp", "np"}:
             return "Trident NP"
 
@@ -266,7 +266,7 @@ def _units_and_meta(
     if t in ("ca", "mg"):
         return "ppm", None, SensorStateClass.MEASUREMENT
 
-    # TODO: validate with real Trident NP data.
+    # TODO: validate with real Trident NP data. (Issue: https://github.com/roblandry/apex-fusion-home-assistant/issues/8)
     # Trident NP (when present) reports nitrogen/phosphate.
     if t in {"no3", "nitrate"} or t in {"po4", "phosphate"}:
         return "ppm", None, SensorStateClass.MEASUREMENT
