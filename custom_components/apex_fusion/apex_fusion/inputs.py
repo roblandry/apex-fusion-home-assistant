@@ -38,7 +38,7 @@ class DigitalValueCodec:
         if isinstance(value, int):
             if value in (0, 1):
                 return value
-            # TODO: are these found anywhere; I dont think so.
+            # TODO: are these found anywhere; I dont think so. (Issue: https://github.com/roblandry/apex-fusion-home-assistant/issues/9)
             if value == 100:
                 return 1
             if value == 200:

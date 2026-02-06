@@ -134,7 +134,7 @@ class ProbeMetaResolver:
         Returns:
             Temperature unit selected from the numeric range.
         """
-        # TODO: see if there is a better way to determine this; maybe there is a unit
+        # TODO: see if there is a better way to determine this; maybe there is a unit (Issue: https://github.com/roblandry/apex-fusion-home-assistant/issues/12)
         # field somewhere in the data?
         # Values <= 45 are treated as Celsius; higher values as Fahrenheit.
         if value is not None and value <= 45:
