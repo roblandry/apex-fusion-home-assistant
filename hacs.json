@@ -1,5 +1,14 @@
 {
   "name": "Apex Fusion (Local)",
   "content_in_root": false,
-  "render_readme": true
+  "render_readme": true,
+  "description": "A Home Assistant integration for the Apex Fusion aquarium controllers.",
+  "topics": [
+    "aquarium",
+    "apex",
+    "fusion",
+    "neptune",
+    "trident",
+    "apex-fusion"
+  ]
 }

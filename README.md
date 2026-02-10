@@ -9,9 +9,6 @@
 
 # Apex Fusion (Local)
 
-> [!CAUTION]
-> This is a Work In Progress and is subject to changes
-
 Home Assistant custom integration for local (LAN) polling of an Apex controller.
 
 If you’ve tried other Apex options and found gaps (cloud dependence, stale support, or missing local REST/module support), I’d love feedback on what you need—this project aims to close those gaps with a local-first approach.
@@ -70,8 +67,11 @@ As of 2026-01-31, I actively run this integration against:
 3. Install **Apex Fusion (Local)**
 4. Restart Home Assistant
 
-Once this repository is accepted into the HACS default store, it will no longer
-need to be added as a custom repository.
+> [!NOTE]
+> Once this repository is accepted into the HACS default store, it will no longer need to be added as a custom repository.
+>
+> The brand icon is awaiting PR. Once added it should display properly. Once added, HACS can be PR.
+Brands PR can be tracked [here](https://github.com/home-assistant/brands/pull/9527)
 
 ### Manual
 
