@@ -59,7 +59,7 @@ jobs:
         run: |
           mkdir -p badges
           # Use genbadge instead of coverage_badge to avoid pkg_resources/setuptools issues on Py3.13.
-          python -m pip install --upgrade genbadge
+          python -m pip install --upgrade "genbadge[coverage]"
           genbadge coverage -i coverage.xml -o badges/coverage.svg
 
       - name: Upload coverage.xml to Codecov
