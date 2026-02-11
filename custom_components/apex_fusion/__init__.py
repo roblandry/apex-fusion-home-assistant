@@ -10,14 +10,26 @@ import logging
 from typing import Any, cast
 
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.util import slugify
 
 from .apex_fusion import ApexFusionContext
-from .const import CONF_HOST, DOMAIN, LOGGER_NAME, PLATFORMS
+from .const import (
+    CONF_HOST,
+    CONF_LAST_CONTROL_ENABLED,
+    CONF_LAST_SOURCE,
+    CONF_NO_LOGIN,
+    CONF_PASSWORD,
+    DOMAIN,
+    LOGGER_NAME,
+    PLATFORMS,
+)
 from .coordinator import ApexNeptuneDataUpdateCoordinator
 
 _LOGGER = logging.getLogger(LOGGER_NAME)
+
+_DOMAIN_LOADED_PLATFORMS_KEY = "_loaded_platforms"
 
 
 async def _async_prefix_entity_ids_with_tank(
@@ -95,11 +107,79 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator = ApexNeptuneDataUpdateCoordinator(hass, entry=entry)
     await coordinator.async_config_entry_first_refresh()
 
-    # Prefer the controller-reported hostname as the tank name.
-    host = str(entry.data.get(CONF_HOST, ""))
+    # Detect REST-vs-legacy mode based on the first successful refresh.
     data: dict[str, Any] = coordinator.data or {}
     meta_any: Any = data.get("meta")
     meta = cast(dict[str, Any], meta_any) if isinstance(meta_any, dict) else {}
+    source = str(meta.get("source") or "").strip().lower() or None
+
+    prev_source = (
+        str(entry.data.get(CONF_LAST_SOURCE, "") or "").strip().lower() or None
+    )
+
+    read_only = (
+        bool(entry.data.get(CONF_NO_LOGIN, False))
+        or not str(entry.data.get(CONF_PASSWORD, "") or "").strip()
+    )
+
+    rest_active = source == "rest"
+    control_enabled = rest_active and not read_only
+    prev_control_any: Any = entry.data.get(CONF_LAST_CONTROL_ENABLED)
+    prev_control_enabled = (
+        prev_control_any if isinstance(prev_control_any, bool) else None
+    )
+
+    async def _async_purge_registry_entries() -> None:
+        """Remove stale entities/devices for this config entry.
+
+        This is intentionally blunt: when swapping between REST and legacy data
+        sources, entity unique_ids (and device grouping) can change significantly.
+        Removing registry entries avoids confusing duplicates.
+        """
+
+        try:
+            from homeassistant.helpers import (
+                device_registry as dr,
+                entity_registry as er,
+            )
+
+            ent_reg = er.async_get(hass)
+            reg_entries = er.async_entries_for_config_entry(ent_reg, entry.entry_id)
+            for reg_entry in reg_entries:
+                ent_reg.async_remove(reg_entry.entity_id)
+
+            dev_reg = dr.async_get(hass)
+            dev_entries = dr.async_entries_for_config_entry(dev_reg, entry.entry_id)
+            for dev_entry in dev_entries:
+                dev_reg.async_remove_device(dev_entry.id)
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception(
+                "Failed to purge entity/device registry for entry_id=%s", entry.entry_id
+            )
+
+    purge_reason: str | None = None
+    if prev_source and source and prev_source != source:
+        purge_reason = f"source {prev_source} -> {source}"
+    elif prev_control_enabled is not None and prev_control_enabled != control_enabled:
+        purge_reason = f"control {prev_control_enabled} -> {control_enabled}"
+
+    if purge_reason:
+        _LOGGER.info(
+            "Apex setup mode changed for entry_id=%s (%s); purging stale registry entries",
+            entry.entry_id,
+            purge_reason,
+        )
+        await _async_purge_registry_entries()
+
+    if source and (source != prev_source or prev_control_enabled != control_enabled):
+        new_data = dict(entry.data)
+        if source != prev_source:
+            new_data[CONF_LAST_SOURCE] = source
+        new_data[CONF_LAST_CONTROL_ENABLED] = control_enabled
+        hass.config_entries.async_update_entry(entry, data=new_data)
+
+    # Prefer the controller-reported hostname as the tank name.
+    host = str(entry.data.get(CONF_HOST, ""))
     hostname = str(meta.get("hostname") or "").strip() or None
     if not hostname:
         config_any: Any = data.get("config")
@@ -139,7 +219,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
 
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    # Forward only the platforms that make sense for this entry.
+    platforms: list[Platform] = [
+        Platform.SENSOR,
+        Platform.BINARY_SENSOR,
+    ]
+
+    # Firmware + network metadata are only available when REST parsing is active.
+    if rest_active:
+        platforms.append(Platform.UPDATE)
+
+    # Control entities only exist when login is enabled and REST is active.
+    if control_enabled:
+        platforms.extend(
+            [
+                Platform.SELECT,
+                Platform.SWITCH,
+                Platform.BUTTON,
+                Platform.NUMBER,
+            ]
+        )
+
+    await hass.config_entries.async_forward_entry_setups(entry, platforms)
+
+    # Track which platforms were actually forwarded so unload can avoid
+    # attempting to unload platforms that were never set up.
+    hass.data.setdefault(DOMAIN, {}).setdefault(_DOMAIN_LOADED_PLATFORMS_KEY, {})[
+        entry.entry_id
+    ] = list(platforms)
 
     # Ensure tank slug shows up in entity_ids even when entities already exist.
     ctx = ApexFusionContext.from_entry_and_coordinator(entry, coordinator)
@@ -159,7 +266,66 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     Returns:
         True if the entry was unloaded.
     """
-    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    domain_data_any: Any = hass.data.get(DOMAIN)
+    domain_data: dict[str, Any] = (
+        cast(dict[str, Any], domain_data_any)
+        if isinstance(domain_data_any, dict)
+        else {}
+    )
+
+    def _coerce_platforms(value: Any) -> list[Platform]:
+        platforms: list[Platform] = []
+        if not isinstance(value, (list, set, tuple)):
+            return platforms
+        for item in cast(Any, value):
+            if isinstance(item, Platform):
+                platforms.append(item)
+            elif isinstance(item, str):
+                try:
+                    platforms.append(Platform(item))
+                except ValueError:
+                    continue
+        return platforms
+
+    # Prefer Home Assistant's internal bookkeeping when available.
+    platforms_to_unload: list[Platform] = []
+    entry_platforms_any: Any = getattr(entry, "platforms", None)
+    platforms_to_unload = _coerce_platforms(entry_platforms_any)
+
+    # Fall back to what we recorded during setup.
+    if not platforms_to_unload:
+        stored_map_any: Any = domain_data.get(_DOMAIN_LOADED_PLATFORMS_KEY)
+        stored_map: dict[str, Any] = (
+            cast(dict[str, Any], stored_map_any)
+            if isinstance(stored_map_any, dict)
+            else {}
+        )
+        stored_any: Any = stored_map.get(entry.entry_id)
+        if isinstance(stored_any, list) and stored_any:
+            platforms_to_unload = cast(list[Platform], stored_any)
+
+    # Last resort: unload all known platforms.
+    if not platforms_to_unload:
+        platforms_to_unload = list(PLATFORMS)
+
+    try:
+        unload_ok = await hass.config_entries.async_unload_platforms(
+            entry, platforms_to_unload
+        )
+    except ValueError:
+        # Guard against mismatches between what we think was loaded and what HA
+        # actually loaded (can happen across upgrades/reloads).
+        fallback = _coerce_platforms(entry_platforms_any)
+        if not fallback:
+            raise
+        unload_ok = await hass.config_entries.async_unload_platforms(entry, fallback)
+
     if unload_ok:
-        hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+        # Remove coordinator.
+        domain_data.pop(entry.entry_id, None)
+        # Remove platform bookkeeping.
+        stored_map_any = domain_data.get(_DOMAIN_LOADED_PLATFORMS_KEY)
+        if isinstance(stored_map_any, dict):
+            cast(dict[str, Any], stored_map_any).pop(entry.entry_id, None)
+
     return unload_ok

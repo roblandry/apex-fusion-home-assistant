@@ -27,6 +27,7 @@ from yarl import URL
 
 from .const import (
     CONF_HOST,
+    CONF_NO_LOGIN,
     DEFAULT_PASSWORD,
     DEFAULT_STATUS_PATH,
     DEFAULT_USERNAME,
@@ -71,18 +72,34 @@ def _set_connect_sid_cookie(
 STEP_USER_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_HOST): str,
+        vol.Optional(CONF_NO_LOGIN, default=False): bool,
         vol.Optional(CONF_USERNAME, default=DEFAULT_USERNAME): str,
         vol.Optional(CONF_PASSWORD, default=DEFAULT_PASSWORD): str,
     }
 )
 
 
-STEP_REAUTH_SCHEMA = vol.Schema(
-    {
-        vol.Optional(CONF_USERNAME, default=DEFAULT_USERNAME): str,
-        vol.Optional(CONF_PASSWORD, default=DEFAULT_PASSWORD): str,
-    }
-)
+def _step_reauth_schema(existing: dict[str, Any]) -> vol.Schema:
+    """Build the reauth schema with sensible defaults.
+
+    Args:
+        existing: Existing config entry data.
+
+    Returns:
+        Voluptuous schema used to prompt for updated credentials.
+    """
+    no_login_default = bool(existing.get(CONF_NO_LOGIN, False))
+    username_default = str(
+        existing.get(CONF_USERNAME, DEFAULT_USERNAME) or DEFAULT_USERNAME
+    )
+
+    return vol.Schema(
+        {
+            vol.Optional(CONF_NO_LOGIN, default=no_login_default): bool,
+            vol.Optional(CONF_USERNAME, default=username_default): str,
+            vol.Optional(CONF_PASSWORD, default=DEFAULT_PASSWORD): str,
+        }
+    )
 
 
 def _step_reconfigure_schema(existing: dict[str, Any]) -> vol.Schema:
@@ -98,11 +115,13 @@ def _step_reconfigure_schema(existing: dict[str, Any]) -> vol.Schema:
     username_default = str(
         existing.get(CONF_USERNAME, DEFAULT_USERNAME) or DEFAULT_USERNAME
     )
+    no_login_default = bool(existing.get(CONF_NO_LOGIN, False))
 
     # Password has no default so leaving it blank won't overwrite an existing one.
     return vol.Schema(
         {
             vol.Required(CONF_HOST, default=host_default): str,
+            vol.Optional(CONF_NO_LOGIN, default=no_login_default): bool,
             vol.Optional(CONF_USERNAME, default=username_default): str,
             vol.Optional(CONF_PASSWORD): str,
         }
@@ -262,8 +281,8 @@ async def _async_validate_input(
 ) -> dict[str, str]:
     """Validate user input.
 
-    Tries REST first (if a password is provided), then falls back to the
-    XML status endpoint.
+    Tries REST first (if a password is provided and no-login is disabled),
+    then falls back to the unauthenticated CGI/ XML status endpoints.
 
     Args:
         hass: Home Assistant instance.
@@ -277,9 +296,15 @@ async def _async_validate_input(
         InvalidAuth: If authentication fails.
     """
     host = _normalize_host(str(data[CONF_HOST]))
+    no_login = bool(data.get(CONF_NO_LOGIN, False))
     username = str(data.get(CONF_USERNAME, DEFAULT_USERNAME) or DEFAULT_USERNAME)
     password = str(data.get(CONF_PASSWORD, DEFAULT_PASSWORD) or "")
     status_path = DEFAULT_STATUS_PATH
+
+    if no_login:
+        # Explicitly ignore stored credentials in no-login (read-only) mode.
+        username = DEFAULT_USERNAME
+        password = ""
 
     _LOGGER.debug(
         "Validating Apex connection host=%s user=%s has_password=%s",
@@ -296,9 +321,8 @@ async def _async_validate_input(
     if password:
         auth = aiohttp.BasicAuth(username or "admin", password)
 
-    # Prefer REST if present; fall back to XML.
-    rest_invalid_auth = False
-
+    # Prefer REST when credentials are provided; fall back to unauthenticated
+    # endpoints when no credentials are configured.
     if password:
         try:
             login_url = f"{base_url}/rest/login"
@@ -364,10 +388,9 @@ async def _async_validate_input(
                                 break
 
                     if not logged_in:
-                        # REST login may be rejected while the XML status endpoint
-                        # still permits BasicAuth.
-                        rest_invalid_auth = True
-                        raise CannotConnect
+                        # Credentials were supplied, so failing REST auth should
+                        # be reported as invalid credentials (not a connectivity issue).
+                        raise InvalidAuth
 
                     sid_set = False
                     sid_value = ""
@@ -425,8 +448,7 @@ async def _async_validate_input(
                                 if resp.status == 404:
                                     continue
                                 if resp.status in (401, 403):
-                                    rest_invalid_auth = True
-                                    raise CannotConnect
+                                    raise InvalidAuth
                                 if _is_transient_http_status(resp.status):
                                     raise CannotConnect
                                 resp.raise_for_status()
@@ -492,11 +514,46 @@ async def _async_validate_input(
             _LOGGER.debug("REST not supported; falling back to status.xml")
             pass
         except InvalidAuth:
-            # Reserved for XML auth failures below.
             raise
         except (CannotConnect, json.JSONDecodeError) as err:
             # REST flaky? Try XML before failing.
             _LOGGER.debug("REST validation failed; trying status.xml: %s", err)
+
+    # If no password is configured, prefer the CGI JSON endpoint first.
+    if not password:
+        json_url = f"{base_url}/cgi-bin/status.json"
+        try:
+            _LOGGER.debug("Trying CGI JSON validation: %s", json_url)
+            async with async_timeout.timeout(10):
+                async with session.get(json_url) as resp:
+                    _LOGGER.debug("CGI JSON status HTTP %s", resp.status)
+                    if resp.status in (401, 403):
+                        raise InvalidAuth
+                    if resp.status == 404:
+                        raise FileNotFoundError
+                    resp.raise_for_status()
+                    body = await resp.text()
+
+            status_any: Any = json.loads(body) if body else {}
+            status_obj: dict[str, Any] = (
+                cast(dict[str, Any], status_any) if isinstance(status_any, dict) else {}
+            )
+
+            serial = _extract_serial_from_status_obj(status_obj)
+            hostname = _extract_hostname_from_status_obj(status_obj)
+            title = f"{hostname} ({host})" if hostname else f"Apex ({host})"
+            return {"title": title, "unique_id": serial or host}
+
+        except FileNotFoundError:
+            _LOGGER.debug("CGI status.json not found; trying status.xml")
+        except InvalidAuth:
+            raise
+        except (
+            asyncio.TimeoutError,
+            aiohttp.ClientError,
+            json.JSONDecodeError,
+        ) as err:
+            _LOGGER.debug("CGI JSON validation failed; trying status.xml: %s", err)
 
     try:
         _LOGGER.debug("Trying XML validation: %s", url)
@@ -513,12 +570,6 @@ async def _async_validate_input(
         hostname = (root.findtext("./hostname") or "").strip() or None
 
     except InvalidAuth:
-        if rest_invalid_auth:
-            _LOGGER.debug(
-                "REST login rejected and XML auth failed host=%s user=%s",
-                host,
-                username,
-            )
         raise
     except (asyncio.TimeoutError, aiohttp.ClientError, ET.ParseError) as err:
         raise CannotConnect from err
@@ -552,6 +603,12 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             normalized_input[CONF_HOST] = _normalize_host(
                 str(normalized_input.get(CONF_HOST, ""))
             )
+
+            normalized_input.setdefault(CONF_NO_LOGIN, False)
+            if bool(normalized_input.get(CONF_NO_LOGIN)):
+                # Do not persist credentials when explicit no-login is selected.
+                normalized_input[CONF_USERNAME] = DEFAULT_USERNAME
+                normalized_input[CONF_PASSWORD] = ""
 
             try:
                 info = await _async_validate_input(self.hass, normalized_input)
@@ -631,6 +688,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             merged: dict[str, Any] = dict(entry.data)
             merged.update(user_input)
+
+            merged.setdefault(CONF_NO_LOGIN, bool(entry.data.get(CONF_NO_LOGIN, False)))
+            if bool(merged.get(CONF_NO_LOGIN)):
+                merged[CONF_USERNAME] = DEFAULT_USERNAME
+                merged[CONF_PASSWORD] = ""
             try:
                 await _async_validate_input(self.hass, merged)
             except CannotConnect:
@@ -647,7 +709,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="reauth_confirm",
-            data_schema=STEP_REAUTH_SCHEMA,
+            data_schema=_step_reauth_schema(dict(entry.data)),
             errors=errors,
             description_placeholders={CONF_HOST: str(entry.data.get(CONF_HOST, ""))},
         )
@@ -703,13 +765,20 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             merged: dict[str, Any] = dict(entry.data)
             merged.update(user_input)
 
-            # If the user leaves password empty/omitted, keep the existing one.
-            # The HA frontend commonly submits empty strings for optional fields.
-            pw_any: Any = user_input.get(CONF_PASSWORD)
-            if CONF_PASSWORD not in user_input or (
-                isinstance(pw_any, str) and not pw_any.strip()
-            ):
-                merged[CONF_PASSWORD] = entry.data.get(CONF_PASSWORD, DEFAULT_PASSWORD)
+            merged.setdefault(CONF_NO_LOGIN, bool(entry.data.get(CONF_NO_LOGIN, False)))
+            if bool(merged.get(CONF_NO_LOGIN)):
+                merged[CONF_USERNAME] = DEFAULT_USERNAME
+                merged[CONF_PASSWORD] = ""
+            else:
+                # If the user leaves password empty/omitted, keep the existing one.
+                # The HA frontend commonly submits empty strings for optional fields.
+                pw_any: Any = user_input.get(CONF_PASSWORD)
+                if CONF_PASSWORD not in user_input or (
+                    isinstance(pw_any, str) and not pw_any.strip()
+                ):
+                    merged[CONF_PASSWORD] = entry.data.get(
+                        CONF_PASSWORD, DEFAULT_PASSWORD
+                    )
 
             try:
                 info = await _async_validate_input(self.hass, merged)

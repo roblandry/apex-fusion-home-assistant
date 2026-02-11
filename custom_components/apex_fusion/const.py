@@ -19,7 +19,19 @@ LOGGER_NAME: Final = f"custom_components.{DOMAIN}"
 CONF_HOST: Final = "host"
 CONF_USERNAME: Final = "username"
 CONF_PASSWORD: Final = "password"
+CONF_NO_LOGIN: Final = "no_login"
 CONF_STATUS_PATH: Final = "status_path"
+
+# Internal bookkeeping persisted on the config entry.
+#
+# Used to detect when the integration has switched between REST and legacy
+# endpoints so stale entities/devices can be cleaned up.
+CONF_LAST_SOURCE: Final = "last_source"
+
+# Tracks whether control entities were enabled during the last setup.
+# Used to purge stale entities when toggling between read-only and authenticated
+# modes (both can be REST).
+CONF_LAST_CONTROL_ENABLED: Final = "last_control_enabled"
 
 DEFAULT_USERNAME: Final = "admin"
 DEFAULT_PASSWORD: Final = ""

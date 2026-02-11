@@ -32,6 +32,8 @@ from .apex_fusion import (
     ApexDiscovery,
     ApexFusionContext,
     OutletIntensityRef,
+    OutletMode,
+    OutletRef,
     ProbeRef,
     as_float,
     network_field,
@@ -40,6 +42,8 @@ from .apex_fusion import (
     units_and_meta,
 )
 from .const import (
+    CONF_NO_LOGIN,
+    CONF_PASSWORD,
     DOMAIN,
     ICON_ALERT_CIRCLE_OUTLINE,
     ICON_BEAKER_OUTLINE,
@@ -71,6 +75,9 @@ from .coordinator import (
     build_aquabus_child_device_info_from_data,
     build_device_info,
     build_trident_device_info,
+    module_abaddr_from_input_did,
+    normalize_module_hwtype_from_outlet_type,
+    unambiguous_module_abaddr_from_config,
 )
 
 
@@ -151,6 +158,18 @@ async def async_setup_entry(
 
     added_probe_keys: set[str] = set()
     added_outlet_intensity_dids: set[str] = set()
+    added_outlet_mode_dids: set[str] = set()
+
+    source = str(ctx.meta.get("source") or "").strip().lower()
+    read_only = (
+        bool(entry.data.get(CONF_NO_LOGIN, False))
+        or not str(entry.data.get(CONF_PASSWORD, "") or "").strip()
+    )
+
+    # When the integration is read-only (no-login or no password) or when REST
+    # is not active, we do not create control SelectEntities. Instead, expose a
+    # read-only sensor that reports the current outlet mode.
+    expose_outlet_mode_sensors = read_only or source != "rest"
 
     def _add_probe_and_outlet_entities() -> None:
         coordinator_data = coordinator.data or {}
@@ -180,6 +199,19 @@ async def async_setup_entry(
             async_add_entities(outlet_entities)
         added_outlet_intensity_dids.update(seen_outlet_dids)
 
+        if expose_outlet_mode_sensors:
+            outlet_mode_refs, seen_mode_dids = ApexDiscovery.new_outlet_select_refs(
+                coordinator_data,
+                already_added_dids=added_outlet_mode_dids,
+            )
+            mode_entities: list[SensorEntity] = [
+                ApexOutletModeSensor(coordinator, entry, ref=ref)
+                for ref in outlet_mode_refs
+            ]
+            if mode_entities:
+                async_add_entities(mode_entities)
+            added_outlet_mode_dids.update(seen_mode_dids)
+
     _add_probe_and_outlet_entities()
     remove = coordinator.async_add_listener(_add_probe_and_outlet_entities)
     entry.async_on_unload(remove)
@@ -187,69 +219,73 @@ async def async_setup_entry(
     serial_for_ids = ctx.serial_for_ids
 
     diagnostic_entities: list[SensorEntity] = []
-    # Always create diagnostic entities so they exist even if an early poll
-    # does not include all fields; values populate as data becomes available.
-    diagnostic_entities.extend(
-        [
-            ApexDiagnosticSensor(
-                coordinator,
-                entry,
-                unique_id=f"{serial_for_ids}_diag_ipaddr".lower(),
-                name="IP Address",
-                icon=ICON_IP_NETWORK,
-                value_fn=network_field("ipaddr"),
-            ),
-            ApexDiagnosticSensor(
-                coordinator,
-                entry,
-                unique_id=f"{serial_for_ids}_diag_gateway".lower(),
-                name="Gateway",
-                icon=ICON_ROUTER_NETWORK,
-                value_fn=network_field("gateway"),
-            ),
-            ApexDiagnosticSensor(
-                coordinator,
-                entry,
-                unique_id=f"{serial_for_ids}_diag_netmask".lower(),
-                name="Netmask",
-                icon=ICON_IP_NETWORK_OUTLINE,
-                value_fn=network_field("netmask"),
-            ),
-            ApexDiagnosticSensor(
-                coordinator,
-                entry,
-                unique_id=f"{serial_for_ids}_diag_ssid".lower(),
-                name="Wi-Fi SSID",
-                icon=ICON_WIFI_SETTINGS,
-                value_fn=network_field("ssid"),
-            ),
-            ApexDiagnosticSensor(
-                coordinator,
-                entry,
-                unique_id=f"{serial_for_ids}_diag_wifi_strength".lower(),
-                name="Wi-Fi Strength",
-                icon=ICON_WIFI_STRENGTH_4,
-                native_unit=PERCENTAGE,
-                value_fn=network_field("strength"),
-            ),
-            ApexDiagnosticSensor(
-                coordinator,
-                entry,
-                unique_id=f"{serial_for_ids}_diag_wifi_quality".lower(),
-                name="Wi-Fi Quality",
-                icon=ICON_SIGNAL,
-                native_unit=PERCENTAGE,
-                value_fn=network_field("quality"),
-            ),
-            ApexDiagnosticSensor(
-                coordinator,
-                entry,
-                unique_id=f"{serial_for_ids}_diag_alert_last".lower(),
-                name="Last Alert Statement",
-                icon=ICON_ALERT_CIRCLE_OUTLINE,
-                value_fn=section_field("alerts", "last_statement"),
-            ),
-        ]
+    # REST-only network diagnostics.
+    if source == "rest":
+        diagnostic_entities.extend(
+            [
+                ApexDiagnosticSensor(
+                    coordinator,
+                    entry,
+                    unique_id=f"{serial_for_ids}_diag_ipaddr".lower(),
+                    name="IP Address",
+                    icon=ICON_IP_NETWORK,
+                    value_fn=network_field("ipaddr"),
+                ),
+                ApexDiagnosticSensor(
+                    coordinator,
+                    entry,
+                    unique_id=f"{serial_for_ids}_diag_gateway".lower(),
+                    name="Gateway",
+                    icon=ICON_ROUTER_NETWORK,
+                    value_fn=network_field("gateway"),
+                ),
+                ApexDiagnosticSensor(
+                    coordinator,
+                    entry,
+                    unique_id=f"{serial_for_ids}_diag_netmask".lower(),
+                    name="Netmask",
+                    icon=ICON_IP_NETWORK_OUTLINE,
+                    value_fn=network_field("netmask"),
+                ),
+                ApexDiagnosticSensor(
+                    coordinator,
+                    entry,
+                    unique_id=f"{serial_for_ids}_diag_ssid".lower(),
+                    name="Wi-Fi SSID",
+                    icon=ICON_WIFI_SETTINGS,
+                    value_fn=network_field("ssid"),
+                ),
+                ApexDiagnosticSensor(
+                    coordinator,
+                    entry,
+                    unique_id=f"{serial_for_ids}_diag_wifi_strength".lower(),
+                    name="Wi-Fi Strength",
+                    icon=ICON_WIFI_STRENGTH_4,
+                    native_unit=PERCENTAGE,
+                    value_fn=network_field("strength"),
+                ),
+                ApexDiagnosticSensor(
+                    coordinator,
+                    entry,
+                    unique_id=f"{serial_for_ids}_diag_wifi_quality".lower(),
+                    name="Wi-Fi Quality",
+                    icon=ICON_SIGNAL,
+                    native_unit=PERCENTAGE,
+                    value_fn=network_field("quality"),
+                ),
+            ]
+        )
+
+    # Always-available diagnostics (when the controller reports them).
+    diagnostic_entities.append(
+        ApexDiagnosticSensor(
+            coordinator,
+            entry,
+            unique_id=f"{serial_for_ids}_diag_alert_last".lower(),
+            name="Last Alert Statement",
+            icon=ICON_ALERT_CIRCLE_OUTLINE,
+            value_fn=section_field("alerts", "last_statement"),
+        )
     )
 
     async_add_entities(diagnostic_entities)
@@ -690,6 +726,140 @@ class ApexProbeSensor(SensorEntity):
             self._unsub = None
 
     # NOTE: Do not override SensorEntity.native_value; we set `_attr_native_value`.
+
+
+class ApexOutletModeSensor(SensorEntity):
+    """Read-only sensor that reports an outlet's current mode (Off/Auto/On)."""
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+
+    def __init__(
+        self,
+        coordinator: ApexNeptuneDataUpdateCoordinator,
+        entry: ConfigEntry,
+        *,
+        ref: OutletRef,
+    ) -> None:
+        super().__init__()
+        self._coordinator = coordinator
+        self._entry = entry
+        self._ref = ref
+        self._unsub: Callable[[], None] | None = None
+
+        ctx = ApexFusionContext.from_entry_and_coordinator(entry, coordinator)
+
+        self._attr_unique_id = f"{ctx.serial_for_ids}_outlet_mode_{ref.did}".lower()
+        self._attr_name = ref.name
+
+        tank_slug = ctx.tank_slug_with_entry_title(entry.title)
+        did_slug = str(ref.did or "").strip().lower() or "outlet"
+        self._attr_suggested_object_id = f"{tank_slug}_outlet_{did_slug}_mode"
+
+        outlet = self._find_outlet()
+        outlet_type_any: Any = outlet.get("type")
+        outlet_type = outlet_type_any if isinstance(outlet_type_any, str) else None
+        self._attr_icon = icon_for_outlet_type(outlet_type)
+
+        # Prefer grouping under the backing Aquabus module device when the
+        # mapping is unambiguous (mirrors the SelectEntity implementation).
+        module_hwtype_hint = (
+            str(outlet.get("module_hwtype")).strip()
+            if isinstance(outlet.get("module_hwtype"), str)
+            else None
+        )
+        if not module_hwtype_hint:
+            module_hwtype_hint = normalize_module_hwtype_from_outlet_type(outlet_type)
+
+        module_abaddr_any: Any = outlet.get("module_abaddr")
+        module_abaddr = (
+            module_abaddr_any if isinstance(module_abaddr_any, int) else None
+        )
+        if module_abaddr is None:
+            module_abaddr = module_abaddr_from_input_did(ref.did)
+
+        if module_abaddr is None and module_hwtype_hint:
+            module_abaddr = unambiguous_module_abaddr_from_config(
+                coordinator.data or {}, module_hwtype=module_hwtype_hint
+            )
+
+        module_device_info = (
+            build_aquabus_child_device_info_from_data(
+                host=ctx.host,
+                controller_meta=ctx.meta,
+                controller_device_identifier=ctx.controller_device_identifier,
+                data=coordinator.data or {},
+                module_abaddr=module_abaddr,
+                module_hwtype_hint=module_hwtype_hint,
+            )
+            if isinstance(module_abaddr, int)
+            else None
+        )
+
+        self._attr_device_info = module_device_info or build_device_info(
+            host=ctx.host,
+            meta=ctx.meta,
+            device_identifier=ctx.controller_device_identifier,
+        )
+
+        self._attr_available = bool(
+            getattr(self._coordinator, "last_update_success", True)
+        )
+        self._refresh()
+
+    def _find_outlet(self) -> dict[str, Any]:
+        data = self._coordinator.data or {}
+        outlets_any: Any = data.get("outlets", [])
+        if not isinstance(outlets_any, list):
+            return {}
+        for outlet_any in cast(list[Any], outlets_any):
+            if not isinstance(outlet_any, dict):
+                continue
+            outlet = cast(dict[str, Any], outlet_any)
+            if str(outlet.get("device_id") or "") == self._ref.did:
+                return outlet
+        return {}
+
+    def _read_raw_state(self) -> str:
+        outlet = self._find_outlet()
+        return str(outlet.get("state") or "").strip().upper()
+
+    def _refresh(self) -> None:
+        outlet = self._find_outlet()
+        raw_state = self._read_raw_state()
+
+        self._attr_native_value = OutletMode.option_from_raw_state(raw_state)
+
+        attrs: dict[str, Any] = {
+            "state_code": raw_state or None,
+            "effective_state": OutletMode.effective_state_from_raw_state(raw_state),
+        }
+        for key in ("output_id", "type", "gid", "status", "intensity"):
+            if key in outlet:
+                attrs[key] = outlet.get(key)
+        self._attr_extra_state_attributes = attrs
+
+    def _handle_coordinator_update(self) -> None:
+        self._attr_available = bool(
+            getattr(self._coordinator, "last_update_success", True)
+        )
+        outlet = self._find_outlet()
+        outlet_type_any: Any = outlet.get("type")
+        outlet_type = outlet_type_any if isinstance(outlet_type_any, str) else None
+        self._attr_icon = icon_for_outlet_type(outlet_type)
+        self._refresh()
+        self.async_write_ha_state()
+
+    async def async_added_to_hass(self) -> None:
+        self._unsub = self._coordinator.async_add_listener(
+            self._handle_coordinator_update
+        )
+        self._handle_coordinator_update()
+
+    async def async_will_remove_from_hass(self) -> None:
+        if self._unsub is not None:
+            self._unsub()
+            self._unsub = None
 
 
 class ApexOutletIntensitySensor(SensorEntity):

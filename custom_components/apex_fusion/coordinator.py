@@ -28,6 +28,7 @@ from yarl import URL
 
 from .const import (
     CONF_HOST,
+    CONF_NO_LOGIN,
     CONF_PASSWORD,
     CONF_USERNAME,
     DEFAULT_SCAN_INTERVAL,
@@ -2432,8 +2433,14 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             UpdateFailed: If updates fail in a non-recoverable way.
         """
         host = str(self.entry.data[CONF_HOST])
+        no_login = bool(self.entry.data.get(CONF_NO_LOGIN, False))
         username = str(self.entry.data.get(CONF_USERNAME, ""))
         password = str(self.entry.data.get(CONF_PASSWORD, ""))
+
+        if no_login:
+            # Explicit read-only / unauthenticated mode.
+            username = ""
+            password = ""
         status_path = DEFAULT_STATUS_PATH
         base_url = build_base_url(host)
         url = build_status_url(host, status_path)
@@ -2453,7 +2460,62 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         timeout_seconds = DEFAULT_TIMEOUT_SECONDS
 
-        # Prefer REST when credentials exist; fall back to XML.
+        # Read-only / no-credential mode: try unauthenticated REST status first
+        # for richer metadata than legacy endpoints, then fall back.
+        if not password:
+            rest_status_url = f"{base_url}/rest/status"
+
+            def _no_login_headers(sid: str | None) -> dict[str, str]:
+                headers = {"Accept": "*/*"}
+                if sid:
+                    headers["Cookie"] = f"connect.sid={sid}"
+                return headers
+
+            async def _fetch_no_login_rest_status(
+                sid: str | None,
+            ) -> dict[str, Any] | None:
+                async with async_timeout.timeout(timeout_seconds):
+                    async with session.get(
+                        rest_status_url, headers=_no_login_headers(sid)
+                    ) as resp:
+                        if resp.status == 404:
+                            return None
+                        if resp.status in (401, 403):
+                            return None
+                        if resp.status == 429 or _is_transient_http_status(resp.status):
+                            return None
+                        resp.raise_for_status()
+                        body = await resp.text()
+
+                parsed_any: Any = json.loads(body) if body else {}
+                return (
+                    cast(dict[str, Any], parsed_any)
+                    if isinstance(parsed_any, dict)
+                    else None
+                )
+
+            try:
+                status_obj = await _fetch_no_login_rest_status(self._rest_sid)
+                if status_obj is None and self._rest_sid:
+                    # Cached SID may be stale; clear and retry without cookie.
+                    self._rest_sid = None
+                    status_obj = await _fetch_no_login_rest_status(None)
+
+                if status_obj is not None:
+                    data = parse_status_rest(status_obj)
+                    _LOGGER.debug(
+                        "REST parsed (no-login) host=%s probes=%s outlets=%s has_network=%s",
+                        host,
+                        len(cast(dict[str, Any], data.get("probes") or {})),
+                        len(cast(list[Any], data.get("outlets") or [])),
+                        bool(data.get("network")),
+                    )
+                    self._finalize_trident(data)
+                    return self._apply_serial_cache(data)
+            except Exception as err:
+                _LOGGER.debug("No-login REST status failed; falling back: %s", err)
+
+        # Prefer REST when credentials exist; fall back to alternate endpoints.
         if password:
             now = time.monotonic()
             if now < self._rest_disabled_until:
@@ -2681,8 +2743,11 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             self._rest_sid = None
 
                     # Some controllers allow reading status without a login cookie.
-                    # Try once before attempting /rest/login to reduce session churn
+                    # Probe once before attempting /rest/login to reduce session churn
                     # and improve startup behavior when login is temporarily flaky.
+                    #
+                    # IMPORTANT: if credentials are configured, do not treat this
+                    # as success (it can mask bad credentials); proceed to login.
                     try:
                         status_obj: dict[str, Any] | None = None
                         for candidate in _candidate_status_urls():
@@ -2695,18 +2760,6 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     break
                             except FileNotFoundError:
                                 continue
-
-                        if status_obj is not None:
-                            data = parse_status_rest(status_obj)
-                            _LOGGER.debug(
-                                "REST parsed (no-login) host=%s probes=%s outlets=%s has_network=%s",
-                                host,
-                                len(cast(dict[str, Any], data.get("probes") or {})),
-                                len(cast(list[Any], data.get("outlets") or [])),
-                                bool(data.get("network")),
-                            )
-                            self._finalize_trident(data)
-                            return self._apply_serial_cache(data)
                     except _RestStatusUnauthorized:
                         # Expected on controllers that require auth.
                         pass
@@ -2845,10 +2898,7 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     )
                     pass
                 except _RestAuthRejected:
-                    _LOGGER.debug(
-                        "REST login rejected; falling back to alternate endpoints"
-                    )
-                    pass
+                    raise ConfigEntryAuthFailed("Invalid auth for Apex REST endpoints")
                 except _RestNotSupported:
                     _LOGGER.debug(
                         "REST not supported; falling back to alternate endpoints"

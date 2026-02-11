@@ -9,8 +9,13 @@
 
 # Apex Fusion (Local)
 
-> [!WARNING]
-> Version 0.1.0 seems to have a bug preventing entity correction properly. DO NOT update at this time.
+> [!NOTE]
+> The Apex REST API and legacy CGI endpoints can report different device/module layouts.
+>
+> This integration now validates REST logins: if you provide credentials and they’re wrong, setup/update fails (no silent fallback).
+>
+> If the integration switches between REST and legacy parsing, or between read-only and authenticated control, it will purge
+> stale entities/devices from the previous mode on the next reload to avoid confusing duplicates.
 
 Home Assistant custom integration for local (LAN) polling of an Apex controller.
 
@@ -32,8 +37,10 @@ Contributors are welcome (issues, testing feedback, and PRs).
 - Config flow (UI setup)
 - Input/probe sensors (Temp, pH, Cond, Trident results, etc)
 - Digital inputs as binary sensors (leak/float switches, etc)
-- Output control via 3-way selects (Off / Auto / On)
-- Firmware update entities (controller + modules)
+- Optional **No login (read-only)** mode (visual-only)
+- Output mode as a **read-only sensor** when control is unavailable
+- Output control via 3-way selects (Off / Auto / On) when authenticated REST is available
+- Firmware version entities (controller + modules) when REST is available
 - Trident waste/reagent support (levels + alerts + controls, when a Trident is present)
 - Designed for stable device identity and robust backoff on rate limiting
 
@@ -96,38 +103,51 @@ Add the integration from Home Assistant UI:
     > If you run more than one local integration / Home Assistant instance against the same controller, use **separate
     > Apex accounts** for each.
 
+### Login modes (important)
+
+This integration supports two modes:
+
+- **Authenticated (control enabled)**
+  - Provide a username + password.
+  - The integration validates the REST login.
+  - Control entities (select/switch/button/number) are created.
+- **No login (read-only / visual-only)**
+  - Enable **No login (read-only)** in the config flow (or leave the password blank).
+  - No control entities are created.
+  - You still get sensors/binary_sensors (including a read-only outlet mode sensor when the controller reports outlet state).
+
+If you previously had a wrong password and saw “weird” devices/entities: that was the legacy CGI layout. With validation enabled,
+wrong credentials will now fail loudly instead of silently switching data sources.
+
 ## Entities
 
-This integration provides entities across these Home Assistant platforms:
+This integration provides entities across these Home Assistant platforms.
+
+Always created:
 
 - **Sensors**
   - Probes/inputs from the controller (temperature, pH, conductivity, Trident readings, etc)
-  - Trident container levels from `status.modules[].extra.levels` (mL)
-    - Trident Waste Used (mL)
-    - Trident Reagent A/B/C Remaining (mL)
-    - Trident Auxiliary Level (mL)
+  - Outlet intensity sensors for variable/serial outputs
+  - Trident container levels (mL) when a Trident is detected
 - **Binary sensors**
   - Digital inputs (leak/float switches)
-  - Trident Testing (when a Trident is present)
-  - Trident Waste Full (when a Trident is present)
-  - Trident Reagent A/B/C Empty (when a Trident is present)
+  - Trident Testing / Waste Full / Reagent Empty alerts (when a Trident is present)
+
+Only when **REST is active** (no legacy CGI parsing):
+
+- **Updates** (read-only firmware version entities)
+- **Network diagnostics** (IP, gateway, netmask, Wi‑Fi SSID/strength/quality, DHCP/Wi‑Fi enabled)
+
+Only when **REST is active and login is enabled** (authenticated control):
+
 - **Selects**
   - One select per controllable output: Off / Auto / On
-  - Sends control via the local REST API (`PUT /rest/status/outputs/<did>`)
-- **Switches**
-  - Feed Mode switches: Feed A / Feed B / Feed C / Feed D
-  - Turning a feed switch **on** starts that feed cycle (timer).
-  - Turning a feed switch **off** cancels the active feed cycle.
-  - Control is REST-first (`PUT /rest/status/feed/<id>`), with legacy CGI fallback (`POST /cgi-bin/status.cgi`).
-- **Buttons**
-  - Refresh Config Now (controller)
-  - Trident Prime Reagent A/B/C + Prime Sample
-  - Trident Reset Reagent A/B/C + Reset Waste
-- **Numbers**
-  - Trident Waste Container Size (mL)
-- **Updates**
-  - Controller firmware update entity, named by controller type (example: `AC6J Firmware`)
-  - Module firmware update entities (FMM, PM2, VDM, TRI, etc)
+  - Control via `PUT /rest/status/outputs/<did>`
+- **Switches** (Feed modes)
+- **Buttons** (Refresh config + Trident actions)
+- **Numbers** (Trident waste container size)
+
+When control is unavailable (legacy or read-only), outlet “mode” is exposed as a **sensor** (visual-only) instead of a SelectEntity.
 
 ### Naming & Uniqueness (important)
 
@@ -206,7 +226,7 @@ icon: mdi:flash
 friendly_name: 80g_Frag_Tank Cond
 ```
 
-Diagnostic sensors expose network/controller state (examples):
+When **REST is active**, diagnostic sensors expose network/controller state (examples):
 
 ```yaml
 DHCP Enabled: On
@@ -224,6 +244,8 @@ Wi-Fi Strength: 100.0%
 
 Home Assistant has a first-class Update platform; this integration exposes firmware
 updates there.
+
+These entities are only available when REST parsing is active (they are not created in legacy CGI mode).
 
 > Important: The Update entities are **informational only**. This integration does not
 > initiate or install firmware updates. Apply firmware updates using Neptune’s own

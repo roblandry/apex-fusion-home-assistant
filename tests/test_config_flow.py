@@ -11,7 +11,7 @@ from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.apex_fusion.config_flow import InvalidAuth, _async_validate_input
-from custom_components.apex_fusion.const import CONF_HOST, DOMAIN
+from custom_components.apex_fusion.const import CONF_HOST, CONF_NO_LOGIN, DOMAIN
 
 
 def test_normalize_host_variants():
@@ -356,12 +356,36 @@ async def test_rest_validation_401_raises_invalid_auth(hass, aioclient_mock):
         text="{}",
     )
 
-    # REST unauthorized should fall back to the XML status endpoint; if that also
-    # fails auth, we still report InvalidAuth.
-    aioclient_mock.get(
-        f"http://{host}/cgi-bin/status.xml",
+    try:
+        await _async_validate_input(
+            hass,
+            {
+                CONF_HOST: host,
+                CONF_USERNAME: "admin",
+                CONF_PASSWORD: "pw",
+            },
+        )
+    except InvalidAuth:
+        pass
+    else:
+        raise AssertionError("Expected InvalidAuth")
+
+
+async def test_rest_validation_includes_admin_candidate_when_username_not_admin(
+    hass, aioclient_mock
+):
+    """Cover adding the implicit admin login candidate.
+
+    The config flow always appends "admin" as a fallback login user when the
+    provided username isn't already "admin".
+    """
+
+    host = "1.2.3.4"
+
+    aioclient_mock.post(
+        f"http://{host}/rest/login",
         status=401,
-        text="",
+        text="{}",
     )
 
     try:
@@ -369,7 +393,7 @@ async def test_rest_validation_401_raises_invalid_auth(hass, aioclient_mock):
             hass,
             {
                 CONF_HOST: host,
-                CONF_USERNAME: "admin",
+                CONF_USERNAME: "not-admin",
                 CONF_PASSWORD: "pw",
             },
         )
@@ -434,6 +458,11 @@ async def test_rest_validation_reraises_invalid_auth_from_rest_block(
 async def test_xml_validation_success_when_no_password(hass, aioclient_mock):
     host = "1.2.3.4"
     aioclient_mock.get(
+        f"http://{host}/cgi-bin/status.json",
+        status=404,
+        text="",
+    )
+    aioclient_mock.get(
         f"http://{host}/cgi-bin/status.xml",
         status=200,
         text="<status></status>",
@@ -451,8 +480,61 @@ async def test_xml_validation_success_when_no_password(hass, aioclient_mock):
     assert info["unique_id"] == host
 
 
+async def test_cgi_json_unauthorized_raises_invalid_auth(hass, aioclient_mock):
+    host = "1.2.3.4"
+    aioclient_mock.get(
+        f"http://{host}/cgi-bin/status.json",
+        status=401,
+        text="{}",
+    )
+
+    try:
+        await _async_validate_input(
+            hass,
+            {
+                CONF_HOST: host,
+                CONF_USERNAME: "admin",
+                CONF_PASSWORD: "",
+            },
+        )
+    except InvalidAuth:
+        pass
+    else:
+        raise AssertionError("Expected InvalidAuth")
+
+
+async def test_cgi_json_invalid_json_falls_back_to_xml(hass, aioclient_mock):
+    host = "1.2.3.4"
+    aioclient_mock.get(
+        f"http://{host}/cgi-bin/status.json",
+        status=200,
+        text="not-json",
+    )
+    aioclient_mock.get(
+        f"http://{host}/cgi-bin/status.xml",
+        status=200,
+        text="<status></status>",
+    )
+
+    info = await _async_validate_input(
+        hass,
+        {
+            CONF_HOST: host,
+            CONF_USERNAME: "admin",
+            CONF_PASSWORD: "",
+        },
+    )
+
+    assert info["unique_id"] == host
+
+
 async def test_xml_validation_unauthorized_raises_invalid_auth(hass, aioclient_mock):
     host = "1.2.3.4"
+    aioclient_mock.get(
+        f"http://{host}/cgi-bin/status.json",
+        status=404,
+        text="",
+    )
     aioclient_mock.get(
         f"http://{host}/cgi-bin/status.xml",
         status=401,
@@ -479,6 +561,11 @@ async def test_xml_validation_parse_error_raises_cannot_connect(hass, aioclient_
 
     host = "1.2.3.4"
     aioclient_mock.get(
+        f"http://{host}/cgi-bin/status.json",
+        status=404,
+        text="",
+    )
+    aioclient_mock.get(
         f"http://{host}/cgi-bin/status.xml",
         status=200,
         text="<bad",
@@ -499,7 +586,7 @@ async def test_xml_validation_parse_error_raises_cannot_connect(hass, aioclient_
         raise AssertionError("Expected CannotConnect")
 
 
-async def test_rest_login_rejected_for_all_candidates_falls_back_to_xml(
+async def test_rest_login_rejected_for_all_candidates_raises_invalid_auth(
     hass, aioclient_mock
 ):
     """Cover the logged_in=False path when all REST login candidates reject.
@@ -518,22 +605,69 @@ async def test_rest_login_rejected_for_all_candidates_falls_back_to_xml(
         status=401,
         text="{}",
     )
+
+    try:
+        await _async_validate_input(
+            hass,
+            {
+                CONF_HOST: host,
+                CONF_USERNAME: "admin",
+                CONF_PASSWORD: "pw",
+            },
+        )
+    except InvalidAuth:
+        pass
+    else:
+        raise AssertionError("Expected InvalidAuth")
+
+
+async def test_no_login_ignores_credentials_and_uses_xml(hass, aioclient_mock):
+    host = "1.2.3.4"
+    # In no-login mode we should not attempt REST at all.
+    aioclient_mock.get(
+        f"http://{host}/cgi-bin/status.json",
+        status=404,
+        text="",
+    )
     aioclient_mock.get(
         f"http://{host}/cgi-bin/status.xml",
         status=200,
-        text="<status></status>",
+        text="<status><serial>S1</serial><hostname>Tank</hostname></status>",
     )
 
     info = await _async_validate_input(
         hass,
         {
             CONF_HOST: host,
-            CONF_USERNAME: "not-admin",
-            CONF_PASSWORD: "pw",
+            CONF_NO_LOGIN: True,
+            CONF_USERNAME: "admin",
+            CONF_PASSWORD: "wrong",
         },
     )
 
-    assert info["unique_id"] == host
+    assert info["unique_id"] == "S1"
+    assert info["title"] == "Tank (1.2.3.4)"
+
+
+async def test_cgi_json_validation_success_when_no_password(hass, aioclient_mock):
+    host = "1.2.3.4"
+    aioclient_mock.get(
+        f"http://{host}/cgi-bin/status.json",
+        status=200,
+        text='{"system": {"serial": "SER", "hostname": "200XL"}}',
+    )
+
+    info = await _async_validate_input(
+        hass,
+        {
+            CONF_HOST: host,
+            CONF_USERNAME: "admin",
+            CONF_PASSWORD: "",
+        },
+    )
+
+    assert info["unique_id"] == "SER"
+    assert info["title"] == "200XL (1.2.3.4)"
 
 
 async def test_rest_status_404_falls_back_to_xml(hass, aioclient_mock):
@@ -659,12 +793,6 @@ async def test_rest_status_unauthorized_raises_invalid_auth(hass, aioclient_mock
         f"http://{host}/rest/status",
         status=401,
         text="{}",
-    )
-    # REST rejected -> validation tries the XML status endpoint; force XML auth failure.
-    aioclient_mock.get(
-        f"http://{host}/cgi-bin/status.xml",
-        status=401,
-        text="",
     )
 
     try:

@@ -129,6 +129,7 @@ def test_sensor_helpers_cover_all_branches():
     assert units_and_meta(probe_name="ORP", probe_type="orp", value=300.0)[0] == "mV"
     assert units_and_meta(probe_name="NO3", probe_type="no3", value=1.0)[0] == "ppm"
     assert units_and_meta(probe_name="PO4", probe_type="po4", value=0.1)[0] == "ppm"
+
     # pretty_name already included in label -> label only
     assert friendly_outlet_name(
         outlet_name="Nero_5", outlet_type="MXMPump|AI|Nero5"
@@ -168,6 +169,93 @@ def test_sensor_helpers_cover_all_branches():
     sf = section_field("alerts", "last_statement")
     assert sf({"alerts": "nope"}) is None
     assert sf({"alerts": {"last_statement": "x"}}) == "x"
+
+
+def test_outlet_mode_sensor_handles_non_list_outlets() -> None:
+    """Cover the guard branch when `outlets` is not a list."""
+
+    from custom_components.apex_fusion.apex_fusion import OutletRef
+    from custom_components.apex_fusion.sensor import ApexOutletModeSensor
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "1.2.3.4"},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
+    )
+
+    coordinator = _CoordinatorStub(
+        data={
+            "meta": {"serial": "ABC", "source": "rest"},
+            "outlets": "nope",
+        }
+    )
+
+    sensor = ApexOutletModeSensor(
+        cast(Any, coordinator),
+        cast(Any, entry),
+        ref=OutletRef(did="D1", name="Return"),
+    )
+    assert sensor.native_value is None
+
+
+def test_outlet_mode_sensor_skips_non_dict_outlet_entries() -> None:
+    """Cover the loop-continue branch for invalid outlet entries."""
+
+    from custom_components.apex_fusion.apex_fusion import OutletRef
+    from custom_components.apex_fusion.sensor import ApexOutletModeSensor
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "1.2.3.4"},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
+    )
+
+    coordinator = _CoordinatorStub(
+        data={
+            "meta": {"serial": "ABC", "source": "rest"},
+            "outlets": [
+                "nope",
+                {"device_id": "D1", "state": "ON", "type": "PUMP"},
+            ],
+        }
+    )
+
+    sensor = ApexOutletModeSensor(
+        cast(Any, coordinator),
+        cast(Any, entry),
+        ref=OutletRef(did="D1", name="Return"),
+    )
+    assert sensor.native_value == "On"
+
+
+def test_outlet_mode_sensor_returns_empty_when_did_not_found() -> None:
+    """Cover the fall-through return branch when DID isn't present."""
+
+    from custom_components.apex_fusion.apex_fusion import OutletRef
+    from custom_components.apex_fusion.sensor import ApexOutletModeSensor
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "1.2.3.4"},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
+    )
+
+    coordinator = _CoordinatorStub(
+        data={
+            "meta": {"serial": "ABC", "source": "rest"},
+            "outlets": [{"device_id": "OTHER", "state": "ON"}],
+        }
+    )
+
+    sensor = ApexOutletModeSensor(
+        cast(Any, coordinator),
+        cast(Any, entry),
+        ref=OutletRef(did="D1", name="Return"),
+    )
+    assert sensor.native_value is None
 
 
 def test_trident_level_ml_helper_covers_branches():
@@ -623,7 +711,7 @@ async def test_sensor_setup_without_network_or_meta_adds_no_diagnostics(
 
     coordinator = _CoordinatorStub(
         data={
-            "meta": {"serial": "ABC"},
+            "meta": {"serial": "ABC", "source": "rest"},
             "network": {},
             "trident": {"present": False},
             "probes": {},

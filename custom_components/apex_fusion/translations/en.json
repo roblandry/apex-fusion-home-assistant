@@ -6,6 +6,7 @@
         "description": "Enter your Apex host/IP and credentials. **admin** is recommended because it's commonly preconfigured, but it's not required. If you also use the Apex local web UI, use a dedicated account for Home Assistant (sharing the same account between multiple local logins can cause issues). If you set up more than one local integration/HA instance against the same controller, use separate Apex accounts.",
         "data": {
           "host": "Host (IP)",
+          "no_login": "No login (read-only)",
           "username": "Username",
           "password": "Password"
         }
@@ -14,6 +15,7 @@
         "title": "Reauthenticate Apex",
         "description": "Update credentials for {host}. Tip: use a dedicated Apex account for Home Assistant (avoid sharing an account with the local web UI or other local integrations).",
         "data": {
+          "no_login": "No login (read-only)",
           "username": "Username",
           "password": "Password"
         }
@@ -23,6 +25,7 @@
         "description": "Update host and/or credentials for {host}.",
         "data": {
           "host": "Host (IP)",
+          "no_login": "No login (read-only)",
           "username": "Username",
           "password": "Password"
         }

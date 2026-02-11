@@ -74,24 +74,27 @@ async def async_setup_entry(
 
     added_digital_keys: set[str] = set()
 
-    refs: list[_BinaryRef] = [
-        _BinaryRef(
-            key="dhcp",
-            name="DHCP Enabled",
-            icon=ICON_LAN_CONNECT,
-            value_fn=network_bool("dhcp"),
-        ),
-        _BinaryRef(
-            key="wifi_enable",
-            name="Wi-Fi Enabled",
-            icon=ICON_WIFI,
-            value_fn=network_bool("wifi_enable"),
-        ),
-    ]
+    source = str(ctx.meta.get("source") or "").strip().lower()
 
-    entities: list[BinarySensorEntity] = [
-        ApexDiagnosticBinarySensor(coordinator, entry, ref=ref) for ref in refs
-    ]
+    entities: list[BinarySensorEntity] = []
+    if source == "rest":
+        refs: list[_BinaryRef] = [
+            _BinaryRef(
+                key="dhcp",
+                name="DHCP Enabled",
+                icon=ICON_LAN_CONNECT,
+                value_fn=network_bool("dhcp"),
+            ),
+            _BinaryRef(
+                key="wifi_enable",
+                name="Wi-Fi Enabled",
+                icon=ICON_WIFI,
+                value_fn=network_bool("wifi_enable"),
+            ),
+        ]
+        entities.extend(
+            ApexDiagnosticBinarySensor(coordinator, entry, ref=ref) for ref in refs
+        )
 
     def _add_digital_probe_entities() -> None:
         data = coordinator.data or {}
@@ -110,7 +113,8 @@ async def async_setup_entry(
     remove = coordinator.async_add_listener(_add_digital_probe_entities)
     entry.async_on_unload(remove)
 
-    async_add_entities(entities)
+    if entities:
+        async_add_entities(entities)
 
     added_trident_testing = False
     added_trident_waste_full = False

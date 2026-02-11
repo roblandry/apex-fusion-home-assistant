@@ -70,7 +70,7 @@ async def test_binary_sensor_setup_and_updates(hass, enable_custom_integrations)
     listeners: list[Callable[[], None]] = []
     coordinator = _CoordinatorStub(
         data={
-            "meta": {"serial": "ABC"},
+            "meta": {"serial": "ABC", "source": "rest"},
             "network": {"dhcp": True, "wifi_enable": 1},
             "config": {"mconf": [{"abaddr": 3, "hwtype": "FMM", "name": "My FMM"}]},
             "trident": {
@@ -188,7 +188,7 @@ async def test_binary_sensor_digital_probe_skips_and_fallbacks(
 
     coordinator = _CoordinatorStub(
         data={
-            "meta": {"serial": "ABC"},
+            "meta": {"serial": "ABC", "source": "rest"},
             "network": {"dhcp": True, "wifi_enable": 1},
             "trident": {"present": True, "is_testing": False},
             "probes": {
@@ -263,7 +263,7 @@ async def test_binary_sensor_setup_with_non_dict_probes_still_adds_diagnostics(
 
     coordinator = _CoordinatorStub(
         data={
-            "meta": {"serial": "ABC"},
+            "meta": {"serial": "ABC", "source": "rest"},
             "network": {"dhcp": True, "wifi_enable": 1},
             "trident": {"present": False, "is_testing": False},
             "probes": "nope",
@@ -299,7 +299,7 @@ async def test_binary_sensor_setup_with_non_dict_trident_adds_no_trident_testing
 
     coordinator = _CoordinatorStub(
         data={
-            "meta": {"serial": "ABC"},
+            "meta": {"serial": "ABC", "source": "rest"},
             "network": {"dhcp": True, "wifi_enable": 1},
             "trident": "nope",
             "probes": {},

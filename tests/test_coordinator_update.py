@@ -15,6 +15,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.apex_fusion.const import (
     CONF_HOST,
+    CONF_NO_LOGIN,
     CONF_PASSWORD,
     CONF_USERNAME,
     DOMAIN,
@@ -723,15 +724,8 @@ async def test_rest_status_unauthorized_falls_back_to_cgi_json(
     # no-login status probe first
     session.queue_get(_Resp(401, "{}"))
     session.queue_post(_Resp(200, "{}", cookies={"connect.sid": "abc"}))
-    # REST status unauthorized -> fall back to the CGI JSON endpoint.
+    # REST status unauthorized should be treated as an auth failure.
     session.queue_get(_Resp(401, "{}"))
-    # CGI JSON endpoint success.
-    session.queue_get(
-        _Resp(
-            200,
-            '{"istat": {"hostname": "apex", "hardware": "Apex", "date": "now", "inputs": [], "outputs": []}}',
-        )
-    )
 
     coord = await _make_coordinator(hass, host="1.2.3.4")
 
@@ -745,9 +739,8 @@ async def test_rest_status_unauthorized_falls_back_to_cgi_json(
             return_value=_NullTimeout(),
         ),
     ):
-        data = await coord._async_update_data()
-
-    assert data["meta"]["source"] == "cgi_json"
+        with pytest.raises(ConfigEntryAuthFailed):
+            await coord._async_update_data()
 
 
 async def test_rest_transient_error_retries_then_falls_back_to_cgi_json(
@@ -1353,13 +1346,7 @@ async def test_rest_login_body_invalid_json_falls_back_to_cgi_json(
     # Login response body isn't JSON; no cookies either.
     session.queue_post(_Resp(200, "{no"))
 
-    # CGI JSON endpoint success.
-    session.queue_get(
-        _Resp(
-            200,
-            '{"istat": {"hostname": "apex", "hardware": "Apex", "date": "now", "inputs": [], "outputs": []}}',
-        )
-    )
+    # Missing/invalid login body should be treated as an auth failure.
 
     coord = await _make_coordinator(hass, host="1.2.3.4")
 
@@ -1373,9 +1360,8 @@ async def test_rest_login_body_invalid_json_falls_back_to_cgi_json(
             return_value=_NullTimeout(),
         ),
     ):
-        data = await coord._async_update_data()
-
-    assert data["meta"]["source"] == "cgi_json"
+        with pytest.raises(ConfigEntryAuthFailed):
+            await coord._async_update_data()
 
 
 async def test_rest_cached_sid_status_404_triggers_not_supported_and_fallback(
@@ -1425,7 +1411,7 @@ async def test_rest_no_login_success_returns_without_login(
         )
     )
 
-    coord = await _make_coordinator(hass, host="1.2.3.4")
+    coord = await _make_coordinator(hass, host="1.2.3.4", password="")
 
     with (
         patch(
@@ -1458,7 +1444,7 @@ async def test_rest_cached_sid_unauthorized_clears_sid_then_no_login_succeeds(
         )
     )
 
-    coord = await _make_coordinator(hass, host="1.2.3.4")
+    coord = await _make_coordinator(hass, host="1.2.3.4", password="")
     coord._rest_sid = "abc"
 
     with (
@@ -1624,6 +1610,8 @@ async def test_cgi_json_invalid_body_logs_and_falls_back_to_xml(
     session = _Session()
 
     # no password: skip REST
+    # no-login REST status probe: 404 => not supported
+    session.queue_get(_Resp(404, "{}"))
     # CGI JSON endpoint 200 but invalid JSON
     session.queue_get(_Resp(200, "{no"))
 
@@ -1651,6 +1639,265 @@ async def test_cgi_json_invalid_body_logs_and_falls_back_to_xml(
         data = await coord._async_update_data()
 
     assert data["meta"]["source"] == "xml"
+
+
+async def test_no_login_flag_clears_credentials_and_falls_back(
+    hass, enable_custom_integrations
+):
+    session = _Session()
+
+    # no-login REST status probe: 404 => not supported
+    session.queue_get(_Resp(404, "{}"))
+    # CGI JSON endpoint success.
+    session.queue_get(
+        _Resp(
+            200,
+            '{"istat": {"hostname": "apex", "hardware": "Apex", "date": "now", "inputs": [], "outputs": []}}',
+        )
+    )
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_HOST: "1.2.3.4",
+            CONF_USERNAME: "admin",
+            CONF_PASSWORD: "pw",
+            CONF_NO_LOGIN: True,
+        },
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
+    )
+    entry.add_to_hass(hass)
+    coord = ApexNeptuneDataUpdateCoordinator(hass, entry=cast(Any, entry))
+
+    with (
+        patch(
+            "custom_components.apex_fusion.coordinator.async_get_clientsession",
+            return_value=session,
+        ),
+        patch(
+            "custom_components.apex_fusion.coordinator.async_timeout.timeout",
+            return_value=_NullTimeout(),
+        ),
+    ):
+        data = await coord._async_update_data()
+
+    assert data["meta"]["source"] == "cgi_json"
+
+
+async def test_passwordless_rest_status_rate_limited_falls_back_to_cgi_json(
+    hass, enable_custom_integrations
+):
+    session = _Session()
+
+    # no-login REST status probe: 429 => treat as unavailable
+    session.queue_get(_Resp(429, "{}"))
+    # CGI JSON endpoint success.
+    session.queue_get(
+        _Resp(
+            200,
+            '{"istat": {"hostname": "apex", "hardware": "Apex", "date": "now", "inputs": [], "outputs": []}}',
+        )
+    )
+
+    coord = await _make_coordinator(hass, host="1.2.3.4", password="")
+
+    with (
+        patch(
+            "custom_components.apex_fusion.coordinator.async_get_clientsession",
+            return_value=session,
+        ),
+        patch(
+            "custom_components.apex_fusion.coordinator.async_timeout.timeout",
+            return_value=_NullTimeout(),
+        ),
+    ):
+        data = await coord._async_update_data()
+
+    assert data["meta"]["source"] == "cgi_json"
+
+
+async def test_passwordless_rest_status_invalid_json_falls_back_to_cgi_json(
+    hass, enable_custom_integrations
+):
+    session = _Session()
+
+    # no-login REST status probe: 200 but invalid JSON
+    session.queue_get(_Resp(200, "{no"))
+    # CGI JSON endpoint success.
+    session.queue_get(
+        _Resp(
+            200,
+            '{"istat": {"hostname": "apex", "hardware": "Apex", "date": "now", "inputs": [], "outputs": []}}',
+        )
+    )
+
+    coord = await _make_coordinator(hass, host="1.2.3.4", password="")
+
+    with (
+        patch(
+            "custom_components.apex_fusion.coordinator.async_get_clientsession",
+            return_value=session,
+        ),
+        patch(
+            "custom_components.apex_fusion.coordinator.async_timeout.timeout",
+            return_value=_NullTimeout(),
+        ),
+    ):
+        data = await coord._async_update_data()
+
+    assert data["meta"]["source"] == "cgi_json"
+
+
+async def test_rest_cached_sid_unauthorized_clears_sid_then_login_succeeds(
+    hass, enable_custom_integrations
+):
+    session = _Session()
+
+    # Cached SID attempt: status 401 -> unauthorized, should clear cached SID.
+    session.queue_get(_Resp(401, "{}"))
+    # no-login status probe next
+    session.queue_get(_Resp(401, "{}"))
+    # Login sets cookie.
+    session.queue_post(_Resp(200, "{}", cookies={"connect.sid": "abc"}))
+    # Status payload (with cookie).
+    session.queue_get(
+        _Resp(
+            200,
+            '{"nstat": {}, "system": {"serial": "ABC"}, "inputs": [], "outputs": []}',
+        )
+    )
+    # REST config not available.
+    session.queue_get(_Resp(404, "{}"))
+
+    coord = await _make_coordinator(hass, host="1.2.3.4")
+    coord._rest_sid = "stale"
+
+    with (
+        patch(
+            "custom_components.apex_fusion.coordinator.async_get_clientsession",
+            return_value=session,
+        ),
+        patch(
+            "custom_components.apex_fusion.coordinator.async_timeout.timeout",
+            return_value=_NullTimeout(),
+        ),
+    ):
+        data = await coord._async_update_data()
+
+    assert data["meta"]["source"] == "rest"
+    assert coord._rest_sid == "abc"
+
+
+async def test_rest_no_login_probe_success_does_not_short_circuit_login(
+    hass, enable_custom_integrations
+):
+    session = _Session()
+
+    # no-login REST status probe succeeds
+    session.queue_get(
+        _Resp(
+            200,
+            '{"nstat": {}, "system": {"serial": "ABC"}, "inputs": [], "outputs": []}',
+        )
+    )
+    # Login sets cookie.
+    session.queue_post(_Resp(200, "{}", cookies={"connect.sid": "abc"}))
+    # Status payload (with cookie).
+    session.queue_get(
+        _Resp(
+            200,
+            '{"nstat": {}, "system": {"serial": "ABC"}, "inputs": [], "outputs": []}',
+        )
+    )
+    # REST config not available.
+    session.queue_get(_Resp(404, "{}"))
+
+    coord = await _make_coordinator(hass, host="1.2.3.4")
+
+    with (
+        patch(
+            "custom_components.apex_fusion.coordinator.async_get_clientsession",
+            return_value=session,
+        ),
+        patch(
+            "custom_components.apex_fusion.coordinator.async_timeout.timeout",
+            return_value=_NullTimeout(),
+        ),
+    ):
+        data = await coord._async_update_data()
+
+    assert data["meta"]["source"] == "rest"
+
+
+async def test_xml_unauthorized_raises_auth_failed(hass, enable_custom_integrations):
+    session = _Session()
+
+    # no-login REST status probe: 404 => not supported
+    session.queue_get(_Resp(404, "{}"))
+    # CGI JSON endpoint: 404 => not supported
+    session.queue_get(_Resp(404, "{}"))
+    # XML endpoint unauthorized
+    session.queue_get(
+        _Resp(
+            401,
+            "<status></status>",
+            headers={"Content-Type": "application/xml"},
+        )
+    )
+
+    coord = await _make_coordinator(hass, host="1.2.3.4", password="")
+
+    with (
+        patch(
+            "custom_components.apex_fusion.coordinator.async_get_clientsession",
+            return_value=session,
+        ),
+        patch(
+            "custom_components.apex_fusion.coordinator.async_timeout.timeout",
+            return_value=_NullTimeout(),
+        ),
+    ):
+        with pytest.raises(ConfigEntryAuthFailed):
+            await coord._async_update_data()
+
+
+async def test_xml_parse_raises_update_failed_is_not_wrapped(
+    hass, enable_custom_integrations
+):
+    session = _Session()
+
+    # no-login REST status probe: 404 => not supported
+    session.queue_get(_Resp(404, "{}"))
+    # CGI JSON endpoint: 404 => not supported
+    session.queue_get(_Resp(404, "{}"))
+    # XML endpoint success, but parsing raises UpdateFailed.
+    session.queue_get(
+        _Resp(
+            200,
+            "<status></status>",
+            headers={"Content-Type": "application/xml"},
+        )
+    )
+
+    coord = await _make_coordinator(hass, host="1.2.3.4", password="")
+
+    with (
+        patch(
+            "custom_components.apex_fusion.coordinator.async_get_clientsession",
+            return_value=session,
+        ),
+        patch(
+            "custom_components.apex_fusion.coordinator.async_timeout.timeout",
+            return_value=_NullTimeout(),
+        ),
+        patch(
+            "custom_components.apex_fusion.coordinator.parse_status_xml",
+            side_effect=UpdateFailed("boom"),
+        ),
+    ):
+        with pytest.raises(UpdateFailed):
+            await coord._async_update_data()
 
 
 async def test_status_xml_unauthorized_logs_and_raises_auth_failed(
