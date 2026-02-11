@@ -9,6 +9,9 @@
 
 # Apex Fusion (Local)
 
+> [!WARNING]
+> Version 0.1.0 seems to have a bug preventing entity correction properly. DO NOT update at this time.
+
 Home Assistant custom integration for local (LAN) polling of an Apex controller.
 
 If you’ve tried other Apex options and found gaps (cloud dependence, stale support, or missing local REST/module support), I’d love feedback on what you need—this project aims to close those gaps with a local-first approach.
