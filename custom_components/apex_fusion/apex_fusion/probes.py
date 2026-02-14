@@ -75,6 +75,7 @@ class ProbeMetaResolver:
             return "Magnesium"
 
         # TODO: validate with real Trident NP data. (Issue: https://github.com/roblandry/apex-fusion-home-assistant/issues/8)
+        # Issue URL: https://github.com/roblandry/apex-fusion-home-assistant/issues/18
         if t in {"no3", "nitrate", "nitrogen"}:
             return "Nitrogen"
         if t in {"po4", "phosphate"}:
@@ -93,6 +94,7 @@ class ProbeMetaResolver:
             Temperature unit selected from the numeric range.
         """
         # TODO: see if there is a better way to determine this; maybe there is a unit (Issue: https://github.com/roblandry/apex-fusion-home-assistant/issues/12)
+        # Issue URL: https://github.com/roblandry/apex-fusion-home-assistant/issues/17
         # field somewhere in the data?
         # Values <= 45 are treated as Celsius; higher values as Fahrenheit.
         if value is not None and value <= 45:
@@ -138,6 +140,7 @@ class ProbeMetaResolver:
             return "ppm", None, SensorStateClass.MEASUREMENT
 
         # TODO: validate with real Trident NP data. (Issue: https://github.com/roblandry/apex-fusion-home-assistant/issues/8)
+        # Issue URL: https://github.com/roblandry/apex-fusion-home-assistant/issues/16
         if t in {"no3", "nitrate"} or t in {"po4", "phosphate"}:
             return "ppm", None, SensorStateClass.MEASUREMENT
 

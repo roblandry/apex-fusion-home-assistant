@@ -39,6 +39,7 @@ class DigitalValueCodec:
             if value in (0, 1):
                 return value
             # TODO: are these found anywhere; I dont think so. (Issue: https://github.com/roblandry/apex-fusion-home-assistant/issues/9)
+            # Issue URL: https://github.com/roblandry/apex-fusion-home-assistant/issues/14
             if value == 100:
                 return 1
             if value == 200:

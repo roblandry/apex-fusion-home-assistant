@@ -101,6 +101,7 @@ def module_abaddr_from_input_did(did: str) -> int | None:
 TRIDENT_WASTE_FULL_MARGIN_ML = 20.0
 
 # TODO: Determine sane value based on real-world usage. (Issue: https://github.com/roblandry/apex-fusion-home-assistant/issues/5)
+# Issue URL: https://github.com/roblandry/apex-fusion-home-assistant/issues/20
 # Reagents: warn conservatively when near-empty.
 TRIDENT_REAGENT_EMPTY_THRESHOLD_ML = 20.0
 
@@ -1245,6 +1246,7 @@ def parse_status_rest(status_obj: dict[str, Any]) -> dict[str, Any]:
             extra = cast(dict[str, Any], extra_any)
 
             # TODO: Identify ACTUAL Triden NP hwtype; requires dump (Issue: https://github.com/roblandry/apex-fusion-home-assistant/issues/4)
+            # Issue URL: https://github.com/roblandry/apex-fusion-home-assistant/issues/19
             # Only treat explicitly-known hardware types as Trident-family.
             # Avoid heuristic detection to prevent false positives across modules.
             if hwtype not in {"TRI", "TNP"}:

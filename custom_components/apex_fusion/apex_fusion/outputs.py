@@ -67,6 +67,7 @@ def friendly_outlet_name(*, outlet_name: str, outlet_type: str | None) -> str:
             return "Alkalinity Testing"
 
         # TODO: validate with real Trident NP data; may need more mappings. (Issue: https://github.com/roblandry/apex-fusion-home-assistant/issues/7)
+        # Issue URL: https://github.com/roblandry/apex-fusion-home-assistant/issues/15
         if head in {"tnp", "np"}:
             return "Trident NP"
 
