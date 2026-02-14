@@ -14,14 +14,29 @@ on:
 jobs:
   build:
     runs-on: "ubuntu-latest"
+    if: github.actor != 'github-actions[bot]'
     permissions:
       contents: write
       issues: write
       pull-requests: write
     steps:
       - uses: "actions/checkout@v4"
-      - name: "TODO to Issue"
+
+      - name: "TODO to Issue (push)"
+        if: github.event_name == 'push'
         uses: "alstr/todo-to-issue-action@v5"
+        with:
+          AUTO_ASSIGN: "true"
+          INSERT_ISSUE_URLS: "true"
+          CLOSE_ISSUES: "true"
+
+      - name: "TODO to Issue (manual)"
+        if: github.event_name == 'workflow_dispatch'
+        uses: "alstr/todo-to-issue-action@v5"
+        env:
+          # If blank, default to the ref/branch selected when triggering the workflow.
+          MANUAL_COMMIT_REF: ${{ inputs.MANUAL_COMMIT_REF || github.sha }}
+          MANUAL_BASE_REF: ${{ inputs.MANUAL_BASE_REF }}
         with:
           AUTO_ASSIGN: "true"
           INSERT_ISSUE_URLS: "true"
