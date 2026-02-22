@@ -312,6 +312,10 @@ Notes:
 - Redaction is enabled by default. Set `APEX_REDACT=0` only if you understand the risks.
 - You can provide credentials via `--username/--password` or `APEX_USERNAME`/`APEX_PASSWORD` (optionally in a `.env`).
 
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=roblandry/apex-fusion-home-assistant&type=date&legend=top-left)](https://www.star-history.com/#roblandry/apex-fusion-home-assistant&type=date&legend=top-left)
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

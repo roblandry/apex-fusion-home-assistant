@@ -38,6 +38,10 @@ class DigitalValueCodec:
         if isinstance(value, int):
             if value in (0, 1):
                 return value
+            # Observed for Apex/FMM optical level sensor:
+            # 200 -> closed/wet (true).
+            if value == 200:
+                return 1
             return None
         if isinstance(value, float):
             if value in (0.0, 1.0):
@@ -47,9 +51,7 @@ class DigitalValueCodec:
             t = value.strip()
             if t in {"0", "1"}:
                 return int(t)
-            if t == "100":
-                return 1
             if t == "200":
-                return 0
+                return 1
             return None
         return None
