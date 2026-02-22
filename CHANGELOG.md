@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## v0.1.2
+
+### CI
+
+- todo settings.json
+
+### Chores
+
+- fix todo workflow
+- fix todo manual workflow
+- Automatically added GitHub issue links to TODOs
+- clean up old todo links
+- add lables
+- remove unused/unfound values
+
+### Fixes
+
+- optical level sensor reports 200 for closed.
+
 ## v0.1.1
 
 ### CI
@@ -18,6 +37,7 @@ All notable changes to this project will be documented in this file.
 - chore(manifests) correct HACS manifest
 - update changelog
 - Inform users of BROKEN v0.1.0
+- v0.1.1
 
 ### Features
 
