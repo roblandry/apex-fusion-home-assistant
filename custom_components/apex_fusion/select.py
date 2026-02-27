@@ -123,11 +123,13 @@ class ApexOutletModeSelect(SelectEntity):
 
         ctx = ApexFusionContext.from_entry_and_coordinator(entry, coordinator)
 
-        self._attr_unique_id = f"{ctx.serial_for_ids}_outlet_mode_{ref.did}".lower()
+        self._attr_unique_id = (
+            f"{ctx.serial_for_ids}_outlet_mode_{ref.dedupe_key}".lower()
+        )
         self._attr_name = ref.name
 
         tank_slug = ctx.tank_slug_with_entry_title(entry.title)
-        did_slug = str(ref.did or "").strip().lower() or "outlet"
+        did_slug = str(ref.dedupe_key or "").strip().lower() or "outlet"
         self._attr_suggested_object_id = f"{tank_slug}_outlet_{did_slug}_mode"
 
         # Prefer grouping under the backing Aquabus module device when the

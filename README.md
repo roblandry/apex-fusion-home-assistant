@@ -41,7 +41,7 @@ Contributors are welcome (issues, testing feedback, and PRs).
 - Output mode as a **read-only sensor** when control is unavailable
 - Output control via 3-way selects (Off / Auto / On) when authenticated REST is available
 - Firmware version entities (controller + modules) when REST is available
-- Trident waste/reagent support (levels + alerts + controls, when a Trident is present)
+- Trident-family waste/reagent support (levels + alerts + controls, when a Trident `TRI` or Trident NP `TNP` is present)
 - Designed for stable device identity and robust backoff on rate limiting
 
 ## Tested / Intended Hardware
@@ -50,7 +50,7 @@ This integration is designed for Neptune Apex controllers reachable on your LAN.
 
 - **Written for** controllers that expose the local REST API (for example: `GET /rest/status`, `GET /rest/config`).
 - **Fallback support** for legacy/older firmwares that only expose `GET /cgi-bin/status.xml` (best-effort).
-- **Developed against** real controller payloads including a Trident module (Trident container level sensors are only created when a Trident is detected).
+- **Developed against** real controller payloads including Trident-family modules (container level sensors are only created when a Trident-family module is detected).
 
 If your controller/modules behave differently, please consider contributing a redacted dump (see Development below) so support can be expanded safely.
 
@@ -65,6 +65,7 @@ As of 2026-01-31, I actively run this integration against:
   - FMM (Software Version: **24**)
   - MXM (Software Version: **1**)
   - Trident ACM (`TRI`) (Software Version: **23**)
+  - Trident NP (`TNP`) (Software Version: **54**)
   - PM2 (Software Version: **3**)
   - VDM (Software Version: **13**)
 
@@ -128,10 +129,10 @@ Always created:
 - **Sensors**
   - Probes/inputs from the controller (temperature, pH, conductivity, Trident readings, etc)
   - Outlet intensity sensors for variable/serial outputs
-  - Trident container levels (mL) when a Trident is detected
+  - Trident-family container levels (mL) when a Trident-family module is detected
 - **Binary sensors**
   - Digital inputs (leak/float switches)
-  - Trident Testing / Waste Full / Reagent Empty alerts (when a Trident is present)
+  - Trident-family Testing / Waste Full / Reagent Empty alerts (when a Trident-family module is present)
 
 Only when **REST is active** (no legacy CGI parsing):
 
@@ -165,6 +166,16 @@ Notes:
 - To help existing installs, the integration includes a one-time entity-registry migration that prefixes existing entity_ids with the tank slug when safe.
 
 If you rely on old entity_ids in automations, review the Entity Registry after upgrading.
+
+#### Outlet collisions
+
+Outlets usually have a unique `device_id` (`did`), but some controller payloads can contain duplicates.
+When this happens, the integration disambiguates the affected entities using module identity (Aquabus address / hwtype).
+
+To preserve Home Assistant history:
+
+- If a `did` is unique in the current payload, the entity uses the plain `did` (no suffix).
+- Only when a `did` collides does the integration suffix it (for example `did@abaddr`).
 
 ### Config Refresh
 
@@ -268,14 +279,18 @@ useful state:
 
 ## Trident Support
 
-When a Trident module is present (`hwtype: TRI`), the integration exposes:
+When a Trident-family module is present (`hwtype: TRI` or `hwtype: TNP`), the integration exposes:
 
-- Trident Status sensor
-- Trident Testing binary sensor
-- Trident container levels (mL) from `modules[].extra.levels`
-- Trident Waste Full + Trident Reagent A/B/C Empty binary sensors
-- Trident controls: Prime (A/B/C/Sample), Reset Reagent (A/B/C), Reset Waste
-- Trident Waste Container Size number entity (mL)
+- Trident-family Status sensor
+- Trident-family Testing binary sensor
+- Trident-family container levels (mL) from `modules[].extra.levels`
+- Trident-family Waste Full + Reagent Empty binary sensors
+- Trident-family controls: Prime (Reagents + Sample), Reset Reagent, Reset Waste
+- Trident-family Waste Container Size number entity (mL)
+
+If more than one Trident-family module is detected, entities are created per module (keyed by Aquabus address). In Home Assistant, this typically shows up as separate Trident devices, each with its own set of sensors/controls.
+
+> Note: On Trident NP (`TNP`), reagents are labeled as **Reagent 1/2/3** (instead of A/B/C).
 
 Some firmwares also expose Trident **selector outputs** (for example names like `Trident_5_3` / `Alk_5_4`).
 When present, they appear as output mode selects (Off/Auto/On). Setting them to **On** may initiate the corresponding test, depending on firmware.

@@ -93,7 +93,7 @@ def test_sensor_helpers_cover_all_branches():
     assert friendly_probe_name(name="ORP", probe_type="orp") == "ORP"
     assert friendly_probe_name(name="Redox", probe_type="orp") == "ORP"
 
-    assert friendly_probe_name(name="NO3", probe_type="no3") == "Nitrogen"
+    assert friendly_probe_name(name="NO3", probe_type="no3") == "Nitrate"
     assert friendly_probe_name(name="Nitrogen", probe_type="nitrogen") == "Nitrogen"
     assert friendly_probe_name(name="PO4", probe_type="po4") == "Phosphate"
 
@@ -194,7 +194,7 @@ def test_outlet_mode_sensor_handles_non_list_outlets() -> None:
     sensor = ApexOutletModeSensor(
         cast(Any, coordinator),
         cast(Any, entry),
-        ref=OutletRef(did="D1", name="Return"),
+        ref=OutletRef(did="D1", name="Return", dedupe_key="D1"),
     )
     assert sensor.native_value is None
 
@@ -225,7 +225,7 @@ def test_outlet_mode_sensor_skips_non_dict_outlet_entries() -> None:
     sensor = ApexOutletModeSensor(
         cast(Any, coordinator),
         cast(Any, entry),
-        ref=OutletRef(did="D1", name="Return"),
+        ref=OutletRef(did="D1", name="Return", dedupe_key="D1"),
     )
     assert sensor.native_value == "On"
 
@@ -253,7 +253,7 @@ def test_outlet_mode_sensor_returns_empty_when_did_not_found() -> None:
     sensor = ApexOutletModeSensor(
         cast(Any, coordinator),
         cast(Any, entry),
-        ref=OutletRef(did="D1", name="Return"),
+        ref=OutletRef(did="D1", name="Return", dedupe_key="D1"),
     )
     assert sensor.native_value is None
 
@@ -645,7 +645,7 @@ async def test_outlet_intensity_sensor_refresh_and_lifecycle_cover_branches():
     ent = sensor.ApexOutletIntensitySensor(
         cast(Any, coordinator),
         cast(Any, entry),
-        ref=OutletIntensityRef(did="6_3", name="VarSpd3_6_3"),
+        ref=OutletIntensityRef(did="6_3", name="VarSpd3_6_3", dedupe_key="6_3"),
     )
     ent.async_write_ha_state = lambda *args, **kwargs: None
 

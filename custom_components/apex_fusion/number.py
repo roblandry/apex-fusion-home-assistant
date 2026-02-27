@@ -14,7 +14,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .apex_fusion import ApexFusionContext
+from .apex_fusion import ApexFusionContext, trident_field_by_abaddr
 from .const import CONF_PASSWORD, DOMAIN, ICON_CUP_WATER
 from .coordinator import (
     ApexNeptuneDataUpdateCoordinator,
@@ -32,25 +32,60 @@ async def async_setup_entry(
     if not str(entry.data.get(CONF_PASSWORD, "") or ""):
         return
 
-    added = False
+    added_trident_abaddrs: set[int] = set()
 
     def _add_trident_numbers() -> None:
-        nonlocal added
-        if added:
-            return
-
         data = coordinator.data or {}
-        trident_any: Any = data.get("trident")
-        if not isinstance(trident_any, dict):
-            return
-        trident = cast(dict[str, Any], trident_any)
-        if not trident.get("present"):
-            return
-        if not isinstance(trident.get("abaddr"), int):
-            return
+        primary_abaddr: int | None = None
+        primary_trident_any: Any = data.get("trident")
+        if isinstance(primary_trident_any, dict):
+            primary_abaddr_any: Any = cast(dict[str, Any], primary_trident_any).get(
+                "abaddr"
+            )
+            if isinstance(primary_abaddr_any, int):
+                primary_abaddr = primary_abaddr_any
 
-        async_add_entities([ApexTridentWasteSizeNumber(coordinator, entry)])
-        added = True
+        tridents_any: Any = data.get("tridents")
+        if isinstance(tridents_any, list):
+            candidates: list[Any] = cast(list[Any], tridents_any)
+        elif isinstance(primary_trident_any, dict):
+            candidates = [primary_trident_any]
+        else:
+            candidates = []
+
+        new: list[NumberEntity] = []
+
+        for item_any in candidates:
+            if not isinstance(item_any, dict):
+                continue
+            trident = cast(dict[str, Any], item_any)
+            if not trident.get("present"):
+                continue
+            abaddr_any: Any = trident.get("abaddr")
+            if not isinstance(abaddr_any, int):
+                continue
+            if abaddr_any in added_trident_abaddrs:
+                continue
+
+            key = (
+                "trident_waste_size_ml"
+                if abaddr_any == primary_abaddr
+                else f"trident_addr{abaddr_any}_waste_size_ml"
+            )
+
+            new.append(
+                ApexTridentWasteSizeNumber(
+                    coordinator,
+                    entry,
+                    key=key,
+                    trident=trident,
+                    trident_abaddr=abaddr_any,
+                )
+            )
+            added_trident_abaddrs.add(abaddr_any)
+
+        if new:
+            async_add_entities(new)
 
     _add_trident_numbers()
     remove = coordinator.async_add_listener(_add_trident_numbers)
@@ -70,21 +105,34 @@ class ApexTridentWasteSizeNumber(NumberEntity):
     _attr_native_step = 10.0
 
     def __init__(
-        self, coordinator: ApexNeptuneDataUpdateCoordinator, entry: ConfigEntry
+        self,
+        coordinator: ApexNeptuneDataUpdateCoordinator,
+        entry: ConfigEntry,
+        *,
+        key: str,
+        trident_abaddr: int,
+        trident: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
         self._coordinator = coordinator
         self._entry = entry
+        self._key = key
+        self._trident_abaddr = trident_abaddr
+        self._trident = trident
         self._unsub: Callable[[], None] | None = None
 
         ctx = ApexFusionContext.from_entry_and_coordinator(entry, coordinator)
 
-        self._attr_unique_id = f"{ctx.serial_for_ids}_trident_waste_size_ml".lower()
+        self._attr_unique_id = f"{ctx.serial_for_ids}_{self._key}".lower()
         # If we can attach to a Trident device, keep the entity name short.
         # If we have to fall back to the controller device, include the prefix.
         self._attr_name = "Trident Waste Container Size"
 
-        trident_any: Any = (coordinator.data or {}).get("trident")
+        trident_any: Any = (
+            self._trident
+            if isinstance(self._trident, dict)
+            else (coordinator.data or {}).get("trident")
+        )
         trident_abaddr_any: Any = (
             cast(dict[str, Any], trident_any).get("abaddr")
             if isinstance(trident_any, dict)
@@ -142,11 +190,11 @@ class ApexTridentWasteSizeNumber(NumberEntity):
 
     def _refresh_from_coordinator(self) -> None:
         data = self._coordinator.data or {}
-        trident_any: Any = data.get("trident")
-        if not isinstance(trident_any, dict):
-            self._attr_native_value = None
-            return
-        value: Any = cast(dict[str, Any], trident_any).get("waste_size_ml")
+
+        value: Any = trident_field_by_abaddr(self._trident_abaddr, "waste_size_ml")(
+            data
+        )
+
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             self._attr_native_value = float(value)
         else:
@@ -155,7 +203,7 @@ class ApexTridentWasteSizeNumber(NumberEntity):
     async def async_set_native_value(self, value: float) -> None:
         try:
             await self._coordinator.async_trident_set_waste_size_ml(
-                size_ml=float(value)
+                size_ml=float(value), trident_abaddr=self._trident_abaddr
             )
         except HomeAssistantError:
             raise

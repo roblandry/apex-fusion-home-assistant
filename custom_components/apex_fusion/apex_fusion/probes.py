@@ -74,11 +74,9 @@ class ProbeMetaResolver:
         if t == "mg":
             return "Magnesium"
 
-        # TODO: validate with real Trident NP data.
-        # Issue URL: https://github.com/roblandry/apex-fusion-home-assistant/issues/18
-        if t in {"no3", "nitrate", "nitrogen"}:
-            return "Nitrogen"
-        if t in {"po4", "phosphate"}:
+        if t == "no3":
+            return "Nitrate"
+        if t == "po4":
             return "Phosphate"
 
         return n
@@ -139,9 +137,7 @@ class ProbeMetaResolver:
         if t in ("ca", "mg"):
             return "ppm", None, SensorStateClass.MEASUREMENT
 
-        # TODO: validate with real Trident NP data.
-        # Issue URL: https://github.com/roblandry/apex-fusion-home-assistant/issues/16
-        if t in {"no3", "nitrate"} or t in {"po4", "phosphate"}:
+        if t in {"no3", "po4"}:
             return "ppm", None, SensorStateClass.MEASUREMENT
 
         return None, None, SensorStateClass.MEASUREMENT

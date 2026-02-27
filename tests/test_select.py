@@ -352,7 +352,7 @@ async def test_select_entity_attributes_include_raw_and_mxm(
         hass,
         cast(Any, coordinator),
         cast(Any, entry),
-        ref=OutletRef(did="O1", name="AI Nero 5 (Nero 5 F)"),
+        ref=OutletRef(did="O1", name="AI Nero 5 (Nero 5 F)", dedupe_key="O1"),
     )
 
     ent.async_write_ha_state = lambda *args, **kwargs: None
@@ -406,7 +406,7 @@ async def test_select_entity_attributes_extract_percent_from_status_list(
         hass,
         cast(Any, coordinator),
         cast(Any, entry),
-        ref=OutletRef(did="O1", name="SerialOut"),
+        ref=OutletRef(did="O1", name="SerialOut", dedupe_key="O1"),
     )
     ent.async_write_ha_state = lambda *args, **kwargs: None
     await ent.async_added_to_hass()
@@ -456,7 +456,7 @@ async def test_select_entity_attaches_to_module_device_when_unique_mconf_match(
         hass,
         cast(Any, coordinator),
         cast(Any, entry),
-        ref=OutletRef(did="O1", name="Outlet 1"),
+        ref=OutletRef(did="O1", name="Outlet 1", dedupe_key="O1"),
     )
 
     assert ent.device_info is not None
@@ -499,7 +499,7 @@ async def test_select_entity_falls_back_to_controller_when_ambiguous_mconf(
         hass,
         cast(Any, coordinator),
         cast(Any, entry),
-        ref=OutletRef(did="O1", name="Outlet 1"),
+        ref=OutletRef(did="O1", name="Outlet 1", dedupe_key="O1"),
     )
 
     assert ent.device_info is not None
@@ -540,7 +540,7 @@ async def test_select_entity_attaches_mxm_outlets_to_mxm_module_when_unique(
         hass,
         cast(Any, coordinator),
         cast(Any, entry),
-        ref=OutletRef(did="O1", name="AI Nero 5"),
+        ref=OutletRef(did="O1", name="AI Nero 5", dedupe_key="O1"),
     )
 
     assert ent.device_info is not None
@@ -571,7 +571,7 @@ async def test_select_find_outlet_handles_non_list_and_non_dict(
         hass,
         cast(Any, coordinator),
         cast(Any, entry),
-        ref=OutletRef(did="O1", name="Outlet 1"),
+        ref=OutletRef(did="O1", name="Outlet 1", dedupe_key="O1"),
     )
     assert ent._find_outlet() == {}
     assert ent._read_raw_state() == ""
@@ -583,7 +583,7 @@ async def test_select_find_outlet_handles_non_list_and_non_dict(
         hass,
         cast(Any, coordinator),
         cast(Any, entry),
-        ref=OutletRef(did="NO_MATCH", name="Outlet X"),
+        ref=OutletRef(did="NO_MATCH", name="Outlet X", dedupe_key="NO_MATCH"),
     )
     assert ent2._find_outlet() == {}
 
@@ -612,7 +612,7 @@ async def test_select_control_requires_password(hass, enable_custom_integrations
         hass,
         cast(Any, coordinator),
         cast(Any, entry),
-        ref=OutletRef(did="O1", name="Outlet 1"),
+        ref=OutletRef(did="O1", name="Outlet 1", dedupe_key="O1"),
     )
 
     with pytest.raises(HomeAssistantError, match="Password is required"):
@@ -645,7 +645,7 @@ async def test_select_control_invalid_mode_raises(
         hass,
         cast(Any, coordinator),
         cast(Any, entry),
-        ref=OutletRef(did="O1", name="Outlet 1"),
+        ref=OutletRef(did="O1", name="Outlet 1", dedupe_key="O1"),
     )
 
     with pytest.raises(HomeAssistantError, match="Invalid outlet mode"):
@@ -678,7 +678,7 @@ async def test_select_control_uses_existing_cookie_sid_and_put_success(
         hass,
         cast(Any, coordinator),
         cast(Any, entry),
-        ref=OutletRef(did="O1", name="Outlet 1"),
+        ref=OutletRef(did="O1", name="Outlet 1", dedupe_key="O1"),
     )
 
     await ent.async_select_option("On")
@@ -716,7 +716,7 @@ async def test_select_control_login_404_raises(
         hass,
         cast(Any, coordinator),
         cast(Any, entry),
-        ref=OutletRef(did="O1", name="Outlet 1"),
+        ref=OutletRef(did="O1", name="Outlet 1", dedupe_key="O1"),
     )
 
     coordinator.async_rest_put_json = AsyncMock(side_effect=FileNotFoundError())
@@ -754,7 +754,7 @@ async def test_select_control_coordinator_error_propagates(
         hass,
         cast(Any, coordinator),
         cast(Any, entry),
-        ref=OutletRef(did="O1", name="Outlet 1"),
+        ref=OutletRef(did="O1", name="Outlet 1", dedupe_key="O1"),
     )
 
     with pytest.raises(HomeAssistantError, match="Not authorized"):

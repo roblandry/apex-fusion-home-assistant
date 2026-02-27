@@ -153,76 +153,140 @@ async def async_setup_entry(
     _add_module_refresh_buttons()
     entry.async_on_unload(coordinator.async_add_listener(_add_module_refresh_buttons))
 
-    added = False
+    added_trident_abaddrs: set[int] = set()
 
     def _add_trident_buttons() -> None:
-        nonlocal added
-        if added:
-            return
-
         data = coordinator.data or {}
-        trident_any: Any = data.get("trident")
-        if not isinstance(trident_any, dict):
-            return
-        trident = cast(dict[str, Any], trident_any)
-        if not trident.get("present"):
-            return
-        if not isinstance(trident.get("abaddr"), int):
-            return
 
-        refs: list[_TridentButtonRef] = [
-            _TridentButtonRef(
-                key="trident_prime_reagent_a",
-                name="Prime Reagent A",
-                icon=ICON_PUMP,
-                press_fn=lambda c: c.async_trident_prime_channel(channel_index=0),
-            ),
-            _TridentButtonRef(
-                key="trident_prime_reagent_b",
-                name="Prime Reagent B",
-                icon=ICON_PUMP,
-                press_fn=lambda c: c.async_trident_prime_channel(channel_index=1),
-            ),
-            _TridentButtonRef(
-                key="trident_prime_reagent_c",
-                name="Prime Reagent C",
-                icon=ICON_PUMP,
-                press_fn=lambda c: c.async_trident_prime_channel(channel_index=2),
-            ),
-            _TridentButtonRef(
-                key="trident_prime_sample",
-                name="Prime Sample",
-                icon=ICON_PUMP,
-                press_fn=lambda c: c.async_trident_prime_channel(channel_index=3),
-            ),
-            _TridentButtonRef(
-                key="trident_reset_reagent_a",
-                name="Reset Reagent A",
-                icon=ICON_FLASK_EMPTY_PLUS_OUTLINE,
-                press_fn=lambda c: c.async_trident_reset_reagent(reagent_index=0),
-            ),
-            _TridentButtonRef(
-                key="trident_reset_reagent_b",
-                name="Reset Reagent B",
-                icon=ICON_FLASK_EMPTY_PLUS_OUTLINE,
-                press_fn=lambda c: c.async_trident_reset_reagent(reagent_index=1),
-            ),
-            _TridentButtonRef(
-                key="trident_reset_reagent_c",
-                name="Reset Reagent C",
-                icon=ICON_FLASK_EMPTY_PLUS_OUTLINE,
-                press_fn=lambda c: c.async_trident_reset_reagent(reagent_index=2),
-            ),
-            _TridentButtonRef(
-                key="trident_reset_waste",
-                name="Reset Waste",
-                icon=ICON_CUP_OUTLINE,
-                press_fn=lambda c: c.async_trident_reset_waste(),
-            ),
-        ]
+        primary_abaddr: int | None = None
+        primary_trident_any: Any = data.get("trident")
+        if isinstance(primary_trident_any, dict):
+            primary_abaddr_any: Any = cast(dict[str, Any], primary_trident_any).get(
+                "abaddr"
+            )
+            if isinstance(primary_abaddr_any, int):
+                primary_abaddr = primary_abaddr_any
 
-        async_add_entities([ApexTridentButton(coordinator, entry, ref=r) for r in refs])
-        added = True
+        # Prefer multi-trident list; fall back to legacy single-trident dict.
+        tridents_any: Any = data.get("tridents")
+        if isinstance(tridents_any, list):
+            candidates: list[Any] = cast(list[Any], tridents_any)
+        elif isinstance(primary_trident_any, dict):
+            candidates = [primary_trident_any]
+        else:
+            candidates = []
+
+        new: list[ButtonEntity] = []
+
+        for item_any in candidates:
+            if not isinstance(item_any, dict):
+                continue
+            trident = cast(dict[str, Any], item_any)
+            if not trident.get("present"):
+                continue
+            abaddr_any: Any = trident.get("abaddr")
+            if not isinstance(abaddr_any, int):
+                continue
+            if abaddr_any in added_trident_abaddrs:
+                continue
+
+            hwtype_any: Any = trident.get("hwtype")
+            hwtype = (
+                str(hwtype_any).strip().upper()
+                if isinstance(hwtype_any, str) and hwtype_any.strip()
+                else None
+            )
+            is_tnp = hwtype == "TNP"
+
+            # Preserve legacy keys/unique_ids for the primary module.
+            key_prefix = (
+                "trident"
+                if abaddr_any == primary_abaddr
+                else f"trident_addr{abaddr_any}"
+            )
+
+            if is_tnp:
+                reagent_labels = ("1", "2", "3")
+            else:
+                reagent_labels = ("A", "B", "C")
+
+            refs: list[_TridentButtonRef] = [
+                _TridentButtonRef(
+                    key=f"{key_prefix}_prime_reagent_{reagent_labels[0].lower()}",
+                    name=f"Prime Reagent {reagent_labels[0]}",
+                    icon=ICON_PUMP,
+                    press_fn=lambda c, abaddr=abaddr_any: c.async_trident_prime_channel(
+                        channel_index=0, trident_abaddr=abaddr
+                    ),
+                ),
+                _TridentButtonRef(
+                    key=f"{key_prefix}_prime_reagent_{reagent_labels[1].lower()}",
+                    name=f"Prime Reagent {reagent_labels[1]}",
+                    icon=ICON_PUMP,
+                    press_fn=lambda c, abaddr=abaddr_any: c.async_trident_prime_channel(
+                        channel_index=1, trident_abaddr=abaddr
+                    ),
+                ),
+                _TridentButtonRef(
+                    key=f"{key_prefix}_prime_reagent_{reagent_labels[2].lower()}",
+                    name=f"Prime Reagent {reagent_labels[2]}",
+                    icon=ICON_PUMP,
+                    press_fn=lambda c, abaddr=abaddr_any: c.async_trident_prime_channel(
+                        channel_index=2, trident_abaddr=abaddr
+                    ),
+                ),
+                _TridentButtonRef(
+                    key=f"{key_prefix}_prime_sample",
+                    name="Prime Sample",
+                    icon=ICON_PUMP,
+                    press_fn=lambda c, abaddr=abaddr_any: c.async_trident_prime_channel(
+                        channel_index=3, trident_abaddr=abaddr
+                    ),
+                ),
+                _TridentButtonRef(
+                    key=f"{key_prefix}_reset_reagent_{reagent_labels[0].lower()}",
+                    name=f"Reset Reagent {reagent_labels[0]}",
+                    icon=ICON_FLASK_EMPTY_PLUS_OUTLINE,
+                    press_fn=lambda c, abaddr=abaddr_any: c.async_trident_reset_reagent(
+                        reagent_index=0, trident_abaddr=abaddr
+                    ),
+                ),
+                _TridentButtonRef(
+                    key=f"{key_prefix}_reset_reagent_{reagent_labels[1].lower()}",
+                    name=f"Reset Reagent {reagent_labels[1]}",
+                    icon=ICON_FLASK_EMPTY_PLUS_OUTLINE,
+                    press_fn=lambda c, abaddr=abaddr_any: c.async_trident_reset_reagent(
+                        reagent_index=1, trident_abaddr=abaddr
+                    ),
+                ),
+                _TridentButtonRef(
+                    key=f"{key_prefix}_reset_reagent_{reagent_labels[2].lower()}",
+                    name=f"Reset Reagent {reagent_labels[2]}",
+                    icon=ICON_FLASK_EMPTY_PLUS_OUTLINE,
+                    press_fn=lambda c, abaddr=abaddr_any: c.async_trident_reset_reagent(
+                        reagent_index=2, trident_abaddr=abaddr
+                    ),
+                ),
+                _TridentButtonRef(
+                    key=f"{key_prefix}_reset_waste",
+                    name="Reset Waste",
+                    icon=ICON_CUP_OUTLINE,
+                    press_fn=lambda c, abaddr=abaddr_any: c.async_trident_reset_waste(
+                        trident_abaddr=abaddr
+                    ),
+                ),
+            ]
+
+            new.extend(
+                [
+                    ApexTridentButton(coordinator, entry, ref=r, trident=trident)
+                    for r in refs
+                ]
+            )
+            added_trident_abaddrs.add(abaddr_any)
+
+        if new:
+            async_add_entities(new)
 
     _add_trident_buttons()
     remove = coordinator.async_add_listener(_add_trident_buttons)
@@ -240,6 +304,7 @@ class ApexTridentButton(ButtonEntity):
         entry: ConfigEntry,
         *,
         ref: _TridentButtonRef,
+        trident: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
         self._coordinator = coordinator
@@ -252,8 +317,11 @@ class ApexTridentButton(ButtonEntity):
         self._attr_unique_id = f"{ctx.serial_for_ids}_{ref.key}".lower()
         self._attr_name = ref.name
         self._attr_icon = ref.icon
-        data = coordinator.data or {}
-        trident_any: Any = data.get("trident")
+        trident_any: Any = (
+            trident
+            if isinstance(trident, dict)
+            else (coordinator.data or {}).get("trident")
+        )
         trident_abaddr_any: Any = (
             cast(dict[str, Any], trident_any).get("abaddr")
             if isinstance(trident_any, dict)
@@ -308,7 +376,11 @@ class ApexTridentButton(ButtonEntity):
                 ),
             )
 
-            suffix = str(ref.key).removeprefix("trident_")
+            prefix_with_addr = f"trident_addr{trident_abaddr_any}_"
+            if str(ref.key).startswith(prefix_with_addr):
+                suffix = str(ref.key).removeprefix(prefix_with_addr)
+            else:
+                suffix = str(ref.key).removeprefix("trident_")
             self._attr_suggested_object_id = (
                 f"{ctx.tank_slug}_trident_addr{trident_abaddr_any}_{suffix}"
             )

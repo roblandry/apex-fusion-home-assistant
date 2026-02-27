@@ -26,8 +26,11 @@ from .apex_fusion import (
     DigitalValueCodec,
     network_bool,
     trident_is_testing,
+    trident_is_testing_by_abaddr,
     trident_reagent_empty,
+    trident_reagent_empty_by_abaddr,
     trident_waste_full,
+    trident_waste_full_by_abaddr,
 )
 from .const import (
     DOMAIN,
@@ -119,6 +122,7 @@ async def async_setup_entry(
     added_trident_testing = False
     added_trident_waste_full = False
     added_trident_reagent_empty = False
+    added_tridents: set[int] = set()
 
     def _get_trident_device_info(trident: dict[str, Any]) -> DeviceInfo | None:
         abaddr_any: Any = trident.get("abaddr")
@@ -177,6 +181,93 @@ async def async_setup_entry(
             ]
         )
         added_trident_testing = True
+
+        # Additional per-module binary sensors.
+        tridents_any: Any = data.get("tridents")
+        if not isinstance(tridents_any, list):
+            return
+        new_entities: list[BinarySensorEntity] = []
+        tank_slug = ctx.tank_slug
+        for t_any in cast(list[Any], tridents_any):
+            if not isinstance(t_any, dict):
+                continue
+            t = cast(dict[str, Any], t_any)
+            if not t.get("present"):
+                continue
+            abaddr_any: Any = t.get("abaddr")
+            if not isinstance(abaddr_any, int):
+                continue
+            if abaddr_any in added_tridents:
+                continue
+
+            hwtype = str(t.get("hwtype") or "").strip().upper()
+            label = "Trident NP" if hwtype == "TNP" else "Trident"
+            addr_slug = f"trident_addr{abaddr_any}"
+            device_info = _get_trident_device_info(t)
+
+            new_entities.append(
+                ApexBinarySensor(
+                    coordinator,
+                    entry,
+                    ref=_BinaryRef(
+                        key=f"{addr_slug}_testing",
+                        name=f"{label} Testing",
+                        icon=ICON_TEST_TUBE,
+                        value_fn=trident_is_testing_by_abaddr(abaddr_any),
+                    ),
+                    device_info=device_info,
+                    suggested_object_id=f"{tank_slug}_{addr_slug}_testing",
+                )
+            )
+
+            new_entities.append(
+                ApexTridentWasteFullBinarySensor(
+                    coordinator,
+                    entry,
+                    ref=_BinaryRef(
+                        key=f"{addr_slug}_waste_full",
+                        name=f"{label} Waste Full",
+                        icon=ICON_CUP_OFF,
+                        value_fn=trident_waste_full_by_abaddr(abaddr_any),
+                    ),
+                    device_info=device_info,
+                    suggested_object_id=f"{tank_slug}_{addr_slug}_waste_full",
+                )
+            )
+
+            # Reagent empty flags.
+            reagent_names = (
+                ("Reagent 1", "reagent_a_empty"),
+                ("Reagent 2", "reagent_b_empty"),
+                ("Reagent 3", "reagent_c_empty"),
+            )
+            if hwtype != "TNP":
+                reagent_names = (
+                    ("Reagent A", "reagent_a_empty"),
+                    ("Reagent B", "reagent_b_empty"),
+                    ("Reagent C", "reagent_c_empty"),
+                )
+
+            for display, field in reagent_names:
+                new_entities.append(
+                    ApexTridentReagentEmptyBinarySensor(
+                        coordinator,
+                        entry,
+                        ref=_BinaryRef(
+                            key=f"{addr_slug}_{field}",
+                            name=f"{label} {display} Empty",
+                            icon=ICON_FLASK_EMPTY,
+                            value_fn=trident_reagent_empty_by_abaddr(abaddr_any, field),
+                        ),
+                        device_info=device_info,
+                        suggested_object_id=f"{tank_slug}_{addr_slug}_{field}",
+                    )
+                )
+
+            added_tridents.add(abaddr_any)
+
+        if new_entities:
+            async_add_entities(new_entities)
 
     _add_trident_testing_entity()
     remove_trident = coordinator.async_add_listener(_add_trident_testing_entity)

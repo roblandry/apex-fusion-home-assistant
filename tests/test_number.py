@@ -45,6 +45,9 @@ async def test_number_setup_adds_waste_size_and_sets_value(
     coordinator = _CoordinatorStub(
         data={
             "meta": {"serial": "ABC"},
+            "tridents": [
+                {"present": True, "abaddr": 5, "waste_size_ml": 450.0},
+            ],
             "trident": {"present": True, "abaddr": 5, "waste_size_ml": 450.0},
         },
         device_identifier="ABC",
@@ -81,10 +84,10 @@ async def test_number_setup_adds_waste_size_and_sets_value(
     )
 
     # Cover refresh branches and cleanup.
-    coordinator.data["trident"]["waste_size_ml"] = "nope"
+    coordinator.data["tridents"][0]["waste_size_ml"] = "nope"
     ent._handle_coordinator_update()
     assert ent._attr_native_value is None
-    coordinator.data["trident"] = "nope"
+    coordinator.data["tridents"] = "nope"
     ent._handle_coordinator_update()
     assert ent._attr_native_value is None
 
@@ -159,6 +162,9 @@ async def test_number_set_value_wraps_unknown_error(hass, enable_custom_integrat
     coordinator = _CoordinatorStub(
         data={
             "meta": {"serial": "ABC"},
+            "tridents": [
+                {"present": True, "abaddr": 5, "waste_size_ml": 450.0},
+            ],
             "trident": {"present": True, "abaddr": 5, "waste_size_ml": 450.0},
         },
         device_identifier="ABC",
@@ -196,6 +202,9 @@ async def test_number_set_value_reraises_home_assistant_error(
     coordinator = _CoordinatorStub(
         data={
             "meta": {"serial": "ABC"},
+            "tridents": [
+                {"present": True, "abaddr": 5, "waste_size_ml": 450.0},
+            ],
             "trident": {"present": True, "abaddr": 5, "waste_size_ml": 450.0},
         },
         device_identifier="ABC",
@@ -251,6 +260,12 @@ async def test_number_trident_device_info_falls_back_without_abaddr(
 
     from custom_components.apex_fusion.number import ApexTridentWasteSizeNumber
 
-    ent = ApexTridentWasteSizeNumber(cast(Any, coordinator), cast(Any, entry))
+    ent = ApexTridentWasteSizeNumber(
+        cast(Any, coordinator),
+        cast(Any, entry),
+        key="trident_waste_size_ml",
+        trident_abaddr=0,
+        trident={"present": True, "waste_size_ml": 450.0},
+    )
     assert ent.device_info is not None
     assert ent.device_info.get("identifiers") == {(DOMAIN, "ABC")}

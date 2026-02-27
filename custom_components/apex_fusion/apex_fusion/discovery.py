@@ -57,6 +57,7 @@ class OutletIntensityRef:
 
     did: str
     name: str
+    dedupe_key: str
 
 
 @dataclass(frozen=True)
@@ -70,6 +71,7 @@ class OutletRef:
 
     did: str
     name: str
+    dedupe_key: str
 
 
 # -----------------------------------------------------------------------------
@@ -205,6 +207,16 @@ class ApexDiscovery:
         if not isinstance(outlets_any, list):
             return [], set()
 
+        # Preserve stable unique_ids when DIDs are unique by only suffixing
+        # identifiers that actually collide within this payload.
+        did_counts: dict[str, int] = {}
+        for outlet_any in cast(list[Any], outlets_any):
+            if not isinstance(outlet_any, Mapping):
+                continue
+            did_any: Any = cast(Mapping[str, Any], outlet_any).get("device_id")
+            if isinstance(did_any, str) and did_any:
+                did_counts[did_any] = did_counts.get(did_any, 0) + 1
+
         refs: list[OutletIntensityRef] = []
         seen: set[str] = set()
 
@@ -215,7 +227,33 @@ class ApexDiscovery:
             outlet = cast(Mapping[str, Any], outlet_any)
             did_any: Any = outlet.get("device_id")
             did = did_any if isinstance(did_any, str) else None
-            if not did or did in already_added_dids or did in seen:
+            if not did:
+                continue
+
+            module_abaddr_any: Any = outlet.get("module_abaddr")
+            module_abaddr = (
+                module_abaddr_any if isinstance(module_abaddr_any, int) else None
+            )
+            module_hwtype_any: Any = outlet.get("module_hwtype")
+            module_hwtype = (
+                str(module_hwtype_any).strip().upper()
+                if isinstance(module_hwtype_any, str) and module_hwtype_any.strip()
+                else None
+            )
+
+            if did_counts.get(did, 0) > 1:
+                # DIDs can collide (e.g. Trident-family), so suffix with module
+                # identity for stable deduping.
+                if module_abaddr is not None:
+                    dedupe_key = f"{did}@{module_abaddr}"
+                elif module_hwtype:
+                    dedupe_key = f"{did}@{module_hwtype}"
+                else:
+                    dedupe_key = did
+            else:
+                dedupe_key = did
+
+            if dedupe_key in already_added_dids or dedupe_key in seen:
                 continue
 
             intensity_any: Any = outlet.get("intensity")
@@ -231,9 +269,16 @@ class ApexDiscovery:
                 outlet_type=outlet_type,
             )
 
-            refs.append(OutletIntensityRef(did=did, name=f"{outlet_name} Intensity"))
-            seen.add(did)
+            refs.append(
+                OutletIntensityRef(
+                    did=did,
+                    name=f"{outlet_name} Intensity",
+                    dedupe_key=dedupe_key,
+                )
+            )
+            seen.add(dedupe_key)
 
+        # NOTE: returned set contains dedupe keys, not raw DIDs.
         return refs, seen
 
     @staticmethod
@@ -260,6 +305,14 @@ class ApexDiscovery:
         if not isinstance(outlets_any, list):
             return [], set()
 
+        did_counts: dict[str, int] = {}
+        for outlet_any in cast(list[Any], outlets_any):
+            if not isinstance(outlet_any, Mapping):
+                continue
+            did_any: Any = cast(Mapping[str, Any], outlet_any).get("device_id")
+            if isinstance(did_any, str) and did_any:
+                did_counts[did_any] = did_counts.get(did_any, 0) + 1
+
         refs: list[OutletRef] = []
         seen: set[str] = set()
 
@@ -270,7 +323,31 @@ class ApexDiscovery:
             outlet = cast(dict[str, Any], outlet_any)
             did_any: Any = outlet.get("device_id")
             did = did_any if isinstance(did_any, str) else None
-            if not did or did in already_added_dids or did in seen:
+            if not did:
+                continue
+
+            module_abaddr_any: Any = outlet.get("module_abaddr")
+            module_abaddr = (
+                module_abaddr_any if isinstance(module_abaddr_any, int) else None
+            )
+            module_hwtype_any: Any = outlet.get("module_hwtype")
+            module_hwtype = (
+                str(module_hwtype_any).strip().upper()
+                if isinstance(module_hwtype_any, str) and module_hwtype_any.strip()
+                else None
+            )
+
+            if did_counts.get(did, 0) > 1:
+                if module_abaddr is not None:
+                    dedupe_key = f"{did}@{module_abaddr}"
+                elif module_hwtype:
+                    dedupe_key = f"{did}@{module_hwtype}"
+                else:
+                    dedupe_key = did
+            else:
+                dedupe_key = did
+
+            if dedupe_key in already_added_dids or dedupe_key in seen:
                 continue
             if not OutletMode.is_selectable_outlet(outlet):
                 continue
@@ -282,7 +359,8 @@ class ApexDiscovery:
                 outlet_type=outlet_type,
             )
 
-            refs.append(OutletRef(did=did, name=outlet_name))
-            seen.add(did)
+            refs.append(OutletRef(did=did, name=outlet_name, dedupe_key=dedupe_key))
+            seen.add(dedupe_key)
 
+        # NOTE: returned set contains dedupe keys, not raw DIDs.
         return refs, seen

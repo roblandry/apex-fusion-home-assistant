@@ -29,6 +29,26 @@ def trident_is_testing(data: dict[str, Any]) -> bool | None:
     return None
 
 
+def trident_is_testing_by_abaddr(
+    trident_abaddr: int,
+) -> Callable[[dict[str, Any]], bool | None]:
+    def _get(data: dict[str, Any]) -> bool | None:
+        tridents_any: Any = data.get("tridents")
+        if not isinstance(tridents_any, list):
+            return None
+        for item_any in cast(list[Any], tridents_any):
+            if not isinstance(item_any, dict):
+                continue
+            t = cast(dict[str, Any], item_any)
+            if t.get("abaddr") != trident_abaddr:
+                continue
+            value: Any = t.get("is_testing")
+            return value if isinstance(value, bool) else None
+        return None
+
+    return _get
+
+
 def trident_waste_full(data: dict[str, Any]) -> bool | None:
     """Return whether the Trident waste container is full.
 
@@ -46,6 +66,26 @@ def trident_waste_full(data: dict[str, Any]) -> bool | None:
     if isinstance(value, bool):
         return value
     return None
+
+
+def trident_waste_full_by_abaddr(
+    trident_abaddr: int,
+) -> Callable[[dict[str, Any]], bool | None]:
+    def _get(data: dict[str, Any]) -> bool | None:
+        tridents_any: Any = data.get("tridents")
+        if not isinstance(tridents_any, list):
+            return None
+        for item_any in cast(list[Any], tridents_any):
+            if not isinstance(item_any, dict):
+                continue
+            t = cast(dict[str, Any], item_any)
+            if t.get("abaddr") != trident_abaddr:
+                continue
+            value: Any = t.get("waste_full")
+            return value if isinstance(value, bool) else None
+        return None
+
+    return _get
 
 
 def trident_reagent_empty(field: str) -> Callable[[dict[str, Any]], bool | None]:
@@ -66,6 +106,26 @@ def trident_reagent_empty(field: str) -> Callable[[dict[str, Any]], bool | None]
         value: Any = trident.get(field)
         if isinstance(value, bool):
             return value
+        return None
+
+    return _get
+
+
+def trident_reagent_empty_by_abaddr(
+    trident_abaddr: int, field: str
+) -> Callable[[dict[str, Any]], bool | None]:
+    def _get(data: dict[str, Any]) -> bool | None:
+        tridents_any: Any = data.get("tridents")
+        if not isinstance(tridents_any, list):
+            return None
+        for item_any in cast(list[Any], tridents_any):
+            if not isinstance(item_any, dict):
+                continue
+            t = cast(dict[str, Any], item_any)
+            if t.get("abaddr") != trident_abaddr:
+                continue
+            value: Any = t.get(field)
+            return value if isinstance(value, bool) else None
         return None
 
     return _get
@@ -94,5 +154,73 @@ def trident_level_ml(index: int) -> Callable[[dict[str, Any]], Any]:
         if index < 0 or index >= len(levels):
             return None
         return levels[index]
+
+    return _get
+
+
+def trident_level_ml_by_abaddr(
+    trident_abaddr: int, index: int
+) -> Callable[[dict[str, Any]], Any]:
+    """Build an extractor for a Trident container level for a specific module.
+
+    Args:
+        trident_abaddr: Aquabus address of the Trident-family module.
+        index: Index into the `levels_ml` list.
+
+    Returns:
+        Callable that accepts coordinator `data` and returns the indexed level
+        value for the matching Trident module when present.
+    """
+
+    def _get(data: dict[str, Any]) -> Any:
+        tridents_any: Any = data.get("tridents")
+        if not isinstance(tridents_any, list):
+            return None
+        for item_any in cast(list[Any], tridents_any):
+            if not isinstance(item_any, dict):
+                continue
+            t = cast(dict[str, Any], item_any)
+            abaddr_any: Any = t.get("abaddr")
+            if abaddr_any != trident_abaddr:
+                continue
+            levels_any: Any = t.get("levels_ml")
+            if not isinstance(levels_any, list):
+                return None
+            levels = cast(list[Any], levels_any)
+            if index < 0 or index >= len(levels):
+                return None
+            return levels[index]
+        return None
+
+    return _get
+
+
+def trident_field_by_abaddr(
+    trident_abaddr: int, field: str
+) -> Callable[[dict[str, Any]], Any]:
+    """Build an extractor for a single Trident field for a specific module.
+
+    Args:
+        trident_abaddr: Aquabus address of the Trident-family module.
+        field: Key to fetch from the Trident dict (e.g. "status").
+
+    Returns:
+        Callable that accepts coordinator `data` and returns the field value
+        for the matching Trident module when present.
+    """
+
+    def _get(data: dict[str, Any]) -> Any:
+        tridents_any: Any = data.get("tridents")
+        if not isinstance(tridents_any, list):
+            return None
+        for item_any in cast(list[Any], tridents_any):
+            if not isinstance(item_any, dict):
+                continue
+            t = cast(dict[str, Any], item_any)
+            abaddr_any: Any = t.get("abaddr")
+            if abaddr_any != trident_abaddr:
+                continue
+            return t.get(field)
+        return None
 
     return _get

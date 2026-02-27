@@ -1099,7 +1099,7 @@ def parse_status_rest(status_obj: dict[str, Any]) -> dict[str, Any]:
                 }
             )
 
-    def _parse_trident_from_modules() -> dict[str, Any]:
+    def _parse_tridents_from_modules() -> list[dict[str, Any]]:
         def _coerce_percent(value: Any) -> int | None:
             if value is None:
                 return None
@@ -1199,32 +1199,9 @@ def parse_status_rest(status_obj: dict[str, Any]) -> dict[str, Any]:
 
         modules_any: Any = _find_field(status_obj, "modules")
         if not isinstance(modules_any, list):
-            return {
-                "present": False,
-                "status": None,
-                "is_testing": None,
-                "abaddr": None,
-                "reagent_a_remaining": None,
-                "reagent_b_remaining": None,
-                "reagent_c_remaining": None,
-                "waste_container_level": None,
-                "levels_ml": None,
-            }
+            return []
 
-        best_status: str | None = None
-        present = False
-        abaddr: int | None = None
-        levels_ml: list[float] | None = None
-        trident_hwtype: str | None = None
-        trident_hwrev: str | None = None
-        trident_swrev: str | None = None
-        trident_serial: str | None = None
-        consumables: dict[str, Any] = {
-            "reagent_a_remaining": None,
-            "reagent_b_remaining": None,
-            "reagent_c_remaining": None,
-            "waste_container_level": None,
-        }
+        tridents: list[dict[str, Any]] = []
         for module_any in cast(list[Any], modules_any):
             if not isinstance(module_any, dict):
                 continue
@@ -1240,20 +1217,19 @@ def parse_status_rest(status_obj: dict[str, Any]) -> dict[str, Any]:
                 .upper()
             )
 
-            extra_any: Any = module.get("extra")
-            if not isinstance(extra_any, dict):
-                continue
-            extra = cast(dict[str, Any], extra_any)
-
-            # TODO: Identify ACTUAL Triden NP hwtype; requires dump
-            # Issue URL: https://github.com/roblandry/apex-fusion-home-assistant/issues/19
             # Only treat explicitly-known hardware types as Trident-family.
             # Avoid heuristic detection to prevent false positives across modules.
             if hwtype not in {"TRI", "TNP"}:
                 continue
 
+            extra_any: Any = module.get("extra")
+            if not isinstance(extra_any, dict):
+                continue
+            extra = cast(dict[str, Any], extra_any)
+
             trident_hwtype = hwtype or None
 
+            trident_hwrev: str | None = None
             hwrev_any: Any = (
                 module.get("hwrev")
                 or module.get("hwRev")
@@ -1263,8 +1239,9 @@ def parse_status_rest(status_obj: dict[str, Any]) -> dict[str, Any]:
             )
             if isinstance(hwrev_any, (str, int, float)):
                 t = str(hwrev_any).strip()
-                trident_hwrev = t or trident_hwrev
+                trident_hwrev = t or None
 
+            trident_swrev: str | None = None
             swrev_any: Any = (
                 module.get("software")
                 or module.get("swrev")
@@ -1274,8 +1251,9 @@ def parse_status_rest(status_obj: dict[str, Any]) -> dict[str, Any]:
             )
             if isinstance(swrev_any, (str, int, float)):
                 t = str(swrev_any).strip()
-                trident_swrev = t or trident_swrev
+                trident_swrev = t or None
 
+            trident_serial: str | None = None
             serial_any: Any = (
                 module.get("serial")
                 or module.get("serialNo")
@@ -1284,8 +1262,9 @@ def parse_status_rest(status_obj: dict[str, Any]) -> dict[str, Any]:
             )
             if isinstance(serial_any, (str, int, float)):
                 t = str(serial_any).strip()
-                trident_serial = t or trident_serial
+                trident_serial = t or None
 
+            abaddr: int | None = None
             abaddr_any: Any = module.get("abaddr")
             if isinstance(abaddr_any, int):
                 abaddr = abaddr_any
@@ -1294,6 +1273,7 @@ def parse_status_rest(status_obj: dict[str, Any]) -> dict[str, Any]:
             present = bool(present_any) if isinstance(present_any, bool) else True
 
             # Trident container levels are provided as a list of numbers.
+            levels_ml: list[float] | None = None
             levels_any: Any = extra.get("levels")
             if isinstance(levels_any, list):
                 parsed_levels: list[float] = []
@@ -1309,61 +1289,48 @@ def parse_status_rest(status_obj: dict[str, Any]) -> dict[str, Any]:
                             parsed_levels.append(n)
                 levels_ml = parsed_levels or None
 
-            # Parse consumables even when status is missing.
             consumables = _extract_consumables(extra)
 
+            status: str | None = None
+            is_testing: bool | None = None
             status_any: Any = extra.get("status")
-            if not isinstance(status_any, str):
-                break
-            status = status_any.strip()
-            if not status:
-                break
+            if isinstance(status_any, str):
+                s = status_any.strip()
+                if s:
+                    # Match Apex UI capitalization (commonly: "Testing Ca/Mg").
+                    if s.lower().startswith("testing"):
+                        s = "Testing" + s[7:]
 
-            # Match Apex UI capitalization (commonly: "Testing Ca/Mg").
-            if status.lower().startswith("testing"):
-                status = "Testing" + status[7:]
+                    # Controllers may return simple statuses like "idle"/"ok".
+                    # Normalize those to sentence-case while preserving mixed-content
+                    # statuses like "testing Ca/Mg".
+                    if s.isalpha():
+                        if s.isupper() and len(s) <= 3:
+                            # Preserve common abbreviations like "OK".
+                            status = s
+                        else:
+                            status = s[:1].upper() + s[1:].lower()
+                    else:
+                        status = s
 
-            # Controllers may return simple statuses like "idle"/"ok".
-            # Normalize those to sentence-case while preserving mixed-content
-            # statuses like "testing Ca/Mg".
-            if status.isalpha():
-                if status.isupper() and len(status) <= 3:
-                    # Preserve common abbreviations like "OK".
-                    status = status
-                else:
-                    status = status[:1].upper() + status[1:].lower()
+                    is_testing = "testing" in s.lower()
 
-            best_status = status
-            break
+            tridents.append(
+                {
+                    "present": present,
+                    "status": status,
+                    "is_testing": is_testing,
+                    "abaddr": abaddr,
+                    "hwtype": trident_hwtype,
+                    "hwrev": trident_hwrev,
+                    "swrev": trident_swrev,
+                    "serial": trident_serial,
+                    "levels_ml": levels_ml,
+                    **consumables,
+                }
+            )
 
-        if best_status is None:
-            return {
-                "present": present,
-                "status": None,
-                "is_testing": None,
-                "abaddr": abaddr,
-                "hwtype": trident_hwtype,
-                "hwrev": trident_hwrev,
-                "swrev": trident_swrev,
-                "serial": trident_serial,
-                "levels_ml": levels_ml,
-                **consumables,
-            }
-
-        lower = best_status.lower()
-        is_testing = "testing" in lower
-        return {
-            "present": present,
-            "status": best_status,
-            "is_testing": is_testing,
-            "abaddr": abaddr,
-            "hwtype": trident_hwtype,
-            "hwrev": trident_hwrev,
-            "swrev": trident_swrev,
-            "serial": trident_serial,
-            "levels_ml": levels_ml,
-            **consumables,
-        }
+        return tridents
 
     def _parse_last_alert_statement() -> dict[str, Any]:
         # The REST payload may use different container keys for alerts.
@@ -1487,15 +1454,43 @@ def parse_status_rest(status_obj: dict[str, Any]) -> dict[str, Any]:
 
         return None
 
-    return {
+    data: dict[str, Any] = {
         "meta": meta,
         "network": network,
         "probes": probes,
         "outlets": outlets,
         "feed": _parse_feed(),
         "alerts": _parse_last_alert_statement(),
-        "trident": _parse_trident_from_modules(),
+        "tridents": _parse_tridents_from_modules(),
+        "trident": None,
         "raw": status_obj,
+    }
+
+    # Backward compatibility: preserve `data["trident"]` as the primary Trident.
+    data["trident"] = _primary_trident_from_data(data)
+    return data
+
+
+def _primary_trident_from_data(data: dict[str, Any]) -> dict[str, Any]:
+    tridents_any: Any = data.get("tridents")
+    if isinstance(tridents_any, list) and tridents_any:
+        first_any: Any = cast(list[Any], tridents_any)[0]
+        if isinstance(first_any, dict):
+            return cast(dict[str, Any], first_any)
+    return {
+        "present": False,
+        "status": None,
+        "is_testing": None,
+        "abaddr": None,
+        "hwtype": None,
+        "hwrev": None,
+        "swrev": None,
+        "serial": None,
+        "levels_ml": None,
+        "reagent_a_remaining": None,
+        "reagent_b_remaining": None,
+        "reagent_c_remaining": None,
+        "waste_container_level": None,
     }
 
 
@@ -1783,29 +1778,44 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             data["mxm_devices"] = self._cached_mxm_devices
 
         # If Trident waste size was learned from config previously, carry it forward.
+        waste_by_abaddr: dict[int, float] = {}
+        waste_default: float | None = None
+        if self._cached_mconf:
+            for m in self._cached_mconf:
+                if str(m.get("hwtype") or "").strip().upper() not in {"TRI", "TNP"}:
+                    continue
+                extra_any: Any = m.get("extra")
+                if not isinstance(extra_any, dict):
+                    continue
+                waste_any: Any = cast(dict[str, Any], extra_any).get("wasteSize")
+                if not isinstance(waste_any, (int, float)):
+                    continue
+                waste_value = float(waste_any)
+                abaddr_any: Any = m.get("abaddr")
+                if isinstance(abaddr_any, int):
+                    waste_by_abaddr[abaddr_any] = waste_value
+                if waste_default is None:
+                    waste_default = waste_value
+
+        def _apply_waste_size(trident: dict[str, Any]) -> None:
+            if trident.get("waste_size_ml") is not None:
+                return
+            abaddr_any: Any = trident.get("abaddr")
+            if isinstance(abaddr_any, int) and abaddr_any in waste_by_abaddr:
+                trident["waste_size_ml"] = waste_by_abaddr[abaddr_any]
+                return
+            if waste_default is not None:
+                trident["waste_size_ml"] = waste_default
+
+        tridents_any: Any = data.get("tridents")
+        if isinstance(tridents_any, list):
+            for t_any in cast(list[Any], tridents_any):
+                if isinstance(t_any, dict):
+                    _apply_waste_size(cast(dict[str, Any], t_any))
+
         trident_any: Any = data.get("trident")
         if isinstance(trident_any, dict):
-            trident = cast(dict[str, Any], trident_any)
-            if trident.get("waste_size_ml") is None:
-                prev = None
-                # Prefer cached mconf-derived value if present in cached mconf.
-                if self._cached_mconf:
-                    for m in self._cached_mconf:
-                        if str(m.get("hwtype") or "").strip().upper() not in {
-                            "TRI",
-                            "TNP",
-                        }:
-                            continue
-                        extra_any: Any = m.get("extra")
-                        if isinstance(extra_any, dict):
-                            waste_any: Any = cast(dict[str, Any], extra_any).get(
-                                "wasteSize"
-                            )
-                            if isinstance(waste_any, (int, float)):
-                                prev = float(waste_any)
-                                break
-                if prev is not None:
-                    trident["waste_size_ml"] = prev
+            _apply_waste_size(cast(dict[str, Any], trident_any))
 
     async def _async_try_refresh_rest_config(
         self,
@@ -1867,25 +1877,41 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._cached_mconf = sanitized_mconf
                 data.setdefault("config", {})["mconf"] = sanitized_mconf
 
+                waste_by_abaddr: dict[int, float] = {}
+                waste_default: float | None = None
+                for m in sanitized_mconf:
+                    if str(m.get("hwtype") or "").strip().upper() not in {"TRI", "TNP"}:
+                        continue
+                    extra_any: Any = m.get("extra")
+                    if not isinstance(extra_any, dict):
+                        continue
+                    waste_any: Any = cast(dict[str, Any], extra_any).get("wasteSize")
+                    if not isinstance(waste_any, (int, float)):
+                        continue
+                    waste_value = float(waste_any)
+                    abaddr_any: Any = m.get("abaddr")
+                    if isinstance(abaddr_any, int):
+                        waste_by_abaddr[abaddr_any] = waste_value
+                    if waste_default is None:
+                        waste_default = waste_value
+
+                def _apply_waste_size(trident: dict[str, Any]) -> None:
+                    abaddr_any: Any = trident.get("abaddr")
+                    if isinstance(abaddr_any, int) and abaddr_any in waste_by_abaddr:
+                        trident["waste_size_ml"] = waste_by_abaddr[abaddr_any]
+                        return
+                    if waste_default is not None:
+                        trident["waste_size_ml"] = waste_default
+
+                tridents_any: Any = data.get("tridents")
+                if isinstance(tridents_any, list):
+                    for t_any in cast(list[Any], tridents_any):
+                        if isinstance(t_any, dict):
+                            _apply_waste_size(cast(dict[str, Any], t_any))
+
                 trident_any: Any = data.get("trident")
                 if isinstance(trident_any, dict):
-                    for m in sanitized_mconf:
-                        if str(m.get("hwtype") or "").strip().upper() not in {
-                            "TRI",
-                            "TNP",
-                        }:
-                            continue
-                        extra_any: Any = m.get("extra")
-                        if not isinstance(extra_any, dict):
-                            continue
-                        waste_any: Any = cast(dict[str, Any], extra_any).get(
-                            "wasteSize"
-                        )
-                        if isinstance(waste_any, (int, float)):
-                            cast(dict[str, Any], trident_any)["waste_size_ml"] = float(
-                                waste_any
-                            )
-                            break
+                    _apply_waste_size(cast(dict[str, Any], trident_any))
 
                 mxm_devices = _parse_mxm_devices_from_mconf(config_obj)
                 if mxm_devices:
@@ -1940,95 +1966,102 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         Returns:
             None.
         """
-        trident_any: Any = data.get("trident")
-        if not isinstance(trident_any, dict):
-            return
-        trident = cast(dict[str, Any], trident_any)
 
-        levels_any: Any = trident.get("levels_ml")
-        waste_used_ml: float | None = None
-        reagent_a_ml: float | None = None
-        reagent_b_ml: float | None = None
-        reagent_c_ml: float | None = None
-        if isinstance(levels_any, list) and levels_any:
-            levels = cast(list[Any], levels_any)
-            first = levels[0]
-            if isinstance(first, (int, float)) and not isinstance(first, bool):
-                waste_used_ml = float(first)
+        def _finalize_one(trident: dict[str, Any]) -> None:
+            levels_any: Any = trident.get("levels_ml")
+            waste_used_ml: float | None = None
+            reagent_a_ml: float | None = None
+            reagent_b_ml: float | None = None
+            reagent_c_ml: float | None = None
+            if isinstance(levels_any, list) and levels_any:
+                levels = cast(list[Any], levels_any)
+                first = levels[0]
+                if isinstance(first, (int, float)) and not isinstance(first, bool):
+                    waste_used_ml = float(first)
 
-            # Trident `levels` is most commonly a 5-element list:
-            # - index 0: waste used (counts up)
-            # - index 1: auxiliary/unknown
-            # - index 2: reagent C remaining
-            # - index 3: reagent B remaining
-            # - index 4: reagent A remaining
-            # Controllers may omit the aux value; handle 4-element lists as
-            # [waste, reagent C, reagent B, reagent A].
-            idx_a: int | None = None
-            idx_b: int | None = None
-            idx_c: int | None = None
-            if len(levels) >= 5:
-                idx_c, idx_b, idx_a = 2, 3, 4
-            elif len(levels) == 4:
-                idx_c, idx_b, idx_a = 1, 2, 3
+                # Trident `levels` is most commonly a 5-element list:
+                # - index 0: waste used (counts up)
+                # - index 1: auxiliary/unknown
+                # - index 2: reagent C remaining
+                # - index 3: reagent B remaining
+                # - index 4: reagent A remaining
+                # Controllers may omit the aux value; handle 4-element lists as
+                # [waste, reagent C, reagent B, reagent A].
+                idx_a: int | None = None
+                idx_b: int | None = None
+                idx_c: int | None = None
+                if len(levels) >= 5:
+                    idx_c, idx_b, idx_a = 2, 3, 4
+                elif len(levels) == 4:
+                    idx_c, idx_b, idx_a = 1, 2, 3
 
-            def _read_ml(idx: int | None) -> float | None:
-                if idx is None:
+                def _read_ml(idx: int | None) -> float | None:
+                    if idx is None:
+                        return None
+                    v = levels[idx]
+                    if isinstance(v, (int, float)) and not isinstance(v, bool):
+                        return float(v)
                     return None
-                v = levels[idx]
-                if isinstance(v, (int, float)) and not isinstance(v, bool):
-                    return float(v)
-                return None
 
-            reagent_a_ml = _read_ml(idx_a)
-            reagent_b_ml = _read_ml(idx_b)
-            reagent_c_ml = _read_ml(idx_c)
+                reagent_a_ml = _read_ml(idx_a)
+                reagent_b_ml = _read_ml(idx_b)
+                reagent_c_ml = _read_ml(idx_c)
 
-        trident["waste_used_ml"] = waste_used_ml
+            trident["waste_used_ml"] = waste_used_ml
 
-        # Reagent bottles are typically ~250 mL when brand new. The controller
-        # reports remaining volume in mL, which we expose directly and use for
-        # conservative near-empty warnings.
-        trident["reagent_a_remaining_ml"] = reagent_a_ml
-        trident["reagent_b_remaining_ml"] = reagent_b_ml
-        trident["reagent_c_remaining_ml"] = reagent_c_ml
+            # Reagent bottles are typically ~250 mL when brand new. The controller
+            # reports remaining volume in mL, which we expose directly and use for
+            # conservative near-empty warnings.
+            trident["reagent_a_remaining_ml"] = reagent_a_ml
+            trident["reagent_b_remaining_ml"] = reagent_b_ml
+            trident["reagent_c_remaining_ml"] = reagent_c_ml
 
-        trident["reagent_a_empty"] = (
-            (reagent_a_ml <= TRIDENT_REAGENT_EMPTY_THRESHOLD_ML)
-            if reagent_a_ml is not None
-            else None
-        )
-        trident["reagent_b_empty"] = (
-            (reagent_b_ml <= TRIDENT_REAGENT_EMPTY_THRESHOLD_ML)
-            if reagent_b_ml is not None
-            else None
-        )
-        trident["reagent_c_empty"] = (
-            (reagent_c_ml <= TRIDENT_REAGENT_EMPTY_THRESHOLD_ML)
-            if reagent_c_ml is not None
-            else None
-        )
+            trident["reagent_a_empty"] = (
+                (reagent_a_ml <= TRIDENT_REAGENT_EMPTY_THRESHOLD_ML)
+                if reagent_a_ml is not None
+                else None
+            )
+            trident["reagent_b_empty"] = (
+                (reagent_b_ml <= TRIDENT_REAGENT_EMPTY_THRESHOLD_ML)
+                if reagent_b_ml is not None
+                else None
+            )
+            trident["reagent_c_empty"] = (
+                (reagent_c_ml <= TRIDENT_REAGENT_EMPTY_THRESHOLD_ML)
+                if reagent_c_ml is not None
+                else None
+            )
 
-        waste_size_any: Any = trident.get("waste_size_ml")
-        waste_size_ml: float | None = None
-        if isinstance(waste_size_any, (int, float)) and not isinstance(
-            waste_size_any, bool
-        ):
-            if float(waste_size_any) > 0:
-                waste_size_ml = float(waste_size_any)
-        trident["waste_size_ml"] = waste_size_ml
+            waste_size_any: Any = trident.get("waste_size_ml")
+            waste_size_ml: float | None = None
+            if isinstance(waste_size_any, (int, float)) and not isinstance(
+                waste_size_any, bool
+            ):
+                if float(waste_size_any) > 0:
+                    waste_size_ml = float(waste_size_any)
+            trident["waste_size_ml"] = waste_size_ml
 
-        if waste_used_ml is None or waste_size_ml is None:
-            trident["waste_percent"] = None
-            trident["waste_full"] = None
-            trident["waste_remaining_ml"] = None
-            return
+            if waste_used_ml is None or waste_size_ml is None:
+                trident["waste_percent"] = None
+                trident["waste_full"] = None
+                trident["waste_remaining_ml"] = None
+                return
 
-        remaining = max(0.0, waste_size_ml - waste_used_ml)
-        percent = (waste_used_ml / waste_size_ml) * 100.0
-        trident["waste_percent"] = percent
-        trident["waste_remaining_ml"] = remaining
-        trident["waste_full"] = remaining <= TRIDENT_WASTE_FULL_MARGIN_ML
+            remaining = max(0.0, waste_size_ml - waste_used_ml)
+            percent = (waste_used_ml / waste_size_ml) * 100.0
+            trident["waste_percent"] = percent
+            trident["waste_remaining_ml"] = remaining
+            trident["waste_full"] = remaining <= TRIDENT_WASTE_FULL_MARGIN_ML
+
+        tridents_any: Any = data.get("tridents")
+        if isinstance(tridents_any, list):
+            for t_any in cast(list[Any], tridents_any):
+                if isinstance(t_any, dict):
+                    _finalize_one(cast(dict[str, Any], t_any))
+
+        trident_any: Any = data.get("trident")
+        if isinstance(trident_any, dict):
+            _finalize_one(cast(dict[str, Any], trident_any))
 
     def _disable_rest(self, *, seconds: float, reason: str) -> None:
         until = time.monotonic() + max(0.0, seconds)
@@ -2349,23 +2382,49 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             data["mxm_devices"] = mxm_devices
 
         # Ensure Trident derived fields are recomputed with new wasteSize.
+        waste_by_abaddr: dict[int, float] = {}
+        waste_default: float | None = None
+        for m in sanitized_mconf:
+            if str(m.get("hwtype") or "").strip().upper() not in {"TRI", "TNP"}:
+                continue
+            abaddr_any: Any = m.get("abaddr")
+            if not isinstance(abaddr_any, int):
+                continue
+            extra_any: Any = m.get("extra")
+            if not isinstance(extra_any, dict):
+                continue
+            waste_any: Any = cast(dict[str, Any], extra_any).get("wasteSize")
+            if isinstance(waste_any, (int, float)):
+                waste_value = float(waste_any)
+                waste_by_abaddr[abaddr_any] = waste_value
+                if waste_default is None:
+                    waste_default = waste_value
+
+        def _apply_waste_size(trident: dict[str, Any]) -> None:
+            abaddr_any: Any = trident.get("abaddr")
+            if isinstance(abaddr_any, int) and abaddr_any in waste_by_abaddr:
+                trident["waste_size_ml"] = waste_by_abaddr[abaddr_any]
+                return
+            if waste_default is not None:
+                trident["waste_size_ml"] = waste_default
+
+        tridents_any: Any = data.get("tridents")
+        if isinstance(tridents_any, list):
+            for t_any in cast(list[Any], tridents_any):
+                if not isinstance(t_any, dict):
+                    continue
+                _apply_waste_size(cast(dict[str, Any], t_any))
+
         trident_any: Any = data.get("trident")
         if isinstance(trident_any, dict):
-            for m in sanitized_mconf:
-                extra_any: Any = m.get("extra")
-                if not isinstance(extra_any, dict):
-                    continue
-                waste_any: Any = cast(dict[str, Any], extra_any).get("wasteSize")
-                if isinstance(waste_any, (int, float)):
-                    cast(dict[str, Any], trident_any)["waste_size_ml"] = float(
-                        waste_any
-                    )
-                    break
+            _apply_waste_size(cast(dict[str, Any], trident_any))
 
         self._finalize_trident(data)
         self.async_set_updated_data(data)
 
-    def _get_trident_abaddr(self) -> int:
+    def _get_trident_abaddr(self, *, trident_abaddr: int | None = None) -> int:
+        if isinstance(trident_abaddr, int):
+            return trident_abaddr
         data = self.data or {}
         trident_any: Any = data.get("trident")
         if not isinstance(trident_any, dict):
@@ -2376,12 +2435,14 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             raise HomeAssistantError("Trident module address unavailable")
         return abaddr_any
 
-    async def _async_trident_put_mconf_extra(self, *, extra: dict[str, Any]) -> None:
+    async def _async_trident_put_mconf_extra(
+        self, *, extra: dict[str, Any], trident_abaddr: int | None = None
+    ) -> None:
         """Send a REST update for Trident module config/commands.
 
         We try the per-module endpoint first, then fall back to the bulk endpoint.
         """
-        abaddr = self._get_trident_abaddr()
+        abaddr = self._get_trident_abaddr(trident_abaddr=trident_abaddr)
 
         try:
             await self.async_rest_put_json(
@@ -2396,34 +2457,49 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         await self.async_request_refresh()
 
-    async def async_trident_set_waste_size_ml(self, *, size_ml: float) -> None:
+    async def async_trident_set_waste_size_ml(
+        self, *, size_ml: float, trident_abaddr: int | None = None
+    ) -> None:
         if size_ml <= 0:
             raise HomeAssistantError("Waste container size must be > 0")
 
-        await self._async_trident_put_mconf_extra(extra={"wasteSize": float(size_ml)})
+        await self._async_trident_put_mconf_extra(
+            extra={"wasteSize": float(size_ml)}, trident_abaddr=trident_abaddr
+        )
         # Pull fresh config so HA reflects the real controller state.
         await self.async_refresh_config_now()
 
-    async def async_trident_reset_waste(self) -> None:
+    async def async_trident_reset_waste(
+        self, *, trident_abaddr: int | None = None
+    ) -> None:
         # Trident exposes `reset` as a 5-element list aligned with `levels`.
         # Best-known mapping for levels index 0 is waste used.
         await self._async_trident_put_mconf_extra(
-            extra={"reset": [True, False, False, False, False]}
+            extra={"reset": [True, False, False, False, False]},
+            trident_abaddr=trident_abaddr,
         )
 
-    async def async_trident_reset_reagent(self, *, reagent_index: int) -> None:
+    async def async_trident_reset_reagent(
+        self, *, reagent_index: int, trident_abaddr: int | None = None
+    ) -> None:
         if reagent_index not in (0, 1, 2):
             raise HomeAssistantError("Invalid reagent index")
         payload = [False, False, False]
         payload[reagent_index] = True
-        await self._async_trident_put_mconf_extra(extra={"newReagent": payload})
+        await self._async_trident_put_mconf_extra(
+            extra={"newReagent": payload}, trident_abaddr=trident_abaddr
+        )
 
-    async def async_trident_prime_channel(self, *, channel_index: int) -> None:
+    async def async_trident_prime_channel(
+        self, *, channel_index: int, trident_abaddr: int | None = None
+    ) -> None:
         if channel_index not in (0, 1, 2, 3):
             raise HomeAssistantError("Invalid prime channel")
         payload = [False, False, False, False]
         payload[channel_index] = True
-        await self._async_trident_put_mconf_extra(extra={"prime": payload})
+        await self._async_trident_put_mconf_extra(
+            extra={"prime": payload}, trident_abaddr=trident_abaddr
+        )
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch and parse controller status.

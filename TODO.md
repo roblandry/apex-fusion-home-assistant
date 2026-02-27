@@ -13,6 +13,7 @@ As of 2026-01-31, I actively run this integration against:
   - FMM
   - MXM
   - Trident ACM (`TRI`)
+  - Trident NP (`TNP`) (added 2/27/2026)
   - PM2
   - VDM
 
@@ -31,9 +32,7 @@ Notes:
 ## Module coverage
 
 - Confirm module-type detection + entity gating for:
-  - Trident / Trident NP
   - DOS
-  - FMM
   - PMUP
   - EB832/EB8 variants
   - AFS

@@ -38,7 +38,9 @@ from .apex_fusion import (
     as_float,
     network_field,
     section_field,
+    trident_field_by_abaddr,
     trident_level_ml,
+    trident_level_ml_by_abaddr,
     units_and_meta,
 )
 from .const import (
@@ -291,6 +293,7 @@ async def async_setup_entry(
     async_add_entities(diagnostic_entities)
 
     added_trident_diags = False
+    added_tridents_diags: set[int] = set()
 
     def _add_trident_diagnostics() -> None:
         nonlocal added_trident_diags
@@ -397,6 +400,119 @@ async def async_setup_entry(
         if new_entities:
             async_add_entities(new_entities)
             added_trident_diags = True
+
+        # Multi-Trident diagnostics: create per-module entities when multiple
+        # Trident-family modules are detected.
+        tridents_any: Any = data.get("tridents")
+        if not isinstance(tridents_any, list):
+            return
+
+        for t_any in cast(list[Any], tridents_any):
+            if not isinstance(t_any, dict):
+                continue
+            t = cast(dict[str, Any], t_any)
+            if not t.get("present"):
+                continue
+            abaddr_any: Any = t.get("abaddr")
+            if not isinstance(abaddr_any, int):
+                continue
+            if abaddr_any in added_tridents_diags:
+                continue
+
+            device_info = build_trident_device_info(
+                host=ctx.host,
+                meta=ctx.meta,
+                controller_device_identifier=ctx.controller_device_identifier,
+                trident_abaddr=abaddr_any,
+                trident_hwtype=(str(t.get("hwtype") or "").strip().upper() or None),
+                trident_hwrev=(str(t.get("hwrev") or "").strip() or None),
+                trident_swrev=(str(t.get("swrev") or "").strip() or None),
+                trident_serial=(str(t.get("serial") or "").strip() or None),
+            )
+
+            hwtype = str(t.get("hwtype") or "").strip().upper()
+            label = "Trident"
+            if hwtype == "TNP":
+                label = "Trident NP"
+            elif hwtype == "TRI":
+                label = "Trident"
+
+            addr_slug = f"trident_addr{abaddr_any}"
+            prefix = f"{label} "
+
+            multi_entities: list[SensorEntity] = [
+                ApexDiagnosticSensor(
+                    coordinator,
+                    entry,
+                    unique_id=f"{serial_for_ids}_diag_{addr_slug}_status".lower(),
+                    name=f"{prefix}Status".strip(),
+                    suggested_object_id=f"{tank_slug}_{addr_slug}_status",
+                    icon=ICON_FLASK_OUTLINE,
+                    value_fn=trident_field_by_abaddr(abaddr_any, "status"),
+                    entity_category=None,
+                    device_info=device_info,
+                )
+            ]
+
+            # Container levels.
+            levels_any: Any = t.get("levels_ml")
+            if isinstance(levels_any, list):
+                for i in range(len(cast(list[Any], levels_any))):
+                    object_suffix = f"container_{i + 1}_level"
+                    name = f"{prefix}Container {i + 1} Level".strip()
+                    icon = ICON_BEAKER_OUTLINE
+                    state_class: SensorStateClass | None = SensorStateClass.TOTAL
+
+                    if i == 0:
+                        name = f"{prefix}Waste Used".strip()
+                        icon = ICON_TRASH_CAN_OUTLINE
+                        state_class = SensorStateClass.TOTAL_INCREASING
+                        object_suffix = "waste_used"
+                    elif i == 1:
+                        name = f"{prefix}Auxiliary Level".strip()
+                        object_suffix = "auxiliary_level"
+                    elif i == 2:
+                        name = (
+                            f"{prefix}Reagent 3 Remaining".strip()
+                            if hwtype == "TNP"
+                            else f"{prefix}Reagent C Remaining".strip()
+                        )
+                        object_suffix = "reagent_c_remaining"
+                    elif i == 3:
+                        name = (
+                            f"{prefix}Reagent 2 Remaining".strip()
+                            if hwtype == "TNP"
+                            else f"{prefix}Reagent B Remaining".strip()
+                        )
+                        object_suffix = "reagent_b_remaining"
+                    elif i == 4:
+                        name = (
+                            f"{prefix}Reagent 1 Remaining".strip()
+                            if hwtype == "TNP"
+                            else f"{prefix}Reagent A Remaining".strip()
+                        )
+                        object_suffix = "reagent_a_remaining"
+
+                    multi_entities.append(
+                        ApexDiagnosticSensor(
+                            coordinator,
+                            entry,
+                            unique_id=f"{serial_for_ids}_diag_{addr_slug}_container_{i + 1}_level".lower(),
+                            name=name,
+                            suggested_object_id=f"{tank_slug}_{addr_slug}_{object_suffix}",
+                            icon=icon,
+                            native_unit=UnitOfVolume.MILLILITERS,
+                            device_class=SensorDeviceClass.VOLUME,
+                            state_class=state_class,
+                            value_fn=trident_level_ml_by_abaddr(abaddr_any, i),
+                            entity_category=None,
+                            device_info=device_info,
+                        )
+                    )
+
+            if multi_entities:
+                async_add_entities(multi_entities)
+                added_tridents_diags.add(abaddr_any)
 
     _add_trident_diagnostics()
     remove_trident = coordinator.async_add_listener(_add_trident_diagnostics)
@@ -749,11 +865,13 @@ class ApexOutletModeSensor(SensorEntity):
 
         ctx = ApexFusionContext.from_entry_and_coordinator(entry, coordinator)
 
-        self._attr_unique_id = f"{ctx.serial_for_ids}_outlet_mode_{ref.did}".lower()
+        self._attr_unique_id = (
+            f"{ctx.serial_for_ids}_outlet_mode_{ref.dedupe_key}".lower()
+        )
         self._attr_name = ref.name
 
         tank_slug = ctx.tank_slug_with_entry_title(entry.title)
-        did_slug = str(ref.did or "").strip().lower() or "outlet"
+        did_slug = str(ref.dedupe_key or "").strip().lower() or "outlet"
         self._attr_suggested_object_id = f"{tank_slug}_outlet_{did_slug}_mode"
 
         outlet = self._find_outlet()
@@ -887,12 +1005,12 @@ class ApexOutletIntensitySensor(SensorEntity):
         coordinator_data = coordinator.data or {}
 
         self._attr_unique_id = (
-            f"{ctx.serial_for_ids}_outlet_intensity_{ref.did}".lower()
+            f"{ctx.serial_for_ids}_outlet_intensity_{ref.dedupe_key}".lower()
         )
         self._attr_name = ref.name
 
         tank_slug = ctx.tank_slug_with_entry_title(entry.title)
-        did_slug = str(ref.did or "").strip().lower() or "outlet"
+        did_slug = str(ref.dedupe_key or "").strip().lower() or "outlet"
         self._attr_suggested_object_id = f"{tank_slug}_outlet_{did_slug}_intensity"
 
         outlet = self._find_outlet()
