@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## v0.1.3
+
+### Features
+
+- correct for and add trident np
+
 ## v0.1.2
 
 ### CI
@@ -16,6 +22,7 @@ All notable changes to this project will be documented in this file.
 - clean up old todo links
 - add lables
 - remove unused/unfound values
+- v0.1.2
 
 ### Fixes
 
