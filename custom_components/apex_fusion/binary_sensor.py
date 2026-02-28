@@ -77,6 +77,138 @@ async def async_setup_entry(
     ctx = ApexFusionContext.from_entry_and_coordinator(entry, coordinator)
 
     added_digital_keys: set[str] = set()
+    added_module_connected: set[int] = set()
+
+    def _module_present_by_abaddr(
+        module_abaddr: int,
+    ) -> Callable[[dict[str, Any]], bool | None]:
+        """Return a value_fn that indicates module presence/connectivity.
+
+        Preference order:
+        - If the raw REST payload exposes `present` for the module, use it.
+        - If the module is present in the modules list but has no explicit flag,
+          treat it as connected.
+        - If the modules list exists but the module is not present, treat it as
+          disconnected.
+        - If raw data is unavailable, return None (unknown).
+        """
+
+        def _read(data: dict[str, Any]) -> bool | None:
+            raw_any: Any = data.get("raw")
+            raw = cast(dict[str, Any], raw_any) if isinstance(raw_any, dict) else {}
+
+            def _modules_from_raw(r: dict[str, Any]) -> list[dict[str, Any]]:
+                modules_any: Any = r.get("modules")
+                if isinstance(modules_any, list):
+                    return [
+                        m for m in cast(list[Any], modules_any) if isinstance(m, dict)
+                    ]
+                for container_key in ("data", "status", "istat", "systat", "result"):
+                    container_any: Any = r.get(container_key)
+                    if not isinstance(container_any, dict):
+                        continue
+                    nested_any: Any = cast(dict[str, Any], container_any).get("modules")
+                    if isinstance(nested_any, list):
+                        return [
+                            m
+                            for m in cast(list[Any], nested_any)
+                            if isinstance(m, dict)
+                        ]
+                return []
+
+            modules = _modules_from_raw(raw)
+            if not modules:
+                return None
+
+            for m in modules:
+                if m.get("abaddr") != module_abaddr:
+                    continue
+                present_any: Any = m.get("present")
+                if isinstance(present_any, bool):
+                    return present_any
+                return True
+
+            return False
+
+        return _read
+
+    def _add_module_connected_entities() -> None:
+        data = coordinator.data or {}
+        config_any: Any = data.get("config")
+        if not isinstance(config_any, dict):
+            return
+        mconf_any: Any = cast(dict[str, Any], config_any).get("mconf")
+        if not isinstance(mconf_any, list):
+            return
+
+        tank_slug = ctx.tank_slug_with_entry_title(entry.title)
+        new_entities: list[BinarySensorEntity] = []
+
+        for item_any in cast(list[Any], mconf_any):
+            if not isinstance(item_any, dict):
+                continue
+            item = cast(dict[str, Any], item_any)
+
+            abaddr_any: Any = item.get("abaddr")
+            if not isinstance(abaddr_any, int):
+                continue
+            if abaddr_any in added_module_connected:
+                continue
+
+            hwtype = str(item.get("hwtype") or item.get("hwType") or "").strip().upper()
+            if not hwtype:
+                continue
+            # Trident-family modules have their own connected entity.
+            if hwtype in {"TRI", "TNP"}:
+                continue
+
+            module_token = ctx.module_token(hwtype)
+            addr_slug = f"{module_token}_addr{abaddr_any}"
+
+            device_info = build_aquabus_child_device_info_from_data(
+                host=ctx.host,
+                controller_meta=ctx.meta,
+                controller_device_identifier=ctx.controller_device_identifier,
+                data=data,
+                module_abaddr=abaddr_any,
+                module_hwtype_hint=hwtype,
+                module_name_hint=(
+                    str(item.get("name")).strip()
+                    if isinstance(item.get("name"), str)
+                    else None
+                ),
+                tank_slug=tank_slug,
+            )
+
+            name_prefix = "" if device_info is not None else f"{hwtype} "
+
+            new_entities.append(
+                ApexModuleConnectedBinarySensor(
+                    coordinator,
+                    entry,
+                    ref=_BinaryRef(
+                        key=f"{addr_slug}_connected",
+                        name=f"{name_prefix}Connected".strip(),
+                        icon=ICON_LAN_CONNECT,
+                        value_fn=_module_present_by_abaddr(abaddr_any),
+                    ),
+                    device_info=device_info,
+                    suggested_object_id=ctx.object_id(
+                        tank_slug, module_token, abaddr_any, "connected"
+                    ),
+                )
+            )
+
+            added_module_connected.add(abaddr_any)
+
+        if new_entities:
+            async_add_entities(new_entities)
+
+    _add_module_connected_entities()
+    remove_modules_connected = coordinator.async_add_listener(
+        _add_module_connected_entities
+    )
+    entry.async_on_unload(remove_modules_connected)
 
     source = str(ctx.meta.get("source") or "").strip().lower()
 
@@ -716,5 +848,11 @@ class ApexTridentReagentEmptyBinarySensor(ApexDiagnosticBinarySensor):
 
 class ApexTridentConnectedBinarySensor(ApexDiagnosticBinarySensor):
     """Binary sensor for Trident connectivity/presence."""
+
+    _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
+
+
+class ApexModuleConnectedBinarySensor(ApexDiagnosticBinarySensor):
+    """Binary sensor for Aquabus module connectivity/presence."""
 
     _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY

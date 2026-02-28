@@ -106,7 +106,22 @@ async def test_binary_sensor_setup_and_updates(hass, enable_custom_integrations)
     for cb in list(listeners):
         cb()
 
-    assert len(added) == 9
+    # +1 module Connected entity (from config.mconf)
+    assert len(added) == 10
+
+    module_connected = next(
+        (
+            e
+            for e in added
+            if isinstance(e, binary_sensor.ApexModuleConnectedBinarySensor)
+        ),
+        None,
+    )
+    assert module_connected is not None
+    assert (
+        getattr(module_connected, "_attr_suggested_object_id", None)
+        == "apex_1_2_3_4_fmm_3_connected"
+    )
 
     digital = next(
         (e for e in added if isinstance(e, binary_sensor.ApexDigitalProbeBinarySensor)),
