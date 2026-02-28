@@ -2,7 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## v0.1.4
+
+### Chores
+
+- remove '_' from hub name
+- update readme
+
+### Features
+
+- add connected sensors to all modules
+
+### Fixes
+
+- fix login failure
+- correct parsing for trident entities.
+- login retries
+
+### Refactors
+
+- changed entity naming to be more in line with home assistant expectations
+
 ## v0.1.3
+
+### Chores
+
+- v0.1.3
 
 ### Features
 
