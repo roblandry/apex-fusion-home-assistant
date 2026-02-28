@@ -23,7 +23,7 @@ from .const import (
     LOGGER_NAME,
     PLATFORMS,
 )
-from .coordinator import ApexNeptuneDataUpdateCoordinator
+from .coordinator import ApexNeptuneDataUpdateCoordinator, clean_hostname_display
 
 _LOGGER = logging.getLogger(LOGGER_NAME)
 
@@ -154,9 +154,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     or None
                 )
 
+    hostname_disp = clean_hostname_display(hostname) if hostname else None
+    title_hostname = hostname_disp or hostname
     desired_title = (
-        f"{hostname} ({host})"
-        if hostname
+        f"{title_hostname} ({host})"
+        if title_hostname
         else str(entry.title or "").strip() or f"Apex ({host})"
     )
     if desired_title and str(entry.title or "") != desired_title:

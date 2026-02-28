@@ -34,7 +34,7 @@ from .const import (
     DOMAIN,
     LOGGER_NAME,
 )
-from .coordinator import build_base_url, build_status_url
+from .coordinator import build_base_url, build_status_url, clean_hostname_display
 
 _LOGGER = logging.getLogger(LOGGER_NAME)
 
@@ -507,7 +507,15 @@ async def _async_validate_input(
                                                 )
                         except Exception:  # noqa: BLE001
                             hostname = hostname
-                    title = f"{hostname} ({host})" if hostname else f"Apex ({host})"
+                    hostname_disp = (
+                        clean_hostname_display(hostname) if hostname else None
+                    )
+                    title_hostname = hostname_disp or hostname
+                    title = (
+                        f"{title_hostname} ({host})"
+                        if title_hostname
+                        else f"Apex ({host})"
+                    )
                     return {"title": title, "unique_id": serial or host}
 
                 except (asyncio.TimeoutError, aiohttp.ClientError) as err:
@@ -549,7 +557,9 @@ async def _async_validate_input(
 
             serial = _extract_serial_from_status_obj(status_obj)
             hostname = _extract_hostname_from_status_obj(status_obj)
-            title = f"{hostname} ({host})" if hostname else f"Apex ({host})"
+            hostname_disp = clean_hostname_display(hostname) if hostname else None
+            title_hostname = hostname_disp or hostname
+            title = f"{title_hostname} ({host})" if title_hostname else f"Apex ({host})"
             return {"title": title, "unique_id": serial or host}
 
         except FileNotFoundError:
@@ -582,7 +592,9 @@ async def _async_validate_input(
     except (asyncio.TimeoutError, aiohttp.ClientError, ET.ParseError) as err:
         raise CannotConnect from err
 
-    title = f"{hostname} ({host})" if hostname else f"Apex ({host})"
+    hostname_disp = clean_hostname_display(hostname) if hostname else None
+    title_hostname = hostname_disp or hostname
+    title = f"{title_hostname} ({host})" if title_hostname else f"Apex ({host})"
     return {"title": title, "unique_id": serial or host}
 
 

@@ -378,6 +378,44 @@ async def test_async_setup_entry_updates_title_from_controller_hostname(
     )
 
 
+async def test_async_setup_entry_title_cleans_underscores_in_hostname(
+    hass, enable_custom_integrations
+):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "1.2.3.4"},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
+    )
+    entry.add_to_hass(hass)
+
+    coordinator = AsyncMock()
+    coordinator.async_config_entry_first_refresh = AsyncMock(return_value=None)
+    coordinator.data = {"config": {"nconf": {"hostname": "80g_Frag_Tank"}}}
+    coordinator.device_identifier = "entry:TEST"
+
+    with (
+        patch(
+            "custom_components.apex_fusion.ApexNeptuneDataUpdateCoordinator",
+            return_value=coordinator,
+        ),
+        patch.object(
+            hass.config_entries,
+            "async_forward_entry_setups",
+            new=AsyncMock(return_value=None),
+        ),
+        patch.object(hass.config_entries, "async_update_entry") as update_entry,
+    ):
+        from custom_components.apex_fusion import async_setup_entry
+
+        assert await async_setup_entry(hass, cast(Any, entry)) is True
+
+    assert any(
+        call.kwargs.get("title") == "80g Frag Tank (1.2.3.4)"
+        for call in update_entry.mock_calls
+    )
+
+
 async def test_async_unload_entry_pops_data_when_unloaded(
     hass, enable_custom_integrations
 ):
