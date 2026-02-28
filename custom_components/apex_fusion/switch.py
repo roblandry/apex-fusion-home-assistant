@@ -107,6 +107,7 @@ class ApexFeedModeSwitch(SwitchEntity):
             host=ctx.host,
             meta=ctx.meta,
             device_identifier=ctx.controller_device_identifier,
+            tank_slug=ctx.tank_slug_with_entry_title(entry.title),
         )
 
         self._refresh_from_coordinator()

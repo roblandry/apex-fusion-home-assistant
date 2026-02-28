@@ -93,6 +93,7 @@ async def async_setup_entry(
     def _add_module_refresh_buttons() -> None:
         data = coordinator.data or {}
         ctx = ApexFusionContext.from_entry_and_coordinator(entry, coordinator)
+        tank_slug = ctx.tank_slug_with_entry_title(entry.title)
 
         new: list[ButtonEntity] = []
 
@@ -129,6 +130,7 @@ async def async_setup_entry(
                 module_abaddr=abaddr_any,
                 module_hwtype_hint=hwtype,
                 module_name_hint=module_name_hint,
+                tank_slug=tank_slug,
             )
             if not di:
                 continue
@@ -363,6 +365,7 @@ class ApexTridentButton(ButtonEntity):
                 host=ctx.host,
                 meta=ctx.meta,
                 controller_device_identifier=coordinator.device_identifier,
+                tank_slug=ctx.tank_slug_with_entry_title(entry.title),
                 trident_abaddr=trident_abaddr_any,
                 trident_hwtype=(
                     str(trident_hwtype_any).strip().upper()
@@ -392,14 +395,16 @@ class ApexTridentButton(ButtonEntity):
                 suffix = str(ref.key).removeprefix(prefix_with_addr)
             else:
                 suffix = str(ref.key).removeprefix("trident_")
-            self._attr_suggested_object_id = (
-                f"{ctx.tank_slug}_trident_addr{trident_abaddr_any}_{suffix}"
+            tank_slug = ctx.tank_slug_with_entry_title(entry.title)
+            self._attr_suggested_object_id = ctx.object_id(
+                tank_slug, "trident", trident_abaddr_any, suffix
             )
         else:
             self._attr_device_info = build_device_info(
                 host=ctx.host,
                 meta=ctx.meta,
                 device_identifier=coordinator.device_identifier,
+                tank_slug=ctx.tank_slug_with_entry_title(entry.title),
             )
 
         self._attr_available = bool(
@@ -459,7 +464,11 @@ class ApexControllerButton(ButtonEntity):
             host=ctx.host,
             meta=ctx.meta,
             device_identifier=coordinator.device_identifier,
+            tank_slug=ctx.tank_slug_with_entry_title(entry.title),
         )
+
+        tank_slug = ctx.tank_slug_with_entry_title(entry.title)
+        self._attr_suggested_object_id = ctx.object_id(tank_slug, "apex", ref.key)
 
         self._attr_available = bool(
             getattr(self._coordinator, "last_update_success", True)
@@ -517,8 +526,13 @@ class ApexModuleRefreshConfigButton(ButtonEntity):
         self._attr_name = "Refresh Config Now"
         self._attr_icon = ICON_REFRESH
 
-        self._attr_suggested_object_id = (
-            f"{ctx.tank_slug}_addr{module_abaddr}_refresh_config"
+        tank_slug = ctx.tank_slug_with_entry_title(entry.title)
+        module_token = ctx.module_token(self._module_hwtype)
+        self._attr_suggested_object_id = ctx.object_id(
+            tank_slug,
+            module_token,
+            module_abaddr,
+            "refresh_config",
         )
 
         module_device_info = build_aquabus_child_device_info_from_data(
@@ -528,11 +542,13 @@ class ApexModuleRefreshConfigButton(ButtonEntity):
             data=coordinator.data or {},
             module_abaddr=module_abaddr,
             module_hwtype_hint=self._module_hwtype,
+            tank_slug=tank_slug,
         )
         self._attr_device_info = module_device_info or build_device_info(
             host=ctx.host,
             meta=ctx.meta,
             device_identifier=coordinator.device_identifier,
+            tank_slug=tank_slug,
         )
 
         self._attr_available = bool(

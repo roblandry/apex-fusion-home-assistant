@@ -128,10 +128,6 @@ class ApexOutletModeSelect(SelectEntity):
         )
         self._attr_name = ref.name
 
-        tank_slug = ctx.tank_slug_with_entry_title(entry.title)
-        did_slug = str(ref.dedupe_key or "").strip().lower() or "outlet"
-        self._attr_suggested_object_id = f"{tank_slug}_outlet_{did_slug}_mode"
-
         # Prefer grouping under the backing Aquabus module device when the
         # mapping is unambiguous (e.g., a single EB832 on the bus).
         outlet = self._find_outlet()
@@ -158,6 +154,21 @@ class ApexOutletModeSelect(SelectEntity):
                 coordinator.data or {}, module_hwtype=module_hwtype_hint
             )
 
+        tank_slug = ctx.tank_slug_with_entry_title(entry.title)
+        did_slug = str(ref.dedupe_key or "").strip().lower() or "outlet"
+        if isinstance(module_abaddr, int) and module_hwtype_hint:
+            self._attr_suggested_object_id = ctx.object_id(
+                tank_slug,
+                ctx.module_token(module_hwtype_hint),
+                module_abaddr,
+                did_slug,
+                "mode",
+            )
+        else:
+            self._attr_suggested_object_id = ctx.object_id(
+                tank_slug, "apex", did_slug, "mode"
+            )
+
         module_device_info = (
             build_aquabus_child_device_info_from_data(
                 host=ctx.host,
@@ -166,6 +177,7 @@ class ApexOutletModeSelect(SelectEntity):
                 data=coordinator.data or {},
                 module_abaddr=module_abaddr,
                 module_hwtype_hint=module_hwtype_hint,
+                tank_slug=tank_slug,
             )
             if isinstance(module_abaddr, int)
             else None
@@ -175,6 +187,7 @@ class ApexOutletModeSelect(SelectEntity):
             host=ctx.host,
             meta=ctx.meta,
             device_identifier=ctx.controller_device_identifier,
+            tank_slug=tank_slug,
         )
 
         self._attr_options = list(OutletMode.OPTIONS)

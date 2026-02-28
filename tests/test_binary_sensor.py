@@ -114,7 +114,9 @@ async def test_binary_sensor_setup_and_updates(hass, enable_custom_integrations)
     )
     assert digital is not None
     assert digital.device_info is not None
-    assert digital.device_info.get("name") == "My FMM"
+    assert (
+        digital.device_info.get("name") == "Apex 1 2 3 4 - Fluid Monitoring Module (3)"
+    )
     assert digital.device_info.get("via_device") == (DOMAIN, "ABC")
 
     # Trident binary sensors should be grouped under the Trident device when abaddr is known.
@@ -129,7 +131,7 @@ async def test_binary_sensor_setup_and_updates(hass, enable_custom_integrations)
     )
     assert trident_testing is not None
     assert trident_testing.device_info is not None
-    assert trident_testing.device_info.get("name") == "Trident (5)"
+    assert trident_testing.device_info.get("name") == "Apex 1 2 3 4 - Trident (5)"
     assert trident_testing.device_info.get("via_device") == (DOMAIN, "ABC")
 
     for ent in added:
@@ -238,7 +240,7 @@ async def test_binary_sensor_digital_probe_skips_and_fallbacks(
     )
     assert raw is not None
     assert raw.device_info is not None
-    assert raw.device_info.get("name") == "Salinity Probe Module (7)"
+    assert raw.device_info.get("name") == "Apex 1 2 3 4 - Salinity Probe Module (7)"
     assert raw.device_info.get("via_device") == (DOMAIN, "ABC")
     assert raw.device_info.get("identifiers") == {(DOMAIN, "ABC_module_PM2_7")}
 

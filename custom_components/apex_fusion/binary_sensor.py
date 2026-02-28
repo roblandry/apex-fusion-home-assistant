@@ -134,6 +134,7 @@ async def async_setup_entry(
             host=ctx.host,
             meta=ctx.meta,
             controller_device_identifier=ctx.controller_device_identifier,
+            tank_slug=ctx.tank_slug_with_entry_title(entry.title),
             trident_abaddr=abaddr_any,
             trident_hwtype=(str(trident.get("hwtype") or "").strip().upper() or None),
             trident_hwrev=(str(trident.get("hwrev") or "").strip() or None),
@@ -160,7 +161,7 @@ async def async_setup_entry(
         # primary entities to avoid duplication).
         if len(tridents_list) > 1:
             new_entities: list[BinarySensorEntity] = []
-            tank_slug = ctx.tank_slug
+            tank_slug = ctx.tank_slug_with_entry_title(entry.title)
             for t in tridents_list:
                 abaddr_any: Any = t.get("abaddr")
                 if not isinstance(abaddr_any, int):
@@ -172,6 +173,7 @@ async def async_setup_entry(
                 label = "Trident NP" if hwtype == "TNP" else "Trident"
                 addr_slug = f"trident_addr{abaddr_any}"
                 device_info = _get_trident_device_info(t)
+                name_prefix = "" if device_info is not None else f"{label} "
 
                 new_entities.append(
                     ApexBinarySensor(
@@ -179,12 +181,14 @@ async def async_setup_entry(
                         entry,
                         ref=_BinaryRef(
                             key=f"{addr_slug}_testing",
-                            name=f"{label} Testing",
+                            name=f"{name_prefix}Testing".strip(),
                             icon=ICON_TEST_TUBE,
                             value_fn=trident_is_testing_by_abaddr(abaddr_any),
                         ),
                         device_info=device_info,
-                        suggested_object_id=f"{tank_slug}_{addr_slug}_testing",
+                        suggested_object_id=ctx.object_id(
+                            tank_slug, "trident", abaddr_any, "testing"
+                        ),
                     )
                 )
 
@@ -194,12 +198,14 @@ async def async_setup_entry(
                         entry,
                         ref=_BinaryRef(
                             key=f"{addr_slug}_connected",
-                            name=f"{label} Connected",
+                            name=f"{name_prefix}Connected".strip(),
                             icon=ICON_LAN_CONNECT,
                             value_fn=trident_present_by_abaddr(abaddr_any),
                         ),
                         device_info=device_info,
-                        suggested_object_id=f"{tank_slug}_{addr_slug}_connected",
+                        suggested_object_id=ctx.object_id(
+                            tank_slug, "trident", abaddr_any, "connected"
+                        ),
                     )
                 )
 
@@ -209,12 +215,14 @@ async def async_setup_entry(
                         entry,
                         ref=_BinaryRef(
                             key=f"{addr_slug}_waste_full",
-                            name=f"{label} Waste Full",
+                            name=f"{name_prefix}Waste Full".strip(),
                             icon=ICON_CUP_OFF,
                             value_fn=trident_waste_full_by_abaddr(abaddr_any),
                         ),
                         device_info=device_info,
-                        suggested_object_id=f"{tank_slug}_{addr_slug}_waste_full",
+                        suggested_object_id=ctx.object_id(
+                            tank_slug, "trident", abaddr_any, "waste_full"
+                        ),
                     )
                 )
 
@@ -238,14 +246,16 @@ async def async_setup_entry(
                             entry,
                             ref=_BinaryRef(
                                 key=f"{addr_slug}_{field}",
-                                name=f"{label} {display} Empty",
+                                name=f"{name_prefix}{display} Empty".strip(),
                                 icon=ICON_FLASK_EMPTY,
                                 value_fn=trident_reagent_empty_by_abaddr(
                                     abaddr_any, field
                                 ),
                             ),
                             device_info=device_info,
-                            suggested_object_id=f"{tank_slug}_{addr_slug}_{field}",
+                            suggested_object_id=ctx.object_id(
+                                tank_slug, "trident", abaddr_any, field
+                            ),
                         )
                     )
 
@@ -288,14 +298,11 @@ async def async_setup_entry(
                         else None
                     ),
                 )
-                tank_slug = ctx.tank_slug
+                tank_slug = ctx.tank_slug_with_entry_title(entry.title)
                 abaddr = (
                     cast(int, trident.get("abaddr"))
                     if isinstance(trident.get("abaddr"), int)
                     else None
-                )
-                addr_slug = (
-                    f"trident_addr{abaddr}" if isinstance(abaddr, int) else "trident"
                 )
                 async_add_entities(
                     [
@@ -304,14 +311,18 @@ async def async_setup_entry(
                             entry,
                             ref=ref,
                             device_info=trident_device_info,
-                            suggested_object_id=f"{tank_slug}_{addr_slug}_testing",
+                            suggested_object_id=ctx.object_id(
+                                tank_slug, "trident", abaddr, "testing"
+                            ),
                         ),
                         ApexTridentConnectedBinarySensor(
                             coordinator,
                             entry,
                             ref=connected_ref,
                             device_info=trident_device_info,
-                            suggested_object_id=f"{tank_slug}_{addr_slug}_connected",
+                            suggested_object_id=ctx.object_id(
+                                tank_slug, "trident", abaddr, "connected"
+                            ),
                         ),
                     ]
                 )
@@ -354,13 +365,12 @@ async def async_setup_entry(
             icon=ICON_CUP_OFF,
             value_fn=trident_waste_full,
         )
-        tank_slug = ctx.tank_slug
+        tank_slug = ctx.tank_slug_with_entry_title(entry.title)
         abaddr = (
             cast(int, trident.get("abaddr"))
             if isinstance(trident.get("abaddr"), int)
             else None
         )
-        addr_slug = f"trident_addr{abaddr}" if isinstance(abaddr, int) else "trident"
         async_add_entities(
             [
                 ApexTridentWasteFullBinarySensor(
@@ -368,7 +378,9 @@ async def async_setup_entry(
                     entry,
                     ref=ref,
                     device_info=trident_device_info,
-                    suggested_object_id=f"{tank_slug}_{addr_slug}_waste_full",
+                    suggested_object_id=ctx.object_id(
+                        tank_slug, "trident", abaddr, "waste_full"
+                    ),
                 )
             ]
         )
@@ -427,14 +439,12 @@ async def async_setup_entry(
             ),
         ]
 
-        tank_slug = ctx.tank_slug
+        tank_slug = ctx.tank_slug_with_entry_title(entry.title)
         abaddr = (
             cast(int, trident.get("abaddr"))
             if isinstance(trident.get("abaddr"), int)
             else None
         )
-        addr_slug = f"trident_addr{abaddr}" if isinstance(abaddr, int) else "trident"
-
         async_add_entities(
             [
                 ApexTridentReagentEmptyBinarySensor(
@@ -442,7 +452,12 @@ async def async_setup_entry(
                     entry,
                     ref=r,
                     device_info=trident_device_info,
-                    suggested_object_id=f"{tank_slug}_{addr_slug}_{r.key.removeprefix('trident_')}",
+                    suggested_object_id=ctx.object_id(
+                        tank_slug,
+                        "trident",
+                        abaddr,
+                        r.key.removeprefix("trident_"),
+                    ),
                 )
                 for r in refs
             ]
@@ -489,10 +504,6 @@ class ApexDigitalProbeBinarySensor(BinarySensorEntity):
         self._attr_unique_id = f"{ctx.serial_for_ids}_digital_{ref.key}".lower()
         self._attr_name = ref.name
 
-        tank_slug = ctx.tank_slug_with_entry_title(entry.title)
-        key_slug = str(ref.key or "").strip().lower() or slugify(ref.name) or "di"
-        self._attr_suggested_object_id = f"{tank_slug}_di_{key_slug}"
-
         first_probe = self._find_probe()
         module_abaddr_any: Any = first_probe.get("module_abaddr")
         module_abaddr = (
@@ -504,6 +515,24 @@ class ApexDigitalProbeBinarySensor(BinarySensorEntity):
         if isinstance(module_hwtype_any, str) and module_hwtype_any.strip():
             module_hwtype_hint = module_hwtype_any
 
+        tank_slug = ctx.tank_slug_with_entry_title(entry.title)
+        key_slug = str(ref.key or "").strip().lower() or slugify(ref.name) or "di"
+        if isinstance(module_abaddr, int) and module_hwtype_hint:
+            module_token = ctx.module_token(module_hwtype_hint)
+            key_slug = ctx.normalize_module_suffix(
+                module_token=module_token,
+                module_abaddr=module_abaddr,
+                suffix=key_slug,
+            )
+            self._attr_suggested_object_id = ctx.object_id(
+                tank_slug,
+                module_token,
+                module_abaddr,
+                key_slug,
+            )
+        else:
+            self._attr_suggested_object_id = ctx.object_id(tank_slug, "apex", key_slug)
+
         module_device_info: DeviceInfo | None = (
             build_aquabus_child_device_info_from_data(
                 host=ctx.host,
@@ -512,6 +541,7 @@ class ApexDigitalProbeBinarySensor(BinarySensorEntity):
                 data=coordinator.data or {},
                 module_abaddr=module_abaddr,
                 module_hwtype_hint=module_hwtype_hint,
+                tank_slug=tank_slug,
             )
             if isinstance(module_abaddr, int)
             else None
@@ -521,6 +551,7 @@ class ApexDigitalProbeBinarySensor(BinarySensorEntity):
             host=ctx.host,
             meta=ctx.meta,
             device_identifier=ctx.controller_device_identifier,
+            tank_slug=tank_slug,
         )
 
         self._attr_available = bool(
@@ -610,6 +641,7 @@ class ApexDiagnosticBinarySensor(BinarySensorEntity):
             host=ctx.host,
             meta=ctx.meta,
             device_identifier=ctx.controller_device_identifier,
+            tank_slug=ctx.tank_slug_with_entry_title(entry.title),
         )
 
         self._attr_available = bool(

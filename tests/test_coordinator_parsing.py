@@ -127,7 +127,7 @@ def test_generic_module_device_helpers_cover_branches():
         module_abaddr=1,
     )
     assert info.get("identifiers") == {(DOMAIN, "TEST_module_FMM_1")}
-    assert info.get("name") == "Fluid Monitoring Module (1)"
+    assert info.get("name") == "Tank - Fluid Monitoring Module (1)"
     assert info.get("model") == "FMM"
     assert info.get("via_device") == (DOMAIN, "TEST")
 
@@ -141,7 +141,7 @@ def test_generic_module_device_helpers_cover_branches():
         module_swrev="3",
         module_serial="123",
     )
-    assert info_named.get("name") == "My PM2"
+    assert info_named.get("name") == "Tank - Salinity Probe Module (2)"
     assert info_named.get("hw_version") == "A"
     assert info_named.get("sw_version") == "3"
     assert info_named.get("serial_number") == "123"
@@ -154,7 +154,7 @@ def test_generic_module_device_helpers_cover_branches():
         module_abaddr=3,
         module_name="   ",
     )
-    assert info_blank.get("name") == "Fluid Monitoring Module (3)"
+    assert info_blank.get("name") == "Tank - Fluid Monitoring Module (3)"
 
     # Generic controller patterns like FMM_x_y should not override friendly naming.
     info_generic_pattern = coordinator.build_module_device_info(
@@ -164,7 +164,7 @@ def test_generic_module_device_helpers_cover_branches():
         module_abaddr=3,
         module_name="FMM_EXTRA_3",
     )
-    assert info_generic_pattern.get("name") == "Fluid Monitoring Module (3)"
+    assert info_generic_pattern.get("name") == "Tank - Fluid Monitoring Module (3)"
 
     assert coordinator._modules_from_raw_status({"modules": "nope"}) == []
     assert coordinator._modules_from_raw_status({"modules": [{"abaddr": 1}, "x"]}) == [
@@ -220,7 +220,7 @@ def test_generic_module_device_helpers_cover_branches():
         module_abaddr=1,
     )
     assert fmm is not None
-    assert fmm.get("name") == "My FMM"
+    assert fmm.get("name") == "Tank - Fluid Monitoring Module (1)"
     assert fmm.get("via_device") == (DOMAIN, "TEST")
 
     # Cover alternate status-module key variants and nested containers.
@@ -315,7 +315,7 @@ def test_build_aquabus_child_device_info_from_data_cover_branches():
         module_hwtype_hint="TRI",
     )
     assert tri is not None
-    assert tri.get("name") == "Trident (4)"
+    assert tri.get("name") == "Tank - Trident (4)"
     assert tri.get("identifiers") == {(DOMAIN, "TEST_module_TRI_4")}
     assert tri.get("via_device") == (DOMAIN, "TEST")
 
@@ -330,7 +330,7 @@ def test_build_aquabus_child_device_info_from_data_cover_branches():
         module_name_hint="My FMM",
     )
     assert fmm is not None
-    assert fmm.get("name") == "My FMM"
+    assert fmm.get("name") == "Tank - Fluid Monitoring Module (3)"
     assert (
         coordinator.unambiguous_module_abaddr_from_config(
             {"config": {"mconf": ["nope", {"hwType": "EB832", "abaddr": 3}]}},

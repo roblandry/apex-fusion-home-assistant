@@ -162,7 +162,7 @@ async def test_update_setup_creates_module_update_entity_when_outdated(
     assert fmm.latest_version == "25"
     assert fmm.state == "on"
     assert fmm.device_info is not None
-    assert fmm.device_info.get("name") == "Fluid Monitoring Module (1)"
+    assert fmm.device_info.get("name") == "Apex - Fluid Monitoring Module (1)"
     assert fmm.device_info.get("via_device") == (DOMAIN, "TEST")
     assert fmm.device_info.get("sw_version") == "24"
 
@@ -171,14 +171,14 @@ async def test_update_setup_creates_module_update_entity_when_outdated(
     assert pm2.latest_version == "3"
     assert pm2.state == "off"
     assert pm2.device_info is not None
-    assert pm2.device_info.get("name") == "Salinity Probe Module (2)"
+    assert pm2.device_info.get("name") == "Apex - Salinity Probe Module (2)"
     assert pm2.device_info.get("via_device") == (DOMAIN, "TEST")
     assert pm2.device_info.get("sw_version") == "3"
 
     tri = next(e for e in added if _device_model(e) == "TRI")
     assert tri.installed_version == "1"
     assert tri.device_info is not None
-    assert tri.device_info.get("name") == "Trident (5)"
+    assert tri.device_info.get("name") == "Apex - Trident (5)"
     assert tri.device_info.get("via_device") == (DOMAIN, "TEST")
 
     fmm.async_write_ha_state = lambda *args, **kwargs: None
@@ -286,7 +286,7 @@ async def test_update_module_device_name_uses_mconf_name_when_present(
 
     fmm = next(e for e in added if _device_model(e) == "FMM")
     assert fmm.device_info is not None
-    assert fmm.device_info.get("name") == "My FMM"
+    assert fmm.device_info.get("name") == "Apex - Fluid Monitoring Module (1)"
     assert fmm.device_info.get("via_device") == (DOMAIN, "TEST")
 
 

@@ -24,6 +24,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import slugify
 from yarl import URL
 
 from .const import (
@@ -64,6 +65,24 @@ def clean_hostname_display(hostname: str | None) -> str | None:
     t = t.replace("_", " ")
     t = " ".join(t.split())
     return t or None
+
+
+def _tank_slug_from_meta(
+    meta: dict[str, Any],
+    *,
+    tank_slug: str | None = None,
+    tank_name: str | None = None,
+) -> str:
+    """Return the tank slug used for entity ids/device names."""
+
+    if tank_slug is not None and str(tank_slug).strip():
+        out = slugify(str(tank_slug).strip())
+        return out or "tank"
+
+    raw_name = str(tank_name or meta.get("hostname") or "").strip()
+    disp = clean_hostname_display(raw_name) or raw_name
+    out = slugify(disp or "tank")
+    return out or "tank"
 
 
 def module_abaddr_from_input_did(did: str) -> int | None:
@@ -137,7 +156,11 @@ def _set_connect_sid_cookie(
 
 
 def build_device_info(
-    *, host: str, meta: dict[str, Any], device_identifier: str
+    *,
+    host: str,
+    meta: dict[str, Any],
+    device_identifier: str,
+    tank_slug: str | None = None,
 ) -> DeviceInfo:
     """Build DeviceInfo for this controller.
 
@@ -152,8 +175,10 @@ def build_device_info(
     serial = str(meta.get("serial") or "").strip() or None
     model = str(meta.get("type") or meta.get("hardware") or "Apex").strip() or "Apex"
     hostname = str(meta.get("hostname") or "").strip() or None
-    # Keep the controller device named as the controller (not the tank).
-    name = "Apex"
+    tank_slug_effective = (
+        _tank_slug_from_meta(meta, tank_slug=tank_slug).replace("_", " ").title()
+    )
+    name = f"{tank_slug_effective} - APEX"
 
     identifiers = {(DOMAIN, device_identifier)}
     return DeviceInfo(
@@ -175,6 +200,7 @@ def build_trident_device_info(
     meta: dict[str, Any],
     controller_device_identifier: str,
     trident_abaddr: int,
+    tank_slug: str | None = None,
     trident_hwtype: str | None = None,
     trident_hwrev: str | None = None,
     trident_swrev: str | None = None,
@@ -208,6 +234,7 @@ def build_trident_device_info(
         controller_device_identifier=controller_device_identifier,
         module_hwtype=hwtype,
         module_abaddr=trident_abaddr,
+        tank_slug=tank_slug,
         module_name=None,
         module_hwrev=(str(trident_hwrev).strip() or None if trident_hwrev else None),
         module_swrev=(str(trident_swrev).strip() or None if trident_swrev else None),
@@ -223,6 +250,7 @@ def build_aquabus_child_device_info_from_data(
     controller_device_identifier: str,
     data: dict[str, Any],
     module_abaddr: int,
+    tank_slug: str | None = None,
     module_hwtype_hint: str | None = None,
     module_name_hint: str | None = None,
 ) -> DeviceInfo | None:
@@ -259,6 +287,7 @@ def build_aquabus_child_device_info_from_data(
             meta=controller_meta,
             controller_device_identifier=controller_device_identifier,
             trident_abaddr=module_abaddr,
+            tank_slug=tank_slug,
             trident_hwtype=hwtype,
             trident_hwrev=meta.get("hwrev"),
             trident_swrev=meta.get("swrev"),
@@ -274,6 +303,7 @@ def build_aquabus_child_device_info_from_data(
         controller_device_identifier=controller_device_identifier,
         module_hwtype=hwtype,
         module_abaddr=module_abaddr,
+        tank_slug=tank_slug,
         module_name=module_name,
         module_hwrev=meta.get("hwrev"),
         module_swrev=meta.get("swrev"),
@@ -293,6 +323,7 @@ def build_module_device_info(
     module_swrev: str | None = None,
     module_serial: str | None = None,
     tank_name: str | None = None,
+    tank_slug: str | None = None,
 ) -> DeviceInfo:
     """Build DeviceInfo for a generic Aquabus module.
 
@@ -323,28 +354,18 @@ def build_module_device_info(
         (DOMAIN, f"{controller_device_identifier}_module_{hwtype}_{module_abaddr}")
     }
 
-    def _is_generic_module_name(name: str) -> bool:
-        t = (name or "").strip()
-        if not t:
-            return True
-        n = t.replace("-", "_").replace(" ", "_").strip().upper()
-        # Common default patterns from controller config.
-        if n == hwtype:
-            return True
-        if n == f"{hwtype}_{module_abaddr}":
-            return True
-        if n.startswith(f"{hwtype}_") and n.endswith(f"_{module_abaddr}"):
-            return True
-        return False
+    tank_slug_effective = (
+        _tank_slug_from_meta(
+            {},
+            tank_slug=tank_slug,
+            tank_name=tank_name,
+        )
+        .replace("_", " ")
+        .title()
+    )
 
-    friendly_hw = MODULE_HWTYPE_FRIENDLY_NAMES.get(hwtype) or hwtype
-    # Prefer stable, controller-like naming for module devices.
-    # Keep the address number, but avoid the literal "Addr" text.
-    name = f"{friendly_hw} ({module_abaddr})"
-    if module_name and not _is_generic_module_name(module_name):
-        t = str(module_name).strip()
-        if t:
-            name = t
+    module_token = MODULE_HWTYPE_FRIENDLY_NAMES.get(hwtype) or hwtype.upper()
+    name = f"{tank_slug_effective} - {module_token} ({module_abaddr})"
 
     return DeviceInfo(
         identifiers=identifiers,
@@ -482,6 +503,7 @@ def build_module_device_info_from_data(
     controller_device_identifier: str,
     data: dict[str, Any],
     module_abaddr: int,
+    tank_slug: str | None = None,
 ) -> DeviceInfo | None:
     """Build module DeviceInfo from coordinator data.
 
@@ -508,6 +530,7 @@ def build_module_device_info_from_data(
         controller_device_identifier=controller_device_identifier,
         module_hwtype=hwtype,
         module_abaddr=module_abaddr,
+        tank_slug=tank_slug,
         module_name=meta.get("name"),
         module_hwrev=meta.get("hwrev"),
         module_swrev=meta.get("swrev"),

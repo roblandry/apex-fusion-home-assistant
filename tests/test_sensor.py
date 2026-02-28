@@ -394,7 +394,7 @@ async def test_sensor_setup_creates_entities_and_updates(
 
     # Trident diagnostics should be grouped under the Trident device when abaddr is known.
     assert waste.device_info is not None
-    assert waste.device_info.get("name") == "Trident (5)"
+    assert waste.device_info.get("name") == "Apex - Trident (5)"
     assert waste.device_info.get("via_device") == (DOMAIN, "ABC")
 
     # Update probe values to hit coercion/branches.
@@ -509,7 +509,7 @@ async def test_probe_sensor_attaches_to_module_device_when_probe_has_module_abad
     assert probe_entities
     t1 = next(e for e in probe_entities if e._ref.key == "T1")
     assert t1.device_info is not None
-    assert t1.device_info.get("name") == "My FMM"
+    assert t1.device_info.get("name") == "Apex - Fluid Monitoring Module (3)"
     assert t1.device_info.get("via_device") == (DOMAIN, "TEST")
 
 
@@ -560,9 +560,62 @@ async def test_probe_sensor_falls_back_to_module_hwtype_when_data_missing(
     assert probe_entities
     t1 = next(e for e in probe_entities if e._ref.key == "T1")
     assert t1.device_info is not None
-    assert t1.device_info.get("name") == "Fluid Monitoring Module (3)"
+    assert t1.device_info.get("name") == "Apex - Fluid Monitoring Module (3)"
     assert t1.device_info.get("via_device") == (DOMAIN, "TEST")
     assert t1.device_info.get("identifiers") == {(DOMAIN, "TEST_module_FMM_3")}
+
+
+async def test_probe_sensor_strips_trident_prefix_from_suggested_object_id(
+    hass, enable_custom_integrations
+):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "1.2.3.4"},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
+    )
+    entry.add_to_hass(hass)
+
+    coordinator = _CoordinatorStub(
+        data={
+            "meta": {"serial": "ABC", "hostname": "80g_Frag_Tank"},
+            "network": {"ipaddr": "1.2.3.4"},
+            "trident": {},
+            "probes": {
+                "trident_auxiliary_level": {
+                    "name": "Auxiliary Level",
+                    "type": "vol",
+                    "value": 123,
+                    "value_raw": "123",
+                    "module_abaddr": 4,
+                    "module_hwtype": "TRI",
+                }
+            },
+            "outlets": [],
+            "mxm_devices": {},
+        },
+        last_update_success=True,
+        device_identifier="TEST",
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
+    added: list[Any] = []
+
+    def _add_entities(new_entities, update_before_add: bool = False):
+        added.extend(list(new_entities))
+
+    from custom_components.apex_fusion import sensor
+
+    await sensor.async_setup_entry(hass, cast(Any, entry), _add_entities)
+
+    probe_entities = [e for e in added if isinstance(e, sensor.ApexProbeSensor)]
+    assert probe_entities
+
+    ent = next(e for e in probe_entities if e._ref.key == "trident_auxiliary_level")
+    assert (
+        getattr(ent, "_attr_suggested_object_id", None)
+        == "80g_frag_tank_trident_4_auxiliary_level"
+    )
 
 
 async def test_outlet_intensity_sensor_creates_vdm_module_device(
@@ -616,7 +669,9 @@ async def test_outlet_intensity_sensor_creates_vdm_module_device(
 
     ent = next(e for e in intensity_entities if e._ref.did == "6_3")
     assert ent.device_info is not None
-    assert ent.device_info.get("name") == "LED & Pump Control Module (6)"
+    assert (
+        ent.device_info.get("name") == "80G Frag Tank - LED & Pump Control Module (6)"
+    )
     assert ent.device_info.get("via_device") == (DOMAIN, "TEST")
     assert ent.device_info.get("identifiers") == {(DOMAIN, "TEST_module_VDM_6")}
 

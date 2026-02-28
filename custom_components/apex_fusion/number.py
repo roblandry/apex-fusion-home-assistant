@@ -164,15 +164,19 @@ class ApexTridentWasteSizeNumber(NumberEntity):
                 else None
             )
 
-            tank_slug = ctx.tank_slug
-            self._attr_suggested_object_id = (
-                f"{tank_slug}_trident_addr{trident_abaddr_any}_waste_container_size"
+            tank_slug = ctx.tank_slug_with_entry_title(entry.title)
+            self._attr_suggested_object_id = ctx.object_id(
+                tank_slug,
+                "trident",
+                trident_abaddr_any,
+                "waste_container_size",
             )
 
             self._attr_device_info = build_trident_device_info(
                 host=ctx.host,
                 meta=ctx.meta,
                 controller_device_identifier=ctx.controller_device_identifier,
+                tank_slug=tank_slug,
                 trident_abaddr=trident_abaddr_any,
                 trident_hwtype=(
                     str(trident_hwtype_any).strip().upper()
@@ -195,10 +199,12 @@ class ApexTridentWasteSizeNumber(NumberEntity):
             )
             self._attr_name = "Waste Container Size"
         else:
+            tank_slug = ctx.tank_slug_with_entry_title(entry.title)
             self._attr_device_info = build_device_info(
                 host=ctx.host,
                 meta=ctx.meta,
                 device_identifier=ctx.controller_device_identifier,
+                tank_slug=tank_slug,
             )
 
         self._attr_available = bool(

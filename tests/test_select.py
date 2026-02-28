@@ -460,7 +460,7 @@ async def test_select_entity_attaches_to_module_device_when_unique_mconf_match(
     )
 
     assert ent.device_info is not None
-    assert ent.device_info.get("name") == "Basement EB"
+    assert ent.device_info.get("name") == "Apex 1 2 3 4 - EB832 (3)"
     assert ent.device_info.get("via_device") == (DOMAIN, "TEST")
     assert ent.device_info.get("identifiers") == {(DOMAIN, "TEST_module_EB832_3")}
 

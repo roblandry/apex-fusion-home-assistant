@@ -298,7 +298,7 @@ async def async_setup_entry(
     def _add_trident_diagnostics() -> None:
         nonlocal added_trident_diags
         data = coordinator.data or {}
-        tank_slug = ctx.tank_slug
+        tank_slug = ctx.tank_slug_with_entry_title(entry.title)
 
         tridents_any: Any = data.get("tridents")
         tridents_list: list[dict[str, Any]] = (
@@ -326,6 +326,7 @@ async def async_setup_entry(
                     meta=ctx.meta,
                     controller_device_identifier=ctx.controller_device_identifier,
                     trident_abaddr=abaddr_any,
+                    tank_slug=tank_slug,
                     trident_hwtype=(str(t.get("hwtype") or "").strip().upper() or None),
                     trident_hwrev=(str(t.get("hwrev") or "").strip() or None),
                     trident_swrev=(str(t.get("swrev") or "").strip() or None),
@@ -333,10 +334,11 @@ async def async_setup_entry(
                 )
 
                 hwtype = str(t.get("hwtype") or "").strip().upper()
-                label = "Trident NP" if hwtype == "TNP" else "Trident"
 
                 addr_slug = f"trident_addr{abaddr_any}"
-                prefix = f"{label} "
+                # Entities are grouped under a Trident device; avoid redundant
+                # "Trident ..." prefixes in the entity name.
+                prefix = ""
 
                 multi_entities: list[SensorEntity] = [
                     ApexDiagnosticSensor(
@@ -344,7 +346,9 @@ async def async_setup_entry(
                         entry,
                         unique_id=f"{serial_for_ids}_diag_{addr_slug}_status".lower(),
                         name=f"{prefix}Status".strip(),
-                        suggested_object_id=f"{tank_slug}_{addr_slug}_status",
+                        suggested_object_id=ctx.object_id(
+                            tank_slug, "trident", abaddr_any, "status"
+                        ),
                         icon=ICON_FLASK_OUTLINE,
                         value_fn=trident_field_by_abaddr(abaddr_any, "status"),
                         entity_category=None,
@@ -403,7 +407,9 @@ async def async_setup_entry(
                             entry,
                             unique_id=f"{serial_for_ids}_diag_{addr_slug}_container_{i + 1}_level".lower(),
                             name=name,
-                            suggested_object_id=f"{tank_slug}_{addr_slug}_{object_suffix}",
+                            suggested_object_id=ctx.object_id(
+                                tank_slug, "trident", abaddr_any, object_suffix
+                            ),
                             icon=icon,
                             native_unit=UnitOfVolume.MILLILITERS,
                             device_class=SensorDeviceClass.VOLUME,
@@ -444,6 +450,7 @@ async def async_setup_entry(
                     meta=ctx.meta,
                     controller_device_identifier=ctx.controller_device_identifier,
                     trident_abaddr=trident_abaddr_any,
+                    tank_slug=tank_slug,
                     trident_hwtype=(
                         str(trident.get("hwtype") or "").strip().upper() or None
                     ),
@@ -453,11 +460,8 @@ async def async_setup_entry(
                 )
 
             trident_prefix = "" if trident_device_info is not None else "Trident "
-
-            trident_addr_slug = (
-                f"trident_addr{trident_abaddr_any}"
-                if isinstance(trident_abaddr_any, int)
-                else "trident"
+            trident_addr = (
+                trident_abaddr_any if isinstance(trident_abaddr_any, int) else None
             )
 
             new_entities: list[SensorEntity] = [
@@ -466,7 +470,12 @@ async def async_setup_entry(
                     entry,
                     unique_id=f"{serial_for_ids}_diag_trident_status".lower(),
                     name=f"{trident_prefix}Status".strip(),
-                    suggested_object_id=f"{tank_slug}_{trident_addr_slug}_status",
+                    suggested_object_id=ctx.object_id(
+                        tank_slug,
+                        "trident",
+                        trident_addr,
+                        "status",
+                    ),
                     icon=ICON_FLASK_OUTLINE,
                     value_fn=section_field("trident", "status"),
                     entity_category=None,
@@ -481,7 +490,12 @@ async def async_setup_entry(
                     entry,
                     unique_id=f"{serial_for_ids}_diag_trident_firmware".lower(),
                     name=f"{trident_prefix}Firmware".strip(),
-                    suggested_object_id=f"{tank_slug}_{trident_addr_slug}_firmware",
+                    suggested_object_id=ctx.object_id(
+                        tank_slug,
+                        "trident",
+                        trident_addr,
+                        "firmware",
+                    ),
                     icon=None,
                     value_fn=section_field("trident", "swrev"),
                     entity_category=EntityCategory.DIAGNOSTIC,
@@ -528,7 +542,12 @@ async def async_setup_entry(
                         entry,
                         unique_id=f"{serial_for_ids}_diag_trident_container_{i + 1}_level".lower(),
                         name=name,
-                        suggested_object_id=f"{tank_slug}_{trident_addr_slug}_{object_suffix}",
+                        suggested_object_id=ctx.object_id(
+                            tank_slug,
+                            "trident",
+                            trident_addr,
+                            object_suffix,
+                        ),
                         icon=icon,
                         native_unit=UnitOfVolume.MILLILITERS,
                         device_class=SensorDeviceClass.VOLUME,
@@ -573,6 +592,7 @@ class ApexRestDebugSensor(SensorEntity):
             host=ctx.host,
             meta=ctx.meta,
             device_identifier=ctx.controller_device_identifier,
+            tank_slug=ctx.tank_slug_with_entry_title(entry.title),
         )
 
         self._refresh_attrs()
@@ -676,6 +696,7 @@ class ApexDiagnosticSensor(SensorEntity):
             host=ctx.host,
             meta=ctx.meta,
             device_identifier=ctx.controller_device_identifier,
+            tank_slug=ctx.tank_slug_with_entry_title(entry.title),
         )
 
         self._attr_available = bool(
@@ -751,12 +772,6 @@ class ApexProbeSensor(SensorEntity):
         self._attr_unique_id = f"{ctx.serial_for_ids}_probe_{ref.key}".lower()
         self._attr_name = ref.name
 
-        # Suggest entity ids that remain unique across multiple tanks while
-        # keeping friendly names clean.
-        tank_slug = ctx.tank_slug_with_entry_title(entry.title)
-        key_slug = str(ref.key or "").strip().lower() or slugify(ref.name) or "probe"
-        self._attr_suggested_object_id = f"{tank_slug}_probe_{key_slug}"
-
         # Prefer grouping probes under their backing Aquabus module when the
         # controller provides module identity fields (no heuristics).
         first_probe = self._read_probe()
@@ -770,6 +785,25 @@ class ApexProbeSensor(SensorEntity):
         if isinstance(module_hwtype_any, str) and module_hwtype_any.strip():
             module_hwtype_hint = module_hwtype_any
 
+        tank_slug = ctx.tank_slug_with_entry_title(entry.title)
+        key_slug = str(ref.key or "").strip().lower() or slugify(ref.name) or "probe"
+        if isinstance(module_abaddr, int) and module_hwtype_hint:
+            module_token = ctx.module_token(module_hwtype_hint)
+            key_slug = ctx.normalize_module_suffix(
+                module_token=module_token,
+                module_abaddr=module_abaddr,
+                suffix=key_slug,
+            )
+            self._attr_suggested_object_id = ctx.object_id(
+                tank_slug,
+                module_token,
+                module_abaddr,
+                key_slug,
+            )
+        else:
+            # Default controller-level probes under "apex".
+            self._attr_suggested_object_id = ctx.object_id(tank_slug, "apex", key_slug)
+
         module_device_info: DeviceInfo | None = (
             build_aquabus_child_device_info_from_data(
                 host=ctx.host,
@@ -778,6 +812,7 @@ class ApexProbeSensor(SensorEntity):
                 data=coordinator_data,
                 module_abaddr=module_abaddr,
                 module_hwtype_hint=module_hwtype_hint,
+                tank_slug=tank_slug,
             )
             if isinstance(module_abaddr, int)
             else None
@@ -787,6 +822,7 @@ class ApexProbeSensor(SensorEntity):
             host=ctx.host,
             meta=ctx.meta,
             device_identifier=ctx.controller_device_identifier,
+            tank_slug=tank_slug,
         )
         self._attr_available = bool(
             getattr(self._coordinator, "last_update_success", True)
@@ -899,10 +935,6 @@ class ApexOutletModeSensor(SensorEntity):
         )
         self._attr_name = ref.name
 
-        tank_slug = ctx.tank_slug_with_entry_title(entry.title)
-        did_slug = str(ref.dedupe_key or "").strip().lower() or "outlet"
-        self._attr_suggested_object_id = f"{tank_slug}_outlet_{did_slug}_mode"
-
         outlet = self._find_outlet()
         outlet_type_any: Any = outlet.get("type")
         outlet_type = outlet_type_any if isinstance(outlet_type_any, str) else None
@@ -930,6 +962,21 @@ class ApexOutletModeSensor(SensorEntity):
                 coordinator.data or {}, module_hwtype=module_hwtype_hint
             )
 
+        tank_slug = ctx.tank_slug_with_entry_title(entry.title)
+        did_slug = str(ref.dedupe_key or "").strip().lower() or "outlet"
+        if isinstance(module_abaddr, int) and module_hwtype_hint:
+            self._attr_suggested_object_id = ctx.object_id(
+                tank_slug,
+                ctx.module_token(module_hwtype_hint),
+                module_abaddr,
+                did_slug,
+                "mode",
+            )
+        else:
+            self._attr_suggested_object_id = ctx.object_id(
+                tank_slug, "apex", did_slug, "mode"
+            )
+
         module_device_info = (
             build_aquabus_child_device_info_from_data(
                 host=ctx.host,
@@ -938,6 +985,7 @@ class ApexOutletModeSensor(SensorEntity):
                 data=coordinator.data or {},
                 module_abaddr=module_abaddr,
                 module_hwtype_hint=module_hwtype_hint,
+                tank_slug=tank_slug,
             )
             if isinstance(module_abaddr, int)
             else None
@@ -947,6 +995,7 @@ class ApexOutletModeSensor(SensorEntity):
             host=ctx.host,
             meta=ctx.meta,
             device_identifier=ctx.controller_device_identifier,
+            tank_slug=tank_slug,
         )
 
         self._attr_available = bool(
@@ -1038,10 +1087,6 @@ class ApexOutletIntensitySensor(SensorEntity):
         )
         self._attr_name = ref.name
 
-        tank_slug = ctx.tank_slug_with_entry_title(entry.title)
-        did_slug = str(ref.dedupe_key or "").strip().lower() or "outlet"
-        self._attr_suggested_object_id = f"{tank_slug}_outlet_{did_slug}_intensity"
-
         outlet = self._find_outlet()
         outlet_type_any: Any = outlet.get("type")
         outlet_type = outlet_type_any if isinstance(outlet_type_any, str) else None
@@ -1052,6 +1097,27 @@ class ApexOutletIntensitySensor(SensorEntity):
             module_abaddr_any if isinstance(module_abaddr_any, int) else None
         )
 
+        # Try to include module token/address when available.
+        module_hwtype_hint: str | None = None
+        module_hwtype_any: Any = outlet.get("module_hwtype")
+        if isinstance(module_hwtype_any, str) and module_hwtype_any.strip():
+            module_hwtype_hint = module_hwtype_any
+
+        tank_slug = ctx.tank_slug_with_entry_title(entry.title)
+        did_slug = str(ref.dedupe_key or "").strip().lower() or "outlet"
+        if isinstance(module_abaddr, int) and module_hwtype_hint:
+            self._attr_suggested_object_id = ctx.object_id(
+                tank_slug,
+                ctx.module_token(module_hwtype_hint),
+                module_abaddr,
+                did_slug,
+                "intensity",
+            )
+        else:
+            self._attr_suggested_object_id = ctx.object_id(
+                tank_slug, "apex", did_slug, "intensity"
+            )
+
         module_device_info: DeviceInfo | None = (
             build_aquabus_child_device_info_from_data(
                 host=ctx.host,
@@ -1059,6 +1125,7 @@ class ApexOutletIntensitySensor(SensorEntity):
                 controller_device_identifier=ctx.controller_device_identifier,
                 data=coordinator_data,
                 module_abaddr=module_abaddr,
+                tank_slug=tank_slug,
             )
             if isinstance(module_abaddr, int)
             else None
@@ -1068,6 +1135,7 @@ class ApexOutletIntensitySensor(SensorEntity):
             host=ctx.host,
             meta=ctx.meta,
             device_identifier=ctx.controller_device_identifier,
+            tank_slug=tank_slug,
         )
 
         self._attr_available = bool(

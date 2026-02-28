@@ -136,14 +136,14 @@ class ApexUpdateEntity(UpdateEntity):
         self._attr_name = ref.name
 
         # Suggest entity ids that remain unique across multiple tanks.
-        tank_slug = ctx.tank_slug
+        tank_slug = ctx.tank_slug_with_entry_title(entry.title)
 
         installed_version = ref.installed_fn(coordinator.data or {})
 
         # Only attach Trident-family modules by explicit hwtype (no heuristics).
         if ref.module_hwtype in {"TRI", "TNP"} and isinstance(ref.module_abaddr, int):
-            self._attr_suggested_object_id = (
-                f"{tank_slug}_addr{ref.module_abaddr}_firmware"
+            self._attr_suggested_object_id = ctx.object_id(
+                tank_slug, "trident", ref.module_abaddr, "firmware"
             )
 
             trident_any: Any = (coordinator.data or {}).get("trident")
@@ -156,6 +156,7 @@ class ApexUpdateEntity(UpdateEntity):
                 host=ctx.host,
                 meta=ctx.meta,
                 controller_device_identifier=coordinator.device_identifier,
+                tank_slug=tank_slug,
                 trident_abaddr=ref.module_abaddr,
                 trident_hwtype=ref.module_hwtype,
                 trident_hwrev=(str(trident.get("hwrev") or "").strip() or None),
@@ -164,8 +165,11 @@ class ApexUpdateEntity(UpdateEntity):
             )
         elif ref.module_hwtype and isinstance(ref.module_abaddr, int):
             hw = str(ref.module_hwtype).strip().upper()
-            self._attr_suggested_object_id = (
-                f"{tank_slug}_addr{ref.module_abaddr}_firmware"
+            self._attr_suggested_object_id = ctx.object_id(
+                tank_slug,
+                ctx.module_token(hw),
+                ref.module_abaddr,
+                "firmware",
             )
 
             # Prefer coordinator-derived module metadata (name/hwrev/serial).
@@ -175,6 +179,7 @@ class ApexUpdateEntity(UpdateEntity):
                 controller_device_identifier=coordinator.device_identifier,
                 data=coordinator.data or {},
                 module_abaddr=ref.module_abaddr,
+                tank_slug=tank_slug,
             )
             self._attr_device_info = module_device_info or build_module_device_info(
                 host=ctx.host,
@@ -182,14 +187,18 @@ class ApexUpdateEntity(UpdateEntity):
                 module_hwtype=hw,
                 module_abaddr=ref.module_abaddr,
                 module_swrev=str(installed_version or "").strip() or None,
+                tank_slug=tank_slug,
             )
         else:
             # Controller update entity ids should also be tank-prefixed.
-            self._attr_suggested_object_id = f"{tank_slug}_firmware"
+            self._attr_suggested_object_id = ctx.object_id(
+                tank_slug, "apex", "firmware"
+            )
             self._attr_device_info = build_device_info(
                 host=ctx.host,
                 meta=ctx.meta,
                 device_identifier=coordinator.device_identifier,
+                tank_slug=tank_slug,
             )
 
         self._refresh_attrs()

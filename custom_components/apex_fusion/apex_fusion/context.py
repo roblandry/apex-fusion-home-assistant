@@ -93,3 +93,90 @@ class ApexFusionContext:
             or title
             or "tank"
         )
+
+    def module_token(self, hwtype: str | None) -> str:
+        """Return a normalized module token for object ids.
+
+        This is used for suggested object ids only (not unique ids).
+        Trident-family hwtypes are normalized to "trident".
+        """
+
+        t = str(hwtype or "").strip().upper()
+        if t in {"TRI", "TNP"}:
+            return "trident"
+        if not t:
+            return "module"
+        return slugify(t.lower()) or t.lower()
+
+    def object_id(self, *parts: Any) -> str:
+        """Build a Home Assistant-safe object id from parts.
+
+        Each part is slugified and joined with underscores; empty/None parts
+        are skipped.
+        """
+
+        tokens: list[str] = []
+        for p in parts:
+            if p is None:
+                continue
+            s = str(p).strip()
+            if not s:
+                continue
+            slug = slugify(s)
+            if slug:
+                tokens.append(slug)
+                continue
+
+            # Fallback: keep only safe characters.
+            cleaned = "".join(ch for ch in s.lower() if ch.isalnum() or ch == "_")
+            if cleaned:
+                tokens.append(cleaned)
+
+        return "_".join(tokens)
+
+    def normalize_module_suffix(
+        self,
+        *,
+        module_token: str | None,
+        module_abaddr: int | None,
+        suffix: str,
+    ) -> str:
+        """Normalize an entity suffix derived from controller/module keys.
+
+        Some controller keys already include a module prefix (e.g.
+        `trident_auxiliary_level`). When we build suggested object ids in the
+        format `tank_module_addr_suffix`, that would otherwise duplicate the
+        module token.
+        """
+
+        raw = str(suffix or "").strip()
+        if not raw:
+            return ""
+
+        token = str(module_token or "").strip().lower()
+        s = raw.lower()
+
+        prefixes: list[str] = []
+        if token:
+            if isinstance(module_abaddr, int):
+                prefixes.append(f"{token}_addr{module_abaddr}_")
+            prefixes.append(f"{token}_")
+
+        # Trident-family keys may include alternate hwtype prefixes.
+        if token == "trident":
+            if isinstance(module_abaddr, int):
+                prefixes.extend(
+                    [
+                        f"tri_addr{module_abaddr}_",
+                        f"tnp_addr{module_abaddr}_",
+                        f"np_addr{module_abaddr}_",
+                    ]
+                )
+            prefixes.extend(["tri_", "tnp_", "np_"])
+
+        for p in prefixes:
+            if s.startswith(p):
+                stripped = raw[len(p) :].lstrip("_-")
+                return stripped or raw
+
+        return raw
