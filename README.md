@@ -9,14 +9,6 @@
 
 # Apex Fusion (Local)
 
-> [!NOTE]
-> The Apex REST API and legacy CGI endpoints can report different device/module layouts.
->
-> This integration now validates REST logins: if you provide credentials and they’re wrong, setup/update fails (no silent fallback).
->
-> If the integration switches between REST and legacy parsing, or between read-only and authenticated control, it will purge
-> stale entities/devices from the previous mode on the next reload to avoid confusing duplicates.
-
 Home Assistant custom integration for local (LAN) polling of an Apex controller.
 
 If you’ve tried other Apex options and found gaps (cloud dependence, stale support, or missing local REST/module support), I’d love feedback on what you need—this project aims to close those gaps with a local-first approach.
@@ -30,6 +22,16 @@ Contributors are welcome (issues, testing feedback, and PRs).
 > Use at your own discretion. Firmware updates are applied via Neptune’s workflow, and this
 > project cannot guarantee update safety. You assume all risk, including potential device
 > malfunction or warranty implications.
+
+> [!NOTE]
+> The Apex REST API and legacy CGI endpoints can report different device/module layouts.
+>
+> This integration validates REST logins: if you provide credentials and they’re wrong, setup/update
+> fails (no silent fallback).
+>
+> If the integration switches between REST and legacy parsing, or between read-only and authenticated
+> control, it will purge stale entities/devices from the previous mode on the next reload to avoid
+> confusing duplicates.
 
 ## Features
 
@@ -81,8 +83,7 @@ As of 2026-01-31, I actively run this integration against:
 > [!NOTE]
 > Once this repository is accepted into the HACS default store, it will no longer need to be added as a custom repository.
 >
-> The brand icon is awaiting PR. Once added it should display properly. Once added, HACS can be PR.
-[Brands PR](https://github.com/home-assistant/brands/pull/9527) can be tracked if interested.
+> The brand icon is added to [Home Assistant Brands](https://github.com/home-assistant/brands/pull/9527)
 
 ### Manual
 
@@ -132,6 +133,7 @@ Always created:
   - Trident-family container levels (mL) when a Trident-family module is detected
 - **Binary sensors**
   - Digital inputs (leak/float switches)
+  - Per-module **Connected** diagnostics (one per Aquabus module from config)
   - Trident-family Testing / Waste Full / Reagent Empty alerts (when a Trident-family module is present)
 
 Only when **REST is active** (no legacy CGI parsing):
@@ -163,7 +165,6 @@ Notes:
 
 - This affects **entity_id** (used in automations), not the entity's display name.
 - Home Assistant only applies suggested IDs when an entity is first created, so upgrading may not change existing entity_ids automatically.
-- To help existing installs, the integration includes a one-time entity-registry migration that prefixes existing entity_ids with the tank slug when safe.
 
 If you rely on old entity_ids in automations, review the Entity Registry after upgrading.
 
