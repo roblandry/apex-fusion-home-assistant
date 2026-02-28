@@ -723,9 +723,12 @@ async def test_rest_status_unauthorized_falls_back_to_cgi_json(
     session = _Session()
     # no-login status probe first
     session.queue_get(_Resp(401, "{}"))
-    session.queue_post(_Resp(200, "{}", cookies={"connect.sid": "abc"}))
+
     # REST status unauthorized should be treated as an auth failure.
-    session.queue_get(_Resp(401, "{}"))
+    # The coordinator retries REST auth/status a few times before failing.
+    for _ in range(3):
+        session.queue_post(_Resp(200, "{}", cookies={"connect.sid": "abc"}))
+        session.queue_get(_Resp(401, "{}"))
 
     coord = await _make_coordinator(hass, host="1.2.3.4")
 
@@ -1344,7 +1347,9 @@ async def test_rest_login_body_invalid_json_falls_back_to_cgi_json(
     session.queue_get(_Resp(401, "{}"))
 
     # Login response body isn't JSON; no cookies either.
-    session.queue_post(_Resp(200, "{no"))
+    # The coordinator retries REST auth a few times before failing.
+    for _ in range(3):
+        session.queue_post(_Resp(200, "{no"))
 
     # Missing/invalid login body should be treated as an auth failure.
 

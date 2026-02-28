@@ -2800,6 +2800,51 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
                         return None
 
+                    async def _login_rest_with_retries(
+                        *, login_user: str
+                    ) -> str | None:
+                        """Perform REST login with a small retry budget.
+
+                        Some controllers appear to intermittently reject the first
+                        login attempt even when credentials are correct.
+
+                        Args:
+                            login_user: Username to attempt.
+
+                        Returns:
+                            The connect.sid value if found, otherwise None.
+                        """
+
+                        max_login_attempts = 2
+
+                        for login_attempt in range(1, max_login_attempts + 1):
+                            try:
+                                if login_attempt > 1:
+                                    _LOGGER.debug(
+                                        "REST login retry %s/%s host=%s user=%s",
+                                        login_attempt,
+                                        max_login_attempts,
+                                        host,
+                                        login_user,
+                                    )
+                                    # Clear cookies between attempts to avoid stale/invalid
+                                    # session state causing an immediate 401 loop.
+                                    try:
+                                        session.cookie_jar.clear()
+                                    except Exception:
+                                        pass
+
+                                return await _login_rest(login_user=login_user)
+                            except _RestAuthRejected:
+                                # Ensure we don't keep a cached SID around after an auth failure.
+                                self._rest_sid = None
+                                if login_attempt < max_login_attempts:
+                                    await asyncio.sleep(0.25 * login_attempt)
+                                    continue
+                                raise
+
+                        return None
+
                     # First try using cached SID (avoids re-login flakiness).
                     if self._rest_sid:
                         try:
@@ -2863,6 +2908,7 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         pass
 
                     max_attempts = 3
+                    saw_auth_rejection = False
                     for attempt in range(1, max_attempts + 1):
                         _LOGGER.debug(
                             "REST update attempt %s/%s host=%s user=%s",
@@ -2873,20 +2919,22 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         )
 
                         try:
-                            # Try configured username first; fall back to "admin"
-                            # (common default) for convenience.
-                            login_candidates: list[str] = []
-                            if username:
-                                login_candidates.append(username)
-                            if "admin" not in login_candidates:
-                                login_candidates.append("admin")
+                            # Respect the configured username. If one is provided, do not
+                            # automatically fall back to "admin" on the first 401; some
+                            # controllers are flaky and require a second login attempt.
+                            login_candidates: list[str] = (
+                                [username] if username else ["admin"]
+                            )
 
                             sid_value: str | None = None
                             for login_user in login_candidates:
                                 try:
-                                    sid_value = await _login_rest(login_user=login_user)
+                                    sid_value = await _login_rest_with_retries(
+                                        login_user=login_user
+                                    )
                                     break
                                 except _RestAuthRejected:
+                                    saw_auth_rejection = True
                                     _LOGGER.debug(
                                         "REST login rejected for host=%s user=%s; trying next candidate",
                                         host,
@@ -2955,9 +3003,13 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         except _RestNotSupported:
                             raise
                         except _RestAuthRejected:
-                            # REST rejected (credentials/user not accepted). Fall back to alternate
-                            # endpoints for this poll, but keep trying REST on the next poll.
+                            # REST rejected (credentials/user not accepted). Some controllers can
+                            # intermittently reject the first login attempt; allow the retry loop
+                            # to run before treating auth as fatal.
+                            saw_auth_rejection = True
                             self._rest_sid = None
+                            if attempt < max_attempts:
+                                continue
                             raise
                         except _RestRateLimited as err:
                             self._rest_sid = None
@@ -2987,6 +3039,9 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
                         if attempt < max_attempts:
                             await asyncio.sleep(0.5 * attempt)
+
+                    if saw_auth_rejection:
+                        raise _RestAuthRejected
 
                     raise UpdateFailed("REST update failed after retries")
 
