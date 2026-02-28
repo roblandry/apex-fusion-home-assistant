@@ -104,7 +104,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     Returns:
         True if setup succeeds.
     """
-    coordinator = ApexNeptuneDataUpdateCoordinator(hass, entry=entry)
+    # If config-flow validation established a REST session cookie, reuse it for
+    # the coordinator's first refresh to avoid back-to-back logins.
+    host = str(entry.data.get(CONF_HOST, "") or "")
+    rest_sid: str | None = None
+    try:
+        domain_data_any: Any = hass.data.get(DOMAIN)
+        domain_data = (
+            cast(dict[str, Any], domain_data_any)
+            if isinstance(domain_data_any, dict)
+            else {}
+        )
+        sid_cache_any: Any = domain_data.get("_rest_sid_by_host")
+        sid_cache = (
+            cast(dict[str, Any], sid_cache_any)
+            if isinstance(sid_cache_any, dict)
+            else {}
+        )
+        rest_sid_any: Any = sid_cache.pop(host, None)
+        if isinstance(rest_sid_any, str) and rest_sid_any:
+            rest_sid = rest_sid_any
+    except Exception:  # noqa: BLE001
+        rest_sid = None
+
+    coordinator = ApexNeptuneDataUpdateCoordinator(
+        hass,
+        entry=entry,
+        rest_sid_seed=rest_sid,
+    )
     await coordinator.async_config_entry_first_refresh()
 
     # Detect REST-vs-legacy mode based on the first successful refresh.

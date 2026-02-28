@@ -424,6 +424,14 @@ async def _async_validate_input(
                         bool(sid_value),
                     )
 
+                    # Runtime-only handoff: seed the coordinator's first refresh
+                    # with the validated SID to avoid back-to-back logins.
+                    if sid_value:
+                        domain_data = hass.data.setdefault(DOMAIN, {})
+                        sid_cache = domain_data.setdefault("_rest_sid_by_host", {})
+                        if isinstance(sid_cache, dict):
+                            sid_cache[host] = sid_value
+
                     request_headers = dict(accept_headers)
                     if sid_value:
                         request_headers["Cookie"] = f"connect.sid={sid_value}"

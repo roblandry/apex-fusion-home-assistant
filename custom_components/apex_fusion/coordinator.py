@@ -1692,16 +1692,25 @@ def parse_status_cgi_json(status_obj: dict[str, Any]) -> dict[str, Any]:
 class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Fetches and parses status.xml into a shared data dict."""
 
-    def __init__(self, hass: HomeAssistant, *, entry: ConfigEntry) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        *,
+        entry: ConfigEntry,
+        rest_sid_seed: str | None = None,
+    ) -> None:
         """Initialize the coordinator.
 
         Args:
             hass: Home Assistant instance.
             entry: Config entry containing connection details.
+            rest_sid_seed: Optional connect.sid value to reuse for the first refresh.
         """
         self.hass = hass
         self.entry = entry
-        self._rest_sid: str | None = None
+        self._rest_sid: str | None = (
+            rest_sid_seed if isinstance(rest_sid_seed, str) and rest_sid_seed else None
+        )
         self._rest_disabled_until: float = 0.0
         self._rest_status_path: str | None = None
         self._cached_serial: str | None = None
