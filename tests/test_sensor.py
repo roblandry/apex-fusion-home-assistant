@@ -312,6 +312,7 @@ async def test_sensor_setup_creates_entities_and_updates(
             "trident": {
                 "present": True,
                 "abaddr": 5,
+                "swrev": "1.23",
                 "status": "Idle",
                 "levels_ml": [232.7, 159.2, 226.63, 226.92, 222.94, 111.0],
             },
@@ -385,6 +386,11 @@ async def test_sensor_setup_creates_entities_and_updates(
     status = next((e for e in trident_diags if e._attr_name == "Status"), None)
     assert status is not None
     assert status.entity_category is None
+
+    firmware = next((e for e in trident_diags if e._attr_name == "Firmware"), None)
+    assert firmware is not None
+    assert firmware.entity_category == sensor.EntityCategory.DIAGNOSTIC
+    assert firmware.native_value == "1.23"
 
     # Trident diagnostics should be grouped under the Trident device when abaddr is known.
     assert waste.device_info is not None

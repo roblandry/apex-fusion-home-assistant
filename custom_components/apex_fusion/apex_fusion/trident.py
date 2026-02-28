@@ -49,6 +49,37 @@ def trident_is_testing_by_abaddr(
     return _get
 
 
+def trident_present_by_abaddr(
+    trident_abaddr: int,
+) -> Callable[[dict[str, Any]], bool | None]:
+    """Return whether a Trident-family module is reported present.
+
+    This reads from the multi-module `data["tridents"]` list.
+
+    Args:
+        trident_abaddr: Aquabus address.
+
+    Returns:
+        `True/False` when present, otherwise `None`.
+    """
+
+    def _get(data: dict[str, Any]) -> bool | None:
+        tridents_any: Any = data.get("tridents")
+        if not isinstance(tridents_any, list):
+            return None
+        for item_any in cast(list[Any], tridents_any):
+            if not isinstance(item_any, dict):
+                continue
+            t = cast(dict[str, Any], item_any)
+            if t.get("abaddr") != trident_abaddr:
+                continue
+            value: Any = t.get("present")
+            return value if isinstance(value, bool) else None
+        return None
+
+    return _get
+
+
 def trident_waste_full(data: dict[str, Any]) -> bool | None:
     """Return whether the Trident waste container is full.
 

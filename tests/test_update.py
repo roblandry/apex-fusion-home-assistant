@@ -189,6 +189,56 @@ async def test_update_setup_creates_module_update_entity_when_outdated(
         cb()
 
 
+async def test_update_setup_creates_trident_np_update_entity_when_present_false(
+    hass, enable_custom_integrations
+):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "1.2.3.4"},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
+    )
+    entry.add_to_hass(hass)
+
+    coordinator = _CoordinatorStub(
+        data={
+            "meta": {
+                "serial": "ABC",
+                "hostname": "apex",
+                "type": "AC6J",
+                "software": "5.12J_CA25",
+            },
+            "raw": {
+                "nstat": {"updateFirmware": False},
+                "modules": [
+                    {"abaddr": 3, "hwtype": "TNP", "present": False, "swrev": 7},
+                ],
+            },
+        }
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
+    added: list[Any] = []
+
+    def _add_entities(new_entities, update_before_add: bool = False):
+        added.extend(list(new_entities))
+
+    from custom_components.apex_fusion import update
+
+    await update.async_setup_entry(hass, cast(Any, entry), _add_entities)
+
+    # Controller firmware update + TNP firmware entity.
+    assert len(added) == 2
+    models = sorted(_device_model(e) for e in added)
+    assert models == ["AC6J", "TNP"]
+
+    tnp = next(e for e in added if _device_model(e) == "TNP")
+    assert tnp.installed_version == "7"
+    # Disconnected modules should not claim update availability.
+    assert tnp.latest_version == "7"
+    assert tnp.state == "off"
+
+
 async def test_update_module_device_name_uses_mconf_name_when_present(
     hass, enable_custom_integrations
 ):

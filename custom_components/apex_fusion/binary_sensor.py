@@ -27,6 +27,7 @@ from .apex_fusion import (
     network_bool,
     trident_is_testing,
     trident_is_testing_by_abaddr,
+    trident_present_by_abaddr,
     trident_reagent_empty,
     trident_reagent_empty_by_abaddr,
     trident_waste_full,
@@ -142,132 +143,179 @@ async def async_setup_entry(
 
     def _add_trident_testing_entity() -> None:
         nonlocal added_trident_testing
-        if added_trident_testing:
-            return
-
         data = coordinator.data or {}
-        trident_any: Any = data.get("trident")
-        if not isinstance(trident_any, dict):
-            return
-        trident = cast(dict[str, Any], trident_any)
-        if not trident.get("present"):
-            return
 
-        trident_device_info = _get_trident_device_info(trident)
-        trident_prefix = "" if trident_device_info is not None else "Trident "
-
-        ref = _BinaryRef(
-            key="trident_testing",
-            name=f"{trident_prefix}Testing".strip(),
-            icon=ICON_TEST_TUBE,
-            value_fn=trident_is_testing,
-        )
-        tank_slug = ctx.tank_slug
-        abaddr = (
-            cast(int, trident.get("abaddr"))
-            if isinstance(trident.get("abaddr"), int)
-            else None
-        )
-        addr_slug = f"trident_addr{abaddr}" if isinstance(abaddr, int) else "trident"
-        async_add_entities(
-            [
-                ApexBinarySensor(
-                    coordinator,
-                    entry,
-                    ref=ref,
-                    device_info=trident_device_info,
-                    suggested_object_id=f"{tank_slug}_{addr_slug}_testing",
-                )
-            ]
-        )
-        added_trident_testing = True
-
-        # Additional per-module binary sensors.
         tridents_any: Any = data.get("tridents")
-        if not isinstance(tridents_any, list):
-            return
-        new_entities: list[BinarySensorEntity] = []
-        tank_slug = ctx.tank_slug
-        for t_any in cast(list[Any], tridents_any):
-            if not isinstance(t_any, dict):
-                continue
-            t = cast(dict[str, Any], t_any)
-            if not t.get("present"):
-                continue
-            abaddr_any: Any = t.get("abaddr")
-            if not isinstance(abaddr_any, int):
-                continue
-            if abaddr_any in added_tridents:
-                continue
+        tridents_list: list[dict[str, Any]] = (
+            [
+                cast(dict[str, Any], t)
+                for t in cast(list[Any], tridents_any)
+                if isinstance(t, dict)
+            ]
+            if isinstance(tridents_any, list)
+            else []
+        )
 
-            hwtype = str(t.get("hwtype") or "").strip().upper()
-            label = "Trident NP" if hwtype == "TNP" else "Trident"
-            addr_slug = f"trident_addr{abaddr_any}"
-            device_info = _get_trident_device_info(t)
+        # Multi-Trident: prefer per-module entities (and skip the legacy
+        # primary entities to avoid duplication).
+        if len(tridents_list) > 1:
+            new_entities: list[BinarySensorEntity] = []
+            tank_slug = ctx.tank_slug
+            for t in tridents_list:
+                abaddr_any: Any = t.get("abaddr")
+                if not isinstance(abaddr_any, int):
+                    continue
+                if abaddr_any in added_tridents:
+                    continue
 
-            new_entities.append(
-                ApexBinarySensor(
-                    coordinator,
-                    entry,
-                    ref=_BinaryRef(
-                        key=f"{addr_slug}_testing",
-                        name=f"{label} Testing",
-                        icon=ICON_TEST_TUBE,
-                        value_fn=trident_is_testing_by_abaddr(abaddr_any),
-                    ),
-                    device_info=device_info,
-                    suggested_object_id=f"{tank_slug}_{addr_slug}_testing",
-                )
-            )
+                hwtype = str(t.get("hwtype") or "").strip().upper()
+                label = "Trident NP" if hwtype == "TNP" else "Trident"
+                addr_slug = f"trident_addr{abaddr_any}"
+                device_info = _get_trident_device_info(t)
 
-            new_entities.append(
-                ApexTridentWasteFullBinarySensor(
-                    coordinator,
-                    entry,
-                    ref=_BinaryRef(
-                        key=f"{addr_slug}_waste_full",
-                        name=f"{label} Waste Full",
-                        icon=ICON_CUP_OFF,
-                        value_fn=trident_waste_full_by_abaddr(abaddr_any),
-                    ),
-                    device_info=device_info,
-                    suggested_object_id=f"{tank_slug}_{addr_slug}_waste_full",
-                )
-            )
-
-            # Reagent empty flags.
-            reagent_names = (
-                ("Reagent 1", "reagent_a_empty"),
-                ("Reagent 2", "reagent_b_empty"),
-                ("Reagent 3", "reagent_c_empty"),
-            )
-            if hwtype != "TNP":
-                reagent_names = (
-                    ("Reagent A", "reagent_a_empty"),
-                    ("Reagent B", "reagent_b_empty"),
-                    ("Reagent C", "reagent_c_empty"),
-                )
-
-            for display, field in reagent_names:
                 new_entities.append(
-                    ApexTridentReagentEmptyBinarySensor(
+                    ApexBinarySensor(
                         coordinator,
                         entry,
                         ref=_BinaryRef(
-                            key=f"{addr_slug}_{field}",
-                            name=f"{label} {display} Empty",
-                            icon=ICON_FLASK_EMPTY,
-                            value_fn=trident_reagent_empty_by_abaddr(abaddr_any, field),
+                            key=f"{addr_slug}_testing",
+                            name=f"{label} Testing",
+                            icon=ICON_TEST_TUBE,
+                            value_fn=trident_is_testing_by_abaddr(abaddr_any),
                         ),
                         device_info=device_info,
-                        suggested_object_id=f"{tank_slug}_{addr_slug}_{field}",
+                        suggested_object_id=f"{tank_slug}_{addr_slug}_testing",
                     )
                 )
 
-            added_tridents.add(abaddr_any)
+                new_entities.append(
+                    ApexTridentConnectedBinarySensor(
+                        coordinator,
+                        entry,
+                        ref=_BinaryRef(
+                            key=f"{addr_slug}_connected",
+                            name=f"{label} Connected",
+                            icon=ICON_LAN_CONNECT,
+                            value_fn=trident_present_by_abaddr(abaddr_any),
+                        ),
+                        device_info=device_info,
+                        suggested_object_id=f"{tank_slug}_{addr_slug}_connected",
+                    )
+                )
 
-        if new_entities:
-            async_add_entities(new_entities)
+                new_entities.append(
+                    ApexTridentWasteFullBinarySensor(
+                        coordinator,
+                        entry,
+                        ref=_BinaryRef(
+                            key=f"{addr_slug}_waste_full",
+                            name=f"{label} Waste Full",
+                            icon=ICON_CUP_OFF,
+                            value_fn=trident_waste_full_by_abaddr(abaddr_any),
+                        ),
+                        device_info=device_info,
+                        suggested_object_id=f"{tank_slug}_{addr_slug}_waste_full",
+                    )
+                )
+
+                # Reagent empty flags.
+                reagent_names = (
+                    ("Reagent 1", "reagent_a_empty"),
+                    ("Reagent 2", "reagent_b_empty"),
+                    ("Reagent 3", "reagent_c_empty"),
+                )
+                if hwtype != "TNP":
+                    reagent_names = (
+                        ("Reagent A", "reagent_a_empty"),
+                        ("Reagent B", "reagent_b_empty"),
+                        ("Reagent C", "reagent_c_empty"),
+                    )
+
+                for display, field in reagent_names:
+                    new_entities.append(
+                        ApexTridentReagentEmptyBinarySensor(
+                            coordinator,
+                            entry,
+                            ref=_BinaryRef(
+                                key=f"{addr_slug}_{field}",
+                                name=f"{label} {display} Empty",
+                                icon=ICON_FLASK_EMPTY,
+                                value_fn=trident_reagent_empty_by_abaddr(
+                                    abaddr_any, field
+                                ),
+                            ),
+                            device_info=device_info,
+                            suggested_object_id=f"{tank_slug}_{addr_slug}_{field}",
+                        )
+                    )
+
+                added_tridents.add(abaddr_any)
+
+            if new_entities:
+                async_add_entities(new_entities)
+            return
+
+        trident_any: Any = data.get("trident")
+        if isinstance(trident_any, dict):
+            trident = cast(dict[str, Any], trident_any)
+            if not added_trident_testing and (
+                trident.get("present") is True
+                or trident.get("status") is not None
+                or trident.get("levels_ml") is not None
+                or isinstance(trident.get("abaddr"), int)
+                or (str(trident.get("hwtype") or "").strip() != "")
+            ):
+                trident_device_info = _get_trident_device_info(trident)
+                trident_prefix = "" if trident_device_info is not None else "Trident "
+
+                ref = _BinaryRef(
+                    key="trident_testing",
+                    name=f"{trident_prefix}Testing".strip(),
+                    icon=ICON_TEST_TUBE,
+                    value_fn=trident_is_testing,
+                )
+
+                connected_ref = _BinaryRef(
+                    key="trident_connected",
+                    name=f"{trident_prefix}Connected".strip(),
+                    icon=ICON_LAN_CONNECT,
+                    value_fn=lambda d: (
+                        d.get("trident", {}).get("present")
+                        if isinstance(d.get("trident"), dict)
+                        and isinstance(
+                            cast(dict[str, Any], d.get("trident")).get("present"), bool
+                        )
+                        else None
+                    ),
+                )
+                tank_slug = ctx.tank_slug
+                abaddr = (
+                    cast(int, trident.get("abaddr"))
+                    if isinstance(trident.get("abaddr"), int)
+                    else None
+                )
+                addr_slug = (
+                    f"trident_addr{abaddr}" if isinstance(abaddr, int) else "trident"
+                )
+                async_add_entities(
+                    [
+                        ApexBinarySensor(
+                            coordinator,
+                            entry,
+                            ref=ref,
+                            device_info=trident_device_info,
+                            suggested_object_id=f"{tank_slug}_{addr_slug}_testing",
+                        ),
+                        ApexTridentConnectedBinarySensor(
+                            coordinator,
+                            entry,
+                            ref=connected_ref,
+                            device_info=trident_device_info,
+                            suggested_object_id=f"{tank_slug}_{addr_slug}_connected",
+                        ),
+                    ]
+                )
+                added_trident_testing = True
 
     _add_trident_testing_entity()
     remove_trident = coordinator.async_add_listener(_add_trident_testing_entity)
@@ -279,11 +327,22 @@ async def async_setup_entry(
             return
 
         data = coordinator.data or {}
+        tridents_any: Any = data.get("tridents")
+        if isinstance(tridents_any, list) and len(cast(list[Any], tridents_any)) > 1:
+            return
         trident_any: Any = data.get("trident")
         if not isinstance(trident_any, dict):
             return
         trident = cast(dict[str, Any], trident_any)
-        if not trident.get("present"):
+        if not (
+            trident.get("present") is True
+            or trident.get("waste_full") is not None
+            or trident.get("waste_percent") is not None
+            or trident.get("waste_remaining_ml") is not None
+            or trident.get("waste_used_ml") is not None
+            or isinstance(trident.get("abaddr"), int)
+            or (str(trident.get("hwtype") or "").strip() != "")
+        ):
             return
 
         trident_device_info = _get_trident_device_info(trident)
@@ -327,11 +386,21 @@ async def async_setup_entry(
             return
 
         data = coordinator.data or {}
+        tridents_any: Any = data.get("tridents")
+        if isinstance(tridents_any, list) and len(cast(list[Any], tridents_any)) > 1:
+            return
         trident_any: Any = data.get("trident")
         if not isinstance(trident_any, dict):
             return
         trident = cast(dict[str, Any], trident_any)
-        if not trident.get("present"):
+        if not (
+            trident.get("present") is True
+            or trident.get("reagent_a_empty") is not None
+            or trident.get("reagent_b_empty") is not None
+            or trident.get("reagent_c_empty") is not None
+            or isinstance(trident.get("abaddr"), int)
+            or (str(trident.get("hwtype") or "").strip() != "")
+        ):
             return
 
         trident_device_info = _get_trident_device_info(trident)
@@ -611,3 +680,9 @@ class ApexTridentReagentEmptyBinarySensor(ApexDiagnosticBinarySensor):
     """Binary sensor for Trident reagent-empty condition."""
 
     _attr_device_class = BinarySensorDeviceClass.PROBLEM
+
+
+class ApexTridentConnectedBinarySensor(ApexDiagnosticBinarySensor):
+    """Binary sensor for Trident connectivity/presence."""
+
+    _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY

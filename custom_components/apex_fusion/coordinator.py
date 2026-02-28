@@ -1222,10 +1222,13 @@ def parse_status_rest(status_obj: dict[str, Any]) -> dict[str, Any]:
             if hwtype not in {"TRI", "TNP"}:
                 continue
 
+            # Some controller variants omit `extra` or populate it lazily.
+            # Keep the module as a Trident-family device even if `extra` is
+            # missing so entities are not suppressed.
             extra_any: Any = module.get("extra")
-            if not isinstance(extra_any, dict):
-                continue
-            extra = cast(dict[str, Any], extra_any)
+            extra = (
+                cast(dict[str, Any], extra_any) if isinstance(extra_any, dict) else {}
+            )
 
             trident_hwtype = hwtype or None
 
@@ -1474,9 +1477,17 @@ def parse_status_rest(status_obj: dict[str, Any]) -> dict[str, Any]:
 def _primary_trident_from_data(data: dict[str, Any]) -> dict[str, Any]:
     tridents_any: Any = data.get("tridents")
     if isinstance(tridents_any, list) and tridents_any:
-        first_any: Any = cast(list[Any], tridents_any)[0]
-        if isinstance(first_any, dict):
-            return cast(dict[str, Any], first_any)
+        tridents: list[dict[str, Any]] = [
+            cast(dict[str, Any], t)
+            for t in cast(list[Any], tridents_any)
+            if isinstance(t, dict)
+        ]
+        if tridents:
+            # Prefer a present module when multiple Trident-family devices exist.
+            for t in tridents:
+                if t.get("present") is True:
+                    return t
+            return tridents[0]
     return {
         "present": False,
         "status": None,

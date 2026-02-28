@@ -84,6 +84,59 @@ async def test_button_setup_adds_trident_buttons_and_presses(
     assert coordinator.async_trident_reset_waste.await_count == 1
 
 
+async def test_button_setup_adds_trident_np_buttons_when_present_false(
+    hass, enable_custom_integrations
+):
+    """Trident NP sometimes reports present=false even when installed.
+
+    We still want the consumables controls to exist so the user can operate
+    the module when the controller payload is inconsistent.
+    """
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "1.2.3.4", CONF_PASSWORD: "pw"},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
+    )
+    entry.add_to_hass(hass)
+
+    coordinator = _CoordinatorStub(
+        data={
+            "meta": {"serial": "ABC"},
+            "trident": {"present": False, "abaddr": 3, "hwtype": "TNP"},
+        },
+        device_identifier="ABC",
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
+    added: list[Any] = []
+
+    def _add_entities(new_entities, update_before_add: bool = False):
+        added.extend(list(new_entities))
+
+    from custom_components.apex_fusion import button
+
+    await button.async_setup_entry(hass, cast(Any, entry), _add_entities)
+
+    # Controller refresh + 8 Trident consumables buttons.
+    assert len(added) == 9
+
+    for ent in added:
+        ent.async_write_ha_state = lambda *args, **kwargs: None
+        await ent.async_added_to_hass()
+        await ent.async_press()
+
+    # 1 refresh button
+    assert coordinator.async_refresh_config_now.await_count == 1
+    # 4 prime buttons
+    assert coordinator.async_trident_prime_channel.await_count == 4
+    # 3 reagent resets
+    assert coordinator.async_trident_reset_reagent.await_count == 3
+    # 1 waste reset
+    assert coordinator.async_trident_reset_waste.await_count == 1
+
+
 async def test_button_setup_adds_module_refresh_buttons_when_modules_present(
     hass, enable_custom_integrations
 ):

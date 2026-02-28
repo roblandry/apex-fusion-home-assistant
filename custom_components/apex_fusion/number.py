@@ -47,10 +47,13 @@ async def async_setup_entry(
 
         tridents_any: Any = data.get("tridents")
         if isinstance(tridents_any, list):
+            from_tridents_list = True
             candidates: list[Any] = cast(list[Any], tridents_any)
         elif isinstance(primary_trident_any, dict):
+            from_tridents_list = False
             candidates = [primary_trident_any]
         else:
+            from_tridents_list = False
             candidates = []
 
         new: list[NumberEntity] = []
@@ -59,7 +62,23 @@ async def async_setup_entry(
             if not isinstance(item_any, dict):
                 continue
             trident = cast(dict[str, Any], item_any)
-            if not trident.get("present"):
+
+            hwtype_any: Any = trident.get("hwtype")
+            hwtype = (
+                str(hwtype_any).strip().upper()
+                if isinstance(hwtype_any, str) and hwtype_any.strip()
+                else None
+            )
+            is_tnp = hwtype == "TNP"
+
+            # Some controllers report Trident NP with present=false even though it exists.
+            # Keep legacy behavior for single-module non-NP setups, but do not gate on
+            # present when we have a tridents list (multi-module) or when the module is NP.
+            if (
+                (not from_tridents_list)
+                and (not is_tnp)
+                and (not trident.get("present"))
+            ):
                 continue
             abaddr_any: Any = trident.get("abaddr")
             if not isinstance(abaddr_any, int):
@@ -194,6 +213,15 @@ class ApexTridentWasteSizeNumber(NumberEntity):
         value: Any = trident_field_by_abaddr(self._trident_abaddr, "waste_size_ml")(
             data
         )
+
+        # Back-compat: if the multi-trident list isn't available, fall back to the
+        # legacy single-trident dict (when it matches this entity's abaddr).
+        if value is None and "tridents" not in data:
+            trident_any: Any = data.get("trident")
+            if isinstance(trident_any, dict):
+                abaddr_any: Any = cast(dict[str, Any], trident_any).get("abaddr")
+                if abaddr_any == self._trident_abaddr:
+                    value = cast(dict[str, Any], trident_any).get("waste_size_ml")
 
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             self._attr_native_value = float(value)

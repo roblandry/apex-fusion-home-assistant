@@ -94,6 +94,47 @@ async def test_number_setup_adds_waste_size_and_sets_value(
     await ent.async_will_remove_from_hass()
 
 
+async def test_number_setup_adds_trident_np_waste_size_when_present_false(
+    hass, enable_custom_integrations
+):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "1.2.3.4", CONF_PASSWORD: "pw"},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
+    )
+    entry.add_to_hass(hass)
+
+    coordinator = _CoordinatorStub(
+        data={
+            "meta": {"serial": "ABC"},
+            "trident": {
+                "present": False,
+                "abaddr": 3,
+                "hwtype": "TNP",
+                "waste_size_ml": 450.0,
+            },
+        },
+        device_identifier="ABC",
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
+    added: list[Any] = []
+
+    def _add_entities(new_entities, update_before_add: bool = False):
+        added.extend(list(new_entities))
+
+    from custom_components.apex_fusion import number
+
+    await number.async_setup_entry(hass, cast(Any, entry), _add_entities)
+
+    assert len(added) == 1
+    ent = added[0]
+    ent.async_write_ha_state = lambda *args, **kwargs: None
+    await ent.async_added_to_hass()
+    assert ent._attr_native_value == 450.0
+
+
 async def test_number_setup_skips_without_password(hass, enable_custom_integrations):
     entry = MockConfigEntry(
         domain=DOMAIN,

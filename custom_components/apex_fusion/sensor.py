@@ -297,167 +297,71 @@ async def async_setup_entry(
 
     def _add_trident_diagnostics() -> None:
         nonlocal added_trident_diags
-        if added_trident_diags:
-            return
-
         data = coordinator.data or {}
-        trident_any: Any = data.get("trident")
-        if not isinstance(trident_any, dict):
-            return
-        trident = cast(dict[str, Any], trident_any)
-        if not trident.get("present"):
-            return
-
-        trident_device_info: DeviceInfo | None = None
-        trident_abaddr_any: Any = trident.get("abaddr")
-        if isinstance(trident_abaddr_any, int):
-            trident_device_info = build_trident_device_info(
-                host=ctx.host,
-                meta=ctx.meta,
-                controller_device_identifier=ctx.controller_device_identifier,
-                trident_abaddr=trident_abaddr_any,
-                trident_hwtype=(
-                    str(trident.get("hwtype") or "").strip().upper() or None
-                ),
-                trident_hwrev=(str(trident.get("hwrev") or "").strip() or None),
-                trident_swrev=(str(trident.get("swrev") or "").strip() or None),
-                trident_serial=(str(trident.get("serial") or "").strip() or None),
-            )
-
-        trident_prefix = "" if trident_device_info is not None else "Trident "
-
         tank_slug = ctx.tank_slug
-        trident_addr_slug = (
-            f"trident_addr{trident_abaddr_any}"
-            if isinstance(trident_abaddr_any, int)
-            else "trident"
+
+        tridents_any: Any = data.get("tridents")
+        tridents_list: list[dict[str, Any]] = (
+            [
+                cast(dict[str, Any], t)
+                for t in cast(list[Any], tridents_any)
+                if isinstance(t, dict)
+            ]
+            if isinstance(tridents_any, list)
+            else []
         )
 
-        new_entities: list[SensorEntity] = [
-            ApexDiagnosticSensor(
-                coordinator,
-                entry,
-                unique_id=f"{serial_for_ids}_diag_trident_status".lower(),
-                name=f"{trident_prefix}Status".strip(),
-                suggested_object_id=f"{tank_slug}_{trident_addr_slug}_status",
-                icon=ICON_FLASK_OUTLINE,
-                value_fn=section_field("trident", "status"),
-                entity_category=None,
-                device_info=trident_device_info,
-            )
-        ]
+        # Multi-Trident diagnostics: create per-module entities only when
+        # multiple Trident-family modules are detected.
+        if len(tridents_list) > 1:
+            for t in tridents_list:
+                abaddr_any: Any = t.get("abaddr")
+                if not isinstance(abaddr_any, int):
+                    continue
+                if abaddr_any in added_tridents_diags:
+                    continue
 
-        # Trident exposes `levels_ml` as a 5-element list.
-        # Mapping used by this integration:
-        # - index 0: waste used (counts up, resets to 0)
-        # - indices 2-4: reagent C/B/A remaining in mL (count down, reset to ~250)
-        # - index 1: auxiliary value
-        levels_any: Any = trident.get("levels_ml")
-        if isinstance(levels_any, list):
-            levels = cast(list[Any], levels_any)
-            for i in range(len(levels)):
-                name = f"{trident_prefix}Container {i + 1} Level".strip()
-                icon = ICON_BEAKER_OUTLINE
-                state_class: SensorStateClass | None = SensorStateClass.TOTAL
+                device_info = build_trident_device_info(
+                    host=ctx.host,
+                    meta=ctx.meta,
+                    controller_device_identifier=ctx.controller_device_identifier,
+                    trident_abaddr=abaddr_any,
+                    trident_hwtype=(str(t.get("hwtype") or "").strip().upper() or None),
+                    trident_hwrev=(str(t.get("hwrev") or "").strip() or None),
+                    trident_swrev=(str(t.get("swrev") or "").strip() or None),
+                    trident_serial=(str(t.get("serial") or "").strip() or None),
+                )
 
-                if i == 0:
-                    name = f"{trident_prefix}Waste Used".strip()
-                    icon = ICON_TRASH_CAN_OUTLINE
-                    state_class = SensorStateClass.TOTAL_INCREASING
-                    object_suffix = "waste_used"
-                elif i == 1:
-                    name = f"{trident_prefix}Auxiliary Level".strip()
-                    object_suffix = "auxiliary_level"
-                elif i == 2:
-                    name = f"{trident_prefix}Reagent C Remaining".strip()
-                    object_suffix = "reagent_c_remaining"
-                elif i == 3:
-                    name = f"{trident_prefix}Reagent B Remaining".strip()
-                    object_suffix = "reagent_b_remaining"
-                elif i == 4:
-                    name = f"{trident_prefix}Reagent A Remaining".strip()
-                    object_suffix = "reagent_a_remaining"
-                else:
-                    object_suffix = f"container_{i + 1}_level"
+                hwtype = str(t.get("hwtype") or "").strip().upper()
+                label = "Trident NP" if hwtype == "TNP" else "Trident"
 
-                new_entities.append(
+                addr_slug = f"trident_addr{abaddr_any}"
+                prefix = f"{label} "
+
+                multi_entities: list[SensorEntity] = [
                     ApexDiagnosticSensor(
                         coordinator,
                         entry,
-                        unique_id=f"{serial_for_ids}_diag_trident_container_{i + 1}_level".lower(),
-                        name=name,
-                        suggested_object_id=f"{tank_slug}_{trident_addr_slug}_{object_suffix}",
-                        icon=icon,
-                        native_unit=UnitOfVolume.MILLILITERS,
-                        device_class=SensorDeviceClass.VOLUME,
-                        state_class=state_class,
-                        value_fn=trident_level_ml(i),
+                        unique_id=f"{serial_for_ids}_diag_{addr_slug}_status".lower(),
+                        name=f"{prefix}Status".strip(),
+                        suggested_object_id=f"{tank_slug}_{addr_slug}_status",
+                        icon=ICON_FLASK_OUTLINE,
+                        value_fn=trident_field_by_abaddr(abaddr_any, "status"),
                         entity_category=None,
-                        device_info=trident_device_info,
+                        device_info=device_info,
                     )
+                ]
+
+                # Container levels: create the standard set even when levels are
+                # temporarily missing.
+                levels_any: Any = t.get("levels_ml")
+                level_count = (
+                    len(cast(list[Any], levels_any))
+                    if isinstance(levels_any, list)
+                    else 5
                 )
-
-        if new_entities:
-            async_add_entities(new_entities)
-            added_trident_diags = True
-
-        # Multi-Trident diagnostics: create per-module entities when multiple
-        # Trident-family modules are detected.
-        tridents_any: Any = data.get("tridents")
-        if not isinstance(tridents_any, list):
-            return
-
-        for t_any in cast(list[Any], tridents_any):
-            if not isinstance(t_any, dict):
-                continue
-            t = cast(dict[str, Any], t_any)
-            if not t.get("present"):
-                continue
-            abaddr_any: Any = t.get("abaddr")
-            if not isinstance(abaddr_any, int):
-                continue
-            if abaddr_any in added_tridents_diags:
-                continue
-
-            device_info = build_trident_device_info(
-                host=ctx.host,
-                meta=ctx.meta,
-                controller_device_identifier=ctx.controller_device_identifier,
-                trident_abaddr=abaddr_any,
-                trident_hwtype=(str(t.get("hwtype") or "").strip().upper() or None),
-                trident_hwrev=(str(t.get("hwrev") or "").strip() or None),
-                trident_swrev=(str(t.get("swrev") or "").strip() or None),
-                trident_serial=(str(t.get("serial") or "").strip() or None),
-            )
-
-            hwtype = str(t.get("hwtype") or "").strip().upper()
-            label = "Trident"
-            if hwtype == "TNP":
-                label = "Trident NP"
-            elif hwtype == "TRI":
-                label = "Trident"
-
-            addr_slug = f"trident_addr{abaddr_any}"
-            prefix = f"{label} "
-
-            multi_entities: list[SensorEntity] = [
-                ApexDiagnosticSensor(
-                    coordinator,
-                    entry,
-                    unique_id=f"{serial_for_ids}_diag_{addr_slug}_status".lower(),
-                    name=f"{prefix}Status".strip(),
-                    suggested_object_id=f"{tank_slug}_{addr_slug}_status",
-                    icon=ICON_FLASK_OUTLINE,
-                    value_fn=trident_field_by_abaddr(abaddr_any, "status"),
-                    entity_category=None,
-                    device_info=device_info,
-                )
-            ]
-
-            # Container levels.
-            levels_any: Any = t.get("levels_ml")
-            if isinstance(levels_any, list):
-                for i in range(len(cast(list[Any], levels_any))):
+                level_count = max(level_count, 5)
+                for i in range(level_count):
                     object_suffix = f"container_{i + 1}_level"
                     name = f"{prefix}Container {i + 1} Level".strip()
                     icon = ICON_BEAKER_OUTLINE
@@ -510,9 +414,134 @@ async def async_setup_entry(
                         )
                     )
 
-            if multi_entities:
-                async_add_entities(multi_entities)
-                added_tridents_diags.add(abaddr_any)
+                if multi_entities:
+                    async_add_entities(multi_entities)
+                    added_tridents_diags.add(abaddr_any)
+            return
+
+        trident_any: Any = data.get("trident")
+        trident = (
+            cast(dict[str, Any], trident_any) if isinstance(trident_any, dict) else {}
+        )
+        trident_detected = bool(
+            isinstance(trident_any, dict)
+            and (
+                trident.get("present") is True
+                or trident.get("status") is not None
+                or trident.get("levels_ml") is not None
+                or isinstance(trident.get("abaddr"), int)
+                or (str(trident.get("hwtype") or "").strip() != "")
+            )
+        )
+
+        # Primary (single-Trident) diagnostics.
+        if trident_detected and not added_trident_diags:
+            trident_device_info: DeviceInfo | None = None
+            trident_abaddr_any: Any = trident.get("abaddr")
+            if isinstance(trident_abaddr_any, int):
+                trident_device_info = build_trident_device_info(
+                    host=ctx.host,
+                    meta=ctx.meta,
+                    controller_device_identifier=ctx.controller_device_identifier,
+                    trident_abaddr=trident_abaddr_any,
+                    trident_hwtype=(
+                        str(trident.get("hwtype") or "").strip().upper() or None
+                    ),
+                    trident_hwrev=(str(trident.get("hwrev") or "").strip() or None),
+                    trident_swrev=(str(trident.get("swrev") or "").strip() or None),
+                    trident_serial=(str(trident.get("serial") or "").strip() or None),
+                )
+
+            trident_prefix = "" if trident_device_info is not None else "Trident "
+
+            trident_addr_slug = (
+                f"trident_addr{trident_abaddr_any}"
+                if isinstance(trident_abaddr_any, int)
+                else "trident"
+            )
+
+            new_entities: list[SensorEntity] = [
+                ApexDiagnosticSensor(
+                    coordinator,
+                    entry,
+                    unique_id=f"{serial_for_ids}_diag_trident_status".lower(),
+                    name=f"{trident_prefix}Status".strip(),
+                    suggested_object_id=f"{tank_slug}_{trident_addr_slug}_status",
+                    icon=ICON_FLASK_OUTLINE,
+                    value_fn=section_field("trident", "status"),
+                    entity_category=None,
+                    device_info=trident_device_info,
+                )
+            ]
+
+            # Firmware/software revision (diagnostic).
+            new_entities.append(
+                ApexDiagnosticSensor(
+                    coordinator,
+                    entry,
+                    unique_id=f"{serial_for_ids}_diag_trident_firmware".lower(),
+                    name=f"{trident_prefix}Firmware".strip(),
+                    suggested_object_id=f"{tank_slug}_{trident_addr_slug}_firmware",
+                    icon=None,
+                    value_fn=section_field("trident", "swrev"),
+                    entity_category=EntityCategory.DIAGNOSTIC,
+                    device_info=trident_device_info,
+                )
+            )
+
+            # Create the standard Trident container sensors even if `levels_ml`
+            # is missing on the first refresh. Values will show as unknown until
+            # the controller starts reporting them.
+            levels_any: Any = trident.get("levels_ml")
+            level_count = (
+                len(cast(list[Any], levels_any)) if isinstance(levels_any, list) else 5
+            )
+            level_count = max(level_count, 5)
+            for i in range(level_count):
+                name = f"{trident_prefix}Container {i + 1} Level".strip()
+                icon = ICON_BEAKER_OUTLINE
+                state_class: SensorStateClass | None = SensorStateClass.TOTAL
+
+                if i == 0:
+                    name = f"{trident_prefix}Waste Used".strip()
+                    icon = ICON_TRASH_CAN_OUTLINE
+                    state_class = SensorStateClass.TOTAL_INCREASING
+                    object_suffix = "waste_used"
+                elif i == 1:
+                    name = f"{trident_prefix}Auxiliary Level".strip()
+                    object_suffix = "auxiliary_level"
+                elif i == 2:
+                    name = f"{trident_prefix}Reagent C Remaining".strip()
+                    object_suffix = "reagent_c_remaining"
+                elif i == 3:
+                    name = f"{trident_prefix}Reagent B Remaining".strip()
+                    object_suffix = "reagent_b_remaining"
+                elif i == 4:
+                    name = f"{trident_prefix}Reagent A Remaining".strip()
+                    object_suffix = "reagent_a_remaining"
+                else:
+                    object_suffix = f"container_{i + 1}_level"
+
+                new_entities.append(
+                    ApexDiagnosticSensor(
+                        coordinator,
+                        entry,
+                        unique_id=f"{serial_for_ids}_diag_trident_container_{i + 1}_level".lower(),
+                        name=name,
+                        suggested_object_id=f"{tank_slug}_{trident_addr_slug}_{object_suffix}",
+                        icon=icon,
+                        native_unit=UnitOfVolume.MILLILITERS,
+                        device_class=SensorDeviceClass.VOLUME,
+                        state_class=state_class,
+                        value_fn=trident_level_ml(i),
+                        entity_category=None,
+                        device_info=trident_device_info,
+                    )
+                )
+
+            if new_entities:
+                async_add_entities(new_entities)
+                added_trident_diags = True
 
     _add_trident_diagnostics()
     remove_trident = coordinator.async_add_listener(_add_trident_diagnostics)

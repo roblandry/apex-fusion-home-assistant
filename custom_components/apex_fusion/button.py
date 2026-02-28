@@ -170,10 +170,13 @@ async def async_setup_entry(
         # Prefer multi-trident list; fall back to legacy single-trident dict.
         tridents_any: Any = data.get("tridents")
         if isinstance(tridents_any, list):
+            from_tridents_list = True
             candidates: list[Any] = cast(list[Any], tridents_any)
         elif isinstance(primary_trident_any, dict):
+            from_tridents_list = False
             candidates = [primary_trident_any]
         else:
+            from_tridents_list = False
             candidates = []
 
         new: list[ButtonEntity] = []
@@ -182,13 +185,6 @@ async def async_setup_entry(
             if not isinstance(item_any, dict):
                 continue
             trident = cast(dict[str, Any], item_any)
-            if not trident.get("present"):
-                continue
-            abaddr_any: Any = trident.get("abaddr")
-            if not isinstance(abaddr_any, int):
-                continue
-            if abaddr_any in added_trident_abaddrs:
-                continue
 
             hwtype_any: Any = trident.get("hwtype")
             hwtype = (
@@ -197,6 +193,21 @@ async def async_setup_entry(
                 else None
             )
             is_tnp = hwtype == "TNP"
+
+            # Some controllers report Trident NP with present=false even though it exists.
+            # Keep legacy behavior for single-module non-NP setups, but do not gate on
+            # present when we have a tridents list (multi-module) or when the module is NP.
+            if (
+                (not from_tridents_list)
+                and (not is_tnp)
+                and (not trident.get("present"))
+            ):
+                continue
+            abaddr_any: Any = trident.get("abaddr")
+            if not isinstance(abaddr_any, int):
+                continue
+            if abaddr_any in added_trident_abaddrs:
+                continue
 
             # Preserve legacy keys/unique_ids for the primary module.
             key_prefix = (

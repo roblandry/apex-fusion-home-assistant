@@ -336,6 +336,11 @@ def _module_refs(data: dict[str, Any], serial_for_ids: str) -> list[_UpdateRef]:
                 present_any: Any = status_module.get("present")
                 present = bool(present_any) if isinstance(present_any, bool) else True
                 if not present:
+                    # When a Trident-family module is disconnected, we still want the
+                    # entity to exist and to show installed firmware without implying
+                    # update availability.
+                    if hwtype in {"TRI", "TNP"} and installed:
+                        return installed
                     return None
 
                 reported_latest_any: Any = status_module.get(
@@ -419,7 +424,13 @@ def _module_refs(data: dict[str, Any], serial_for_ids: str) -> list[_UpdateRef]:
 
             present_any: Any = status_module.get("present")
             present = bool(present_any) if isinstance(present_any, bool) else True
-            if not present:
+            if not present and hwtype not in {"TRI", "TNP"}:
+                continue
+
+            installed_now = _installed_from_status_fn(
+                data, hwtype=hwtype, module_id=module_id
+            )
+            if not present and hwtype in {"TRI", "TNP"} and not installed_now:
                 continue
 
             refs.append(
@@ -443,8 +454,12 @@ def _module_refs(data: dict[str, Any], serial_for_ids: str) -> list[_UpdateRef]:
 
         present_any: Any = module.get("present")
         present = bool(present_any) if isinstance(present_any, bool) else True
-        if not present:
+        if not present and hwtype not in {"TRI", "TNP"}:
             continue
+
+        if not present and hwtype in {"TRI", "TNP"}:
+            if module.get("software") is None and module.get("swrev") is None:
+                continue
 
         abaddr = module.get("abaddr")
         module_id = (
@@ -485,6 +500,13 @@ def _module_refs(data: dict[str, Any], serial_for_ids: str) -> list[_UpdateRef]:
                     m_id = str(m.get("did") or m.get("id") or hwtype).strip()
                 if m_id != module_id:
                     continue
+
+                present_any: Any = m.get("present")
+                present = bool(present_any) if isinstance(present_any, bool) else True
+                if not present:
+                    installed = _installed_fn(_data, module_id=module_id, hwtype=hwtype)
+                    return installed
+
                 v: Any = m.get("latestFirmware") or m.get("latestSw")
                 reported_latest = str(v).strip() or None if v is not None else None
                 if reported_latest is not None:

@@ -106,7 +106,7 @@ async def test_binary_sensor_setup_and_updates(hass, enable_custom_integrations)
     for cb in list(listeners):
         cb()
 
-    assert len(added) == 8
+    assert len(added) == 9
 
     digital = next(
         (e for e in added if isinstance(e, binary_sensor.ApexDigitalProbeBinarySensor)),
@@ -219,9 +219,9 @@ async def test_binary_sensor_digital_probe_skips_and_fallbacks(
 
     await binary_sensor.async_setup_entry(hass, cast(Any, entry), _add_entities)
 
-    # 2 network diagnostic entities + Trident Testing + Trident Waste Full
+    # 2 network diagnostic entities + Trident Testing + Trident Connected + Trident Waste Full
     # + 3 reagent-empty + 2 valid digital probes
-    assert len(added) == 9
+    assert len(added) == 10
 
     for ent in added:
         ent.async_write_ha_state = lambda *args, **kwargs: None
