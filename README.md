@@ -65,6 +65,7 @@ As of 2026-01-31, I actively run this integration against:
 - **APIs available:** REST (`/rest/*`) is expected; legacy CGI endpoints (`/cgi-bin/status.*`) may also be present and are used only as fallback
 - **Modules observed via REST:**
   - FMM (Software Version: **24**)
+  - EB832 (Software Version: **8**)
   - MXM (Software Version: **1**)
   - Trident ACM (`TRI`) (Software Version: **23**)
   - Trident NP (`TNP`) (Software Version: **54**)
@@ -129,6 +130,7 @@ Always created:
 
 - **Sensors**
   - Probes/inputs from the controller (temperature, pH, conductivity, Trident readings, etc)
+  - EB832 electrical telemetry when reported as inputs (per-outlet current in A, per-outlet power in W, and EB832 line voltage in V)
   - Outlet intensity sensors for variable/serial outputs
   - Trident-family container levels (mL) when a Trident-family module is detected
 - **Binary sensors**

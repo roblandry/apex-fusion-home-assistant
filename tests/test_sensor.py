@@ -74,6 +74,8 @@ def test_sensor_helpers_cover_all_branches():
     assert icon_for_probe_type("cond", "salt") == "mdi:shaker-outline"
     assert icon_for_probe_type("cond", "conductivity") == "mdi:flash"
     assert icon_for_probe_type("amps", "Amps") == "mdi:current-ac"
+    assert icon_for_probe_type("pwr", "Power") == "mdi:flash"
+    assert icon_for_probe_type("volts", "Volt") == "mdi:flash"
     assert icon_for_probe_type("alk", "Alk") == "mdi:test-tube"
     assert icon_for_probe_type("ca", "Ca") == "mdi:flask"
     assert icon_for_probe_type("mg", "Mg") == "mdi:flask-outline"
@@ -96,6 +98,15 @@ def test_sensor_helpers_cover_all_branches():
     assert friendly_probe_name(name="NO3", probe_type="no3") == "Nitrate"
     assert friendly_probe_name(name="Nitrogen", probe_type="nitrogen") == "Nitrogen"
     assert friendly_probe_name(name="PO4", probe_type="po4") == "Phosphate"
+
+    assert (
+        friendly_probe_name(name="Outlet_3_1A", probe_type="Amps")
+        == "Outlet 3 1 Current"
+    )
+    assert (
+        friendly_probe_name(name="Outlet_3_1W", probe_type="pwr") == "Outlet 3 1 Power"
+    )
+    assert friendly_probe_name(name="Volt_3", probe_type="volts") == "Voltage"
 
     assert pretty_model("Nero5") == "Nero 5"
     assert pretty_model("Nero") == "Nero"
@@ -147,7 +158,9 @@ def test_sensor_helpers_cover_all_branches():
     assert as_float("nope") is None
     assert as_float(object()) is None
 
-    assert units_and_meta(probe_name="x", probe_type="amps", value=1.0)[0] is None
+    assert units_and_meta(probe_name="x", probe_type="amps", value=1.0)[0] == "A"
+    assert units_and_meta(probe_name="x", probe_type="pwr", value=1.0)[0] == "W"
+    assert units_and_meta(probe_name="x", probe_type="volts", value=119.0)[0] == "V"
     assert units_and_meta(probe_name="x", probe_type="ph", value=8.1)[0] is None
     assert units_and_meta(probe_name="x", probe_type="alk", value=7.0)[0] == "dKH"
     assert units_and_meta(probe_name="x", probe_type="ca", value=420.0)[0] == "ppm"

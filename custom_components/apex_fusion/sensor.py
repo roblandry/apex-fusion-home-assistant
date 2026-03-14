@@ -108,6 +108,10 @@ def icon_for_probe_type(probe_type: str, probe_name: str) -> str | None:
         return ICON_SHAKER_OUTLINE if n.startswith("salt") else ICON_FLASH
     if t == "amps":
         return ICON_CURRENT_AC
+    if t == "pwr":
+        return ICON_FLASH
+    if t == "volts":
+        return ICON_FLASH
     if t == "alk":
         return ICON_TEST_TUBE
     if t == "ca":
@@ -877,7 +881,17 @@ class ApexProbeSensor(SensorEntity):
         out: Any = val if val is not None else raw
 
         # For known numeric probe types, coerce strings to float for HA.
-        if probe_type in {"amps", "temp", "tmp", "ph", "alk", "ca", "mg", "cond"}:
+        if probe_type in {
+            "alk",
+            "amps",
+            "ca",
+            "cond",
+            "mg",
+            "ph",
+            "pwr",
+            "temp",
+            "volts",
+        }:
             coerced = as_float(out)
             if coerced is not None:
                 return cast(StateType, coerced)

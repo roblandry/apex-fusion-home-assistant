@@ -4,13 +4,14 @@ This is a small roadmap of improvements planned (or being considered) for this H
 
 ## Known working (my setup)
 
-As of 2026-01-31, I actively run this integration against:
+As of 2026-03-14, I actively run this integration against:
 
 - **Controller type:** AC6J
 - **Firmware:** 5.12J_CA25
 - **APIs available:** REST (`/rest/*`) is expected; legacy CGI endpoints (`/cgi-bin/status.*`) may also be present and are used only as fallback
 - **Modules observed via REST:**
   - FMM
+  - EB832
   - MXM
   - Trident ACM (`TRI`)
   - Trident NP (`TNP`) (added 2/27/2026)
@@ -34,7 +35,7 @@ Notes:
 - Confirm module-type detection + entity gating for:
   - DOS
   - PMUP
-  - EB832/EB8 variants
+  - EB8 variants (outlet current/power + voltage inputs)
   - AFS
 - Firmware-related:
   - Confirm whether firmware update reporting via Home Assistant Update entities should be enabled by default (or kept optional)

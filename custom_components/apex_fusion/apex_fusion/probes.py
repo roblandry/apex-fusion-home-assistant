@@ -11,7 +11,12 @@ from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorStateClass,
 )
-from homeassistant.const import UnitOfTemperature
+from homeassistant.const import (
+    UnitOfElectricCurrent,
+    UnitOfElectricPotential,
+    UnitOfPower,
+    UnitOfTemperature,
+)
 
 # -----------------------------------------------------------------------------
 # Conversions
@@ -43,6 +48,28 @@ def as_float(value: Any) -> float | None:
 
 class ProbeMetaResolver:
     """Resolve friendly names and metadata for probe values."""
+
+    @staticmethod
+    def _strip_trailing_unit_suffix(name: str, *, suffix: str) -> str:
+        """Strip a trailing unit suffix from the name when it looks embedded.
+
+        EB832 current/power probe names are commonly reported with a trailing
+        unit letter (e.g. `Outlet_3_1A`, `Outlet_3_1W`).
+        """
+
+        if not name:
+            return name
+
+        s = name.strip()
+        if not s:
+            return s
+
+        if s.lower().endswith(suffix.lower()):
+            # Only strip when it appears to be a unit suffix, not part of a
+            # word (common patterns end with a digit before the unit).
+            if len(s) >= 2 and s[-2].isdigit():
+                return s[:-1].rstrip()
+        return s
 
     @staticmethod
     def friendly_probe_name(*, name: str, probe_type: str | None) -> str:
@@ -78,6 +105,19 @@ class ProbeMetaResolver:
             return "Nitrate"
         if t == "po4":
             return "Phosphate"
+
+        # EB832 current/power probe values show up in `probes` on some
+        # controllers; treat them like probe sensors for naming consistency.
+        if t == "amps":
+            base = ProbeMetaResolver._strip_trailing_unit_suffix(n, suffix="A")
+            base = base.replace("_", " ")
+            return f"{base} Current"
+        if t == "pwr":
+            base = ProbeMetaResolver._strip_trailing_unit_suffix(n, suffix="W")
+            base = base.replace("_", " ")
+            return f"{base} Power"
+        if t == "volts":
+            return "Voltage"
 
         return n
 
@@ -132,13 +172,35 @@ class ProbeMetaResolver:
         if t == "orp":
             return "mV", None, SensorStateClass.MEASUREMENT
 
+        # Trident ACM
         if t == "alk":
             return "dKH", None, SensorStateClass.MEASUREMENT
         if t in ("ca", "mg"):
             return "ppm", None, SensorStateClass.MEASUREMENT
 
+        # Trident NP
         if t in {"no3", "po4"}:
             return "ppm", None, SensorStateClass.MEASUREMENT
+
+        # EB832 (and similar): current and power.
+        if t == "amps":
+            return (
+                UnitOfElectricCurrent.AMPERE,
+                SensorDeviceClass.CURRENT,
+                SensorStateClass.MEASUREMENT,
+            )
+        if t == "pwr":
+            return (
+                UnitOfPower.WATT,
+                SensorDeviceClass.POWER,
+                SensorStateClass.MEASUREMENT,
+            )
+        if t == "volts":
+            return (
+                UnitOfElectricPotential.VOLT,
+                SensorDeviceClass.VOLTAGE,
+                SensorStateClass.MEASUREMENT,
+            )
 
         return None, None, SensorStateClass.MEASUREMENT
 
