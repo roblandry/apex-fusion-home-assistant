@@ -98,26 +98,31 @@ def icon_for_probe_type(probe_type: str, probe_name: str) -> str | None:
     """
 
     t = (probe_type or "").strip().lower()
-    n = (probe_name or "").strip().lower()
+    _ = (probe_name or "").strip().lower()
 
-    if t in {"temp", "tmp"}:
-        return ICON_THERMOMETER
-    if t == "ph":
-        return ICON_PH
-    if t == "cond":
-        return ICON_SHAKER_OUTLINE if n.startswith("salt") else ICON_FLASH
-    if t == "amps":
-        return ICON_CURRENT_AC
-    if t == "pwr":
-        return ICON_FLASH
-    if t == "volts":
-        return ICON_FLASH
     if t == "alk":
         return ICON_TEST_TUBE
+    if t == "amps":
+        return ICON_CURRENT_AC
     if t == "ca":
         return ICON_FLASK
+    if t == "cond":
+        return ICON_SHAKER_OUTLINE
     if t == "mg":
         return ICON_FLASK_OUTLINE
+    if t == "no3":
+        return ICON_TEST_TUBE
+    if t == "ph":
+        return ICON_PH
+    if t == "po4":
+        return ICON_TEST_TUBE
+    if t == "pwr":
+        return ICON_FLASH
+    if t == "temp":
+        return ICON_THERMOMETER
+    if t == "volts":
+        return ICON_FLASH
+
     return ICON_GAUGE
 
 
@@ -887,7 +892,9 @@ class ApexProbeSensor(SensorEntity):
             "ca",
             "cond",
             "mg",
+            "no3",
             "ph",
+            "po4",
             "pwr",
             "temp",
             "volts",

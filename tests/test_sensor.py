@@ -69,10 +69,9 @@ def test_sensor_helpers_cover_all_branches():
         icon_for_probe_type,
     )
 
-    assert icon_for_probe_type("tmp", "Tmp") == "mdi:thermometer"
+    assert icon_for_probe_type("tmp", "Tmp") == "mdi:gauge"
     assert icon_for_probe_type("ph", "pH") == "mdi:ph"
-    assert icon_for_probe_type("cond", "salt") == "mdi:shaker-outline"
-    assert icon_for_probe_type("cond", "conductivity") == "mdi:flash"
+    assert icon_for_probe_type("cond", "conductivity") == "mdi:shaker-outline"
     assert icon_for_probe_type("amps", "Amps") == "mdi:current-ac"
     assert icon_for_probe_type("pwr", "Power") == "mdi:flash"
     assert icon_for_probe_type("volts", "Volt") == "mdi:flash"
