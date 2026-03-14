@@ -477,6 +477,8 @@ async def async_setup_entry(
         if not isinstance(trident_any, dict):
             return
         trident = cast(dict[str, Any], trident_any)
+        hwtype = str(trident.get("hwtype") or "").strip().upper()
+        is_tnp = hwtype == "TNP"
         if not (
             trident.get("present") is True
             or trident.get("waste_full") is not None
@@ -490,6 +492,9 @@ async def async_setup_entry(
 
         trident_device_info = _get_trident_device_info(trident)
         trident_prefix = "" if trident_device_info is not None else "Trident "
+
+        reagent_labels = ("1", "2", "3") if is_tnp else ("A", "B", "C")
+        _ = reagent_labels  # Avoid unused when reagent entities are not added.
 
         ref = _BinaryRef(
             key="trident_waste_full",
@@ -537,6 +542,8 @@ async def async_setup_entry(
         if not isinstance(trident_any, dict):
             return
         trident = cast(dict[str, Any], trident_any)
+        hwtype = str(trident.get("hwtype") or "").strip().upper()
+        is_tnp = hwtype == "TNP"
         if not (
             trident.get("present") is True
             or trident.get("reagent_a_empty") is not None
@@ -550,22 +557,24 @@ async def async_setup_entry(
         trident_device_info = _get_trident_device_info(trident)
         trident_prefix = "" if trident_device_info is not None else "Trident "
 
+        reagent_labels = ("1", "2", "3") if is_tnp else ("A", "B", "C")
+
         refs = [
             _BinaryRef(
                 key="trident_reagent_a_empty",
-                name=f"{trident_prefix}Reagent A Empty".strip(),
+                name=f"{trident_prefix}Reagent {reagent_labels[0]} Empty".strip(),
                 icon=ICON_FLASK_EMPTY,
                 value_fn=trident_reagent_empty("reagent_a_empty"),
             ),
             _BinaryRef(
                 key="trident_reagent_b_empty",
-                name=f"{trident_prefix}Reagent B Empty".strip(),
+                name=f"{trident_prefix}Reagent {reagent_labels[1]} Empty".strip(),
                 icon=ICON_FLASK_EMPTY,
                 value_fn=trident_reagent_empty("reagent_b_empty"),
             ),
             _BinaryRef(
                 key="trident_reagent_c_empty",
-                name=f"{trident_prefix}Reagent C Empty".strip(),
+                name=f"{trident_prefix}Reagent {reagent_labels[2]} Empty".strip(),
                 icon=ICON_FLASK_EMPTY,
                 value_fn=trident_reagent_empty("reagent_c_empty"),
             ),

@@ -433,6 +433,145 @@ async def test_sensor_setup_creates_entities_and_updates(
             await ent.async_will_remove_from_hass()
 
 
+async def test_sensor_setup_trident_np_uses_reagent_123_labels(
+    hass, enable_custom_integrations
+):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "1.2.3.4"},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
+    )
+    entry.add_to_hass(hass)
+
+    coordinator = _CoordinatorStub(
+        data={
+            "meta": {"serial": "ABC", "hostname": "apex"},
+            "network": {"ipaddr": "1.2.3.4"},
+            "trident": {
+                "present": True,
+                "abaddr": 5,
+                "hwtype": "TNP",
+                "swrev": "1.23",
+                "status": "Idle",
+                "levels_ml": [232.7, 159.2, 226.63, 226.92, 222.94],
+            },
+            "probes": {},
+            "outlets": [],
+            "mxm_devices": {},
+        },
+        last_update_success=True,
+        device_identifier="ABC",
+        listeners=[],
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
+    added: list[Any] = []
+
+    def _add_entities(new_entities, update_before_add: bool = False):
+        added.extend(list(new_entities))
+
+    from custom_components.apex_fusion import sensor
+
+    await sensor.async_setup_entry(hass, cast(Any, entry), _add_entities)
+
+    trident_diags = [e for e in added if isinstance(e, sensor.ApexDiagnosticSensor)]
+    names = {getattr(e, "_attr_name", "") for e in trident_diags}
+
+    assert "Reagent 1 Remaining" in names
+    assert "Reagent 2 Remaining" in names
+    assert "Reagent 3 Remaining" in names
+    assert "Reagent A Remaining" not in names
+    assert "Reagent B Remaining" not in names
+    assert "Reagent C Remaining" not in names
+
+
+async def test_sensor_setup_multi_trident_uses_per_module_reagent_labels(
+    hass, enable_custom_integrations
+):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "1.2.3.4"},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
+    )
+    entry.add_to_hass(hass)
+
+    coordinator = _CoordinatorStub(
+        data={
+            "meta": {"serial": "ABC", "hostname": "apex"},
+            "network": {"ipaddr": "1.2.3.4"},
+            "tridents": [
+                {
+                    "present": True,
+                    "abaddr": 5,
+                    "hwtype": "TNP",
+                    "status": "Idle",
+                    "levels_ml": [0.0, 1.0, 2.0, 3.0, 4.0],
+                },
+                {
+                    "present": True,
+                    "abaddr": 6,
+                    "hwtype": "TRI",
+                    "status": "Idle",
+                    "levels_ml": [0.0, 1.0, 2.0, 3.0, 4.0],
+                },
+            ],
+            # Include legacy key too; multi-trident path should take precedence.
+            "trident": {"present": True, "abaddr": 5, "hwtype": "TNP"},
+            "probes": {},
+            "outlets": [],
+            "mxm_devices": {},
+        },
+        last_update_success=True,
+        device_identifier="ABC",
+        listeners=[],
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
+    added: list[Any] = []
+
+    def _add_entities(new_entities, update_before_add: bool = False):
+        added.extend(list(new_entities))
+
+    from custom_components.apex_fusion import sensor
+
+    await sensor.async_setup_entry(hass, cast(Any, entry), _add_entities)
+
+    trident_diags = [e for e in added if isinstance(e, sensor.ApexDiagnosticSensor)]
+    by_uid = {
+        getattr(e, "_attr_unique_id", ""): getattr(e, "_attr_name", "")
+        for e in trident_diags
+    }
+
+    # Multi-trident diagnostics should not create firmware entities.
+    assert not any(
+        "_diag_trident_addr" in uid and uid.endswith("_firmware") for uid in by_uid
+    )
+
+    # For addr 5 (TNP), container 3/4/5 are reagents 3/2/1.
+    assert (
+        by_uid.get("abc_diag_trident_addr5_container_3_level") == "Reagent 3 Remaining"
+    )
+    assert (
+        by_uid.get("abc_diag_trident_addr5_container_4_level") == "Reagent 2 Remaining"
+    )
+    assert (
+        by_uid.get("abc_diag_trident_addr5_container_5_level") == "Reagent 1 Remaining"
+    )
+
+    # For addr 6 (TRI), container 3/4/5 are reagents C/B/A.
+    assert (
+        by_uid.get("abc_diag_trident_addr6_container_3_level") == "Reagent C Remaining"
+    )
+    assert (
+        by_uid.get("abc_diag_trident_addr6_container_4_level") == "Reagent B Remaining"
+    )
+    assert (
+        by_uid.get("abc_diag_trident_addr6_container_5_level") == "Reagent A Remaining"
+    )
+
+
 async def test_sensor_setup_trident_not_dict_is_ignored(
     hass, enable_custom_integrations
 ):
