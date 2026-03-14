@@ -438,6 +438,7 @@ async def async_setup_entry(
         )
 
         # TODO: whats the point of this...
+        # Issue URL: https://github.com/roblandry/apex-fusion-home-assistant/issues/26
         # Multi-Trident diagnostics: create per-module entities only when
         # multiple Trident-family modules are detected.
         if len(tridents_list) > 1:
