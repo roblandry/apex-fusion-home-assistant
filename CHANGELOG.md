@@ -2,12 +2,33 @@
 
 All notable changes to this project will be documented in this file.
 
+## v0.1.5
+
+### Chores
+
+- update meta for no3 and po4
+- Automatically added GitHub issue links to TODOs
+- remove unreachable return
+
+### Features
+
+- set proper units + device classes for current (A), power (W), and voltage (V); Improve friendly names
+
+### Fixes
+
+- fix reagent naming
+
+### Tests
+
+- reach 100% coverage
+
 ## v0.1.4
 
 ### Chores
 
 - remove '_' from hub name
 - update readme
+- v0.1.4
 
 ### Features
 
