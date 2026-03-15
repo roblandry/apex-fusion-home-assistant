@@ -2866,8 +2866,6 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     continue
                                 raise
 
-                        return None
-
                     # First try using cached SID (avoids re-login flakiness).
                     if self._rest_sid:
                         try:
