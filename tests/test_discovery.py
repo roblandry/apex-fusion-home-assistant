@@ -32,3 +32,65 @@ def test_new_outlet_select_refs_returns_empty_when_outlets_container_invalid() -
     )
     assert refs == []
     assert seen == set()
+
+
+def test_outlet_ref_dedupe_keys_cover_collision_branches() -> None:
+    # DID collision (same did appears twice) should produce dedupe keys:
+    # - did@abaddr when module_abaddr is available
+    # - did@hwtype when module_abaddr is missing but module_hwtype exists
+    # - raw did when neither identity is available
+    outlets = [
+        {
+            "device_id": "D1",
+            "intensity": 50,
+            "module_abaddr": 5,
+            "module_hwtype": "FMM",
+        },
+        {
+            "device_id": "D1",
+            "intensity": 60,
+            "module_abaddr": None,
+            "module_hwtype": "PM2",
+        },
+        {"device_id": "D1", "intensity": 70},
+    ]
+
+    refs, seen = ApexDiscovery.new_outlet_intensity_refs(
+        {"outlets": outlets},
+        already_added_dids=set(),
+    )
+    assert {r.dedupe_key for r in refs} == {"D1@5", "D1@PM2", "D1"}
+    assert seen == {"D1@5", "D1@PM2", "D1"}
+
+    # Cover the `continue` path when dedupe key is already added.
+    refs2, seen2 = ApexDiscovery.new_outlet_intensity_refs(
+        {"outlets": outlets},
+        already_added_dids={"D1@5"},
+    )
+    assert "D1@5" not in {r.dedupe_key for r in refs2}
+    assert "D1@5" not in seen2
+
+    # Repeat for select refs (dedupe logic is duplicated).
+    outlets_selectable = [
+        {
+            "device_id": "D2",
+            "state": "AON",
+            "type": "pump",
+            "module_abaddr": 7,
+            "module_hwtype": "FMM",
+        },
+        {
+            "device_id": "D2",
+            "state": "AOF",
+            "type": "pump",
+            "module_hwtype": "PM2",
+        },
+        {"device_id": "D2", "state": "TBL", "type": "pump"},
+    ]
+
+    refs3, seen3 = ApexDiscovery.new_outlet_select_refs(
+        {"outlets": outlets_selectable},
+        already_added_dids=set(),
+    )
+    assert {r.dedupe_key for r in refs3} == {"D2@7", "D2@PM2", "D2"}
+    assert seen3 == {"D2@7", "D2@PM2", "D2"}

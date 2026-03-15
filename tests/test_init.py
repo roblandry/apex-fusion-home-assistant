@@ -55,6 +55,87 @@ async def test_async_setup_entry_stores_coordinator_and_forwards_platforms(
     forward.assert_awaited()
 
 
+async def test_async_setup_entry_reuses_cached_rest_sid_when_available(
+    hass, enable_custom_integrations
+):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "1.2.3.4"},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
+    )
+    entry.add_to_hass(hass)
+
+    # Seed a cached SID under hass.data[DOMAIN].
+    hass.data.setdefault(DOMAIN, {})["_rest_sid_by_host"] = {"1.2.3.4": "abc"}
+
+    coordinator = AsyncMock()
+    coordinator.async_config_entry_first_refresh = AsyncMock(return_value=None)
+    coordinator.data = {}
+    coordinator.device_identifier = "entry:TEST"
+
+    with (
+        patch(
+            "custom_components.apex_fusion.ApexNeptuneDataUpdateCoordinator",
+            return_value=coordinator,
+        ) as ctor,
+        patch.object(
+            hass.config_entries,
+            "async_forward_entry_setups",
+            new=AsyncMock(return_value=None),
+        ),
+    ):
+        from custom_components.apex_fusion import async_setup_entry
+
+        assert await async_setup_entry(hass, cast(Any, entry)) is True
+
+    assert ctor.call_args.kwargs.get("rest_sid_seed") == "abc"
+
+
+async def test_async_setup_entry_handles_sid_cache_lookup_exception(
+    hass, enable_custom_integrations
+):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "1.2.3.4"},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
+    )
+    entry.add_to_hass(hass)
+
+    class _BoomyData(dict[str, Any]):
+        def get(self, _key, default=None):  # type: ignore[override]
+            raise RuntimeError("boom")
+
+    original_data = hass.data
+    hass.data = _BoomyData()  # type: ignore[assignment]
+
+    coordinator = AsyncMock()
+    coordinator.async_config_entry_first_refresh = AsyncMock(return_value=None)
+    coordinator.data = {}
+    coordinator.device_identifier = "entry:TEST"
+
+    try:
+        with (
+            patch(
+                "custom_components.apex_fusion.ApexNeptuneDataUpdateCoordinator",
+                return_value=coordinator,
+            ) as ctor,
+            patch.object(
+                hass.config_entries,
+                "async_forward_entry_setups",
+                new=AsyncMock(return_value=None),
+            ),
+        ):
+            from custom_components.apex_fusion import async_setup_entry
+
+            assert await async_setup_entry(hass, cast(Any, entry)) is True
+
+        assert ctor.call_args.kwargs.get("rest_sid_seed") is None
+    finally:
+        hass.data = original_data
+
+
 async def test_async_setup_entry_forwards_rest_authenticated_platforms(
     hass, enable_custom_integrations
 ):

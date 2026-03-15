@@ -137,6 +137,67 @@ async def test_button_setup_adds_trident_np_buttons_when_present_false(
     assert coordinator.async_trident_reset_waste.await_count == 1
 
 
+async def test_button_setup_multi_trident_list_creates_addr_prefixed_buttons_and_object_ids(
+    hass, enable_custom_integrations
+):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "1.2.3.4", CONF_PASSWORD: "pw"},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
+    )
+    entry.add_to_hass(hass)
+
+    coordinator = _CoordinatorStub(
+        data={
+            "meta": {"serial": "ABC"},
+            # Primary (legacy) Trident dict.
+            "trident": {"present": True, "abaddr": 5, "hwtype": "TRI"},
+            # Multi-trident list should be preferred, and should ignore non-dict items.
+            "tridents": [
+                "nope",
+                # present=False should not gate when we have a tridents list.
+                {"present": False, "abaddr": 5, "hwtype": "TRI"},
+                {"present": False, "abaddr": 7, "hwtype": "TNP"},
+            ],
+        },
+        device_identifier="ABC",
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
+    added: list[Any] = []
+
+    def _add_entities(new_entities, update_before_add: bool = False):
+        added.extend(list(new_entities))
+
+    from custom_components.apex_fusion import button
+
+    await button.async_setup_entry(hass, cast(Any, entry), _add_entities)
+
+    trident_buttons = [e for e in added if isinstance(e, button.ApexTridentButton)]
+    assert len(trident_buttons) == 16
+
+    by_key = {
+        getattr(getattr(e, "_ref", None), "key", None): e for e in trident_buttons
+    }
+
+    # Primary key uses legacy "trident_" prefix and should not include "addr" in the suffix.
+    primary = cast(Any, by_key.get("trident_prime_sample"))
+    assert primary is not None
+    assert (
+        getattr(primary, "_attr_suggested_object_id", None)
+        == "apex_1_2_3_4_trident_5_prime_sample"
+    )
+
+    # Non-primary key uses the addr-prefixed key; suggested object id should strip that prefix.
+    addr7 = cast(Any, by_key.get("trident_addr7_prime_sample"))
+    assert addr7 is not None
+    assert (
+        getattr(addr7, "_attr_suggested_object_id", None)
+        == "apex_1_2_3_4_trident_7_prime_sample"
+    )
+
+
 async def test_button_setup_adds_module_refresh_buttons_when_modules_present(
     hass, enable_custom_integrations
 ):

@@ -77,6 +77,21 @@ def test_parse_mxm_devices_from_mconf_variants():
     assert coordinator._parse_mxm_devices_from_mconf(mconf2) == {}
 
 
+def test_primary_trident_from_data_prefers_present_else_first() -> None:
+    # When none are explicitly present=True, fall back to the first Trident.
+    data = {"tridents": [{"abaddr": 1, "present": False}, {"abaddr": 2}]}
+    assert coordinator._primary_trident_from_data(data).get("abaddr") == 1
+
+    # When at least one module is present=True, prefer that one.
+    data2 = {
+        "tridents": [
+            {"abaddr": 1, "present": False},
+            {"abaddr": 2, "present": True},
+        ]
+    }
+    assert coordinator._primary_trident_from_data(data2).get("abaddr") == 2
+
+
 def test_sanitize_config_helpers_cover_branches():
     assert coordinator._sanitize_mconf_for_storage({"mconf": "nope"}) == []
 

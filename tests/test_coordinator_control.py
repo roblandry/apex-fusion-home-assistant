@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 
 import aiohttp
 import pytest
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.apex_fusion.const import (
@@ -55,6 +55,10 @@ class _Resp:
         self.status = status
         self._text = text
         self.headers = headers or {}
+        # Attributes accessed by coordinator when constructing aiohttp.ClientResponseError
+        # for transient HTTP statuses.
+        self.request_info = cast(Any, None)
+        self.history = ()
         self.cookies: dict[str, Any] = {}
         if cookie_sid is not None:
             self.cookies["connect.sid"] = _Morsel(cookie_sid)
@@ -146,6 +150,183 @@ async def test_get_trident_abaddr_requires_trident_module(
     coord.data = {"meta": {"serial": "ABC"}}
     with pytest.raises(HomeAssistantError, match="Trident module not detected"):
         coord._get_trident_abaddr()
+
+
+async def test_get_trident_abaddr_uses_explicit_arg(hass, enable_custom_integrations):
+    coord = await _make_coord(hass)
+    assert coord._get_trident_abaddr(trident_abaddr=7) == 7
+
+
+async def test_merge_cached_rest_config_applies_waste_size_default_and_skips_invalid_cached_values(
+    hass, enable_custom_integrations
+):
+    coord = await _make_coord(hass)
+
+    # Include invalid cached shapes to hit the defensive `continue` guards.
+    coord._cached_mconf = [
+        {"hwtype": "TRI", "abaddr": 5, "extra": "nope"},
+        {"hwtype": "TRI", "abaddr": 6, "extra": {"wasteSize": "nope"}},
+        {"hwtype": "TRI", "abaddr": 7, "extra": {"wasteSize": 450.0}},
+    ]
+
+    data: dict[str, Any] = {
+        "tridents": [{"abaddr": 99}],
+        "trident": {"abaddr": 99},
+    }
+    coord._merge_cached_rest_config(data)
+    assert data["tridents"][0]["waste_size_ml"] == 450.0
+    assert data["trident"]["waste_size_ml"] == 450.0
+
+
+async def test_async_try_refresh_rest_config_applies_default_waste_size_even_when_cached_extra_is_weird(
+    hass, enable_custom_integrations, monkeypatch
+):
+    coord = await _make_coord(hass)
+
+    # Force the sanitizer to return a shape that includes a non-numeric wasteSize,
+    # so we can cover the defensive type-guard inside _async_try_refresh_rest_config.
+    def _fake_sanitize_mconf(_obj: dict[str, Any]) -> list[dict[str, Any]]:
+        return [
+            {"hwtype": "TRI", "abaddr": 5, "extra": {"wasteSize": "nope"}},
+            {"hwtype": "TRI", "abaddr": 6, "extra": {"wasteSize": 450.0}},
+        ]
+
+    monkeypatch.setattr(
+        "custom_components.apex_fusion.coordinator._sanitize_mconf_for_storage",
+        _fake_sanitize_mconf,
+    )
+    monkeypatch.setattr(
+        "custom_components.apex_fusion.coordinator._sanitize_nconf_for_storage",
+        lambda _obj: {},
+    )
+
+    sess = _Session(
+        cookie_jar=_CookieJar(None),
+        post_responses=[],
+        put_responses=[],
+        get_responses=[_Resp(200, text="{}")],
+    )
+
+    data: dict[str, Any] = {
+        "trident": {"abaddr": 99},
+        "tridents": [{"abaddr": 99}],
+    }
+
+    await coord._async_try_refresh_rest_config(
+        data=data,
+        session=cast(Any, sess),
+        base_url="http://1.2.3.4",
+        sid="SID",
+        timeout_seconds=1,
+        host="1.2.3.4",
+        force=True,
+    )
+
+    assert data["trident"]["waste_size_ml"] == 450.0
+    assert data["tridents"][0]["waste_size_ml"] == 450.0
+
+
+async def test_refresh_config_now_applies_waste_size_default_to_tridents_list_and_skips_non_dict_items(
+    hass, enable_custom_integrations
+):
+    coord = await _make_coord(hass)
+    coord.data = {
+        "meta": {"serial": "ABC"},
+        "tridents": [
+            "nope",
+            {"present": True, "abaddr": 99, "levels_ml": [0, 0, 0, 0, 0]},
+        ],
+        "trident": {"present": True, "abaddr": 99, "levels_ml": [0, 0, 0, 0, 0]},
+    }  # type: ignore[assignment]
+
+    coord.async_rest_get_json = AsyncMock(  # type: ignore[method-assign]
+        return_value={
+            "mconf": [
+                {"abaddr": 4, "hwtype": "TRI", "extra": {"wasteSize": 450.0}},
+                # Has abaddr but invalid extra; should be skipped by the wasteSize loop.
+                {"abaddr": 5, "hwtype": "TRI", "extra": "bad"},
+            ]
+        }
+    )
+
+    await coord.async_refresh_config_now()
+
+    assert cast(list[Any], coord.data["tridents"])[1]["waste_size_ml"] == 450.0
+    assert cast(dict[str, Any], coord.data["trident"])["waste_size_ml"] == 450.0
+
+
+async def test_update_data_rest_login_rejected_sets_saw_auth_rejection_and_raises_auth_failed(
+    hass, enable_custom_integrations, monkeypatch
+):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "1.2.3.4", CONF_USERNAME: "user", CONF_PASSWORD: "pw"},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
+    )
+    entry.add_to_hass(hass)
+    coord = ApexNeptuneDataUpdateCoordinator(hass, entry=cast(Any, entry))
+
+    # REST status probe returns 401, and REST login returns 401 repeatedly.
+    sess = _Session(
+        cookie_jar=_CookieJar(None),
+        post_responses=[_Resp(401) for _ in range(6)],
+        put_responses=[],
+        get_responses=[_Resp(401) for _ in range(3)],
+    )
+    monkeypatch.setattr(
+        "custom_components.apex_fusion.coordinator.async_get_clientsession",
+        lambda _h: sess,
+    )
+
+    # Avoid real sleeps in retry loops.
+    monkeypatch.setattr(
+        "custom_components.apex_fusion.coordinator.asyncio.sleep",
+        AsyncMock(),
+    )
+
+    with pytest.raises(ConfigEntryAuthFailed):
+        await coord._async_update_data()
+
+
+async def test_update_data_rest_transient_errors_after_auth_rejection_raise_auth_failed(
+    hass, enable_custom_integrations, monkeypatch
+):
+    """Hit the post-retry saw_auth_rejection -> raise path.
+
+    First update attempt sees auth rejection; later attempts hit transient HTTP errors.
+    The retry loop completes and then raises auth failure due to having seen a
+    rejection earlier.
+    """
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "1.2.3.4", CONF_USERNAME: "user", CONF_PASSWORD: "pw"},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
+    )
+    entry.add_to_hass(hass)
+    coord = ApexNeptuneDataUpdateCoordinator(hass, entry=cast(Any, entry))
+
+    sess = _Session(
+        cookie_jar=_CookieJar(None),
+        # Attempt 1: two 401s -> auth rejected after login-with-retries.
+        # Attempts 2-3: transient HTTP status -> caught and treated as retryable.
+        post_responses=[_Resp(401), _Resp(401), _Resp(503), _Resp(503)],
+        put_responses=[],
+        get_responses=[_Resp(401) for _ in range(3)],
+    )
+    monkeypatch.setattr(
+        "custom_components.apex_fusion.coordinator.async_get_clientsession",
+        lambda _h: sess,
+    )
+    monkeypatch.setattr(
+        "custom_components.apex_fusion.coordinator.asyncio.sleep",
+        AsyncMock(),
+    )
+
+    with pytest.raises(ConfigEntryAuthFailed):
+        await coord._async_update_data()
 
 
 async def test_rest_login_requires_password(hass, enable_custom_integrations):

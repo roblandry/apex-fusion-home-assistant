@@ -78,6 +78,9 @@ def test_sensor_helpers_cover_all_branches():
     assert icon_for_probe_type("alk", "Alk") == "mdi:test-tube"
     assert icon_for_probe_type("ca", "Ca") == "mdi:flask"
     assert icon_for_probe_type("mg", "Mg") == "mdi:flask-outline"
+    assert icon_for_probe_type("no3", "NO3") == "mdi:test-tube"
+    assert icon_for_probe_type("po4", "PO4") == "mdi:test-tube"
+    assert icon_for_probe_type("temp", "Temp") == "mdi:thermometer"
     assert icon_for_probe_type("other", "x") == "mdi:gauge"
 
     assert friendly_probe_name(name="Tmp", probe_type="Tmp") == "Tmp"
@@ -156,6 +159,15 @@ def test_sensor_helpers_cover_all_branches():
     assert as_float(" ") is None
     assert as_float("nope") is None
     assert as_float(object()) is None
+
+    # ProbeMetaResolver._strip_trailing_unit_suffix edge cases
+    assert ProbeMetaResolver._strip_trailing_unit_suffix("", suffix="A") == ""
+    assert ProbeMetaResolver._strip_trailing_unit_suffix("   ", suffix="A") == ""
+    # Not a unit suffix (previous character isn't a digit)
+    assert (
+        ProbeMetaResolver._strip_trailing_unit_suffix("Outlet_3_XA", suffix="A")
+        == "Outlet_3_XA"
+    )
 
     assert units_and_meta(probe_name="x", probe_type="amps", value=1.0)[0] == "A"
     assert units_and_meta(probe_name="x", probe_type="pwr", value=1.0)[0] == "W"
@@ -502,6 +514,16 @@ async def test_sensor_setup_multi_trident_uses_per_module_reagent_labels(
             "meta": {"serial": "ABC", "hostname": "apex"},
             "network": {"ipaddr": "1.2.3.4"},
             "tridents": [
+                # Invalid entry: covers the `abaddr` type guard.
+                {"present": True, "abaddr": "nope", "hwtype": "TRI"},
+                {
+                    "present": True,
+                    "abaddr": 5,
+                    "hwtype": "TNP",
+                    "status": "Idle",
+                    "levels_ml": [0.0, 1.0, 2.0, 3.0, 4.0],
+                },
+                # Duplicate entry: covers the `already added` guard.
                 {
                     "present": True,
                     "abaddr": 5,
@@ -569,6 +591,83 @@ async def test_sensor_setup_multi_trident_uses_per_module_reagent_labels(
     )
     assert (
         by_uid.get("abc_diag_trident_addr6_container_5_level") == "Reagent A Remaining"
+    )
+
+
+def test_outlet_mode_sensor_suggested_object_id_uses_module_token_and_addr() -> None:
+    from custom_components.apex_fusion.apex_fusion import OutletRef
+    from custom_components.apex_fusion.sensor import ApexOutletModeSensor
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "1.2.3.4"},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
+    )
+
+    coordinator = _CoordinatorStub(
+        data={
+            "meta": {"serial": "ABC", "source": "rest"},
+            "outlets": [
+                {
+                    "device_id": "5_I1",
+                    "name": "Return",
+                    "state": "AUTO",
+                    "module_abaddr": 5,
+                    "module_hwtype": "FMM",
+                }
+            ],
+        }
+    )
+
+    sensor = ApexOutletModeSensor(
+        cast(Any, coordinator),
+        cast(Any, entry),
+        ref=OutletRef(did="5_I1", name="Return", dedupe_key="5_I1"),
+    )
+    assert (
+        getattr(sensor, "_attr_suggested_object_id", None)
+        == "apex_1_2_3_4_fmm_5_5_i1_mode"
+    )
+
+
+def test_outlet_intensity_sensor_suggested_object_id_uses_module_token_and_addr() -> (
+    None
+):
+    from custom_components.apex_fusion.apex_fusion import OutletIntensityRef
+    from custom_components.apex_fusion.sensor import ApexOutletIntensitySensor
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "1.2.3.4"},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
+    )
+
+    coordinator = _CoordinatorStub(
+        data={
+            "meta": {"serial": "ABC", "source": "rest"},
+            "outlets": [
+                {
+                    "device_id": "D1",
+                    "name": "Light",
+                    "type": "light",
+                    "intensity": 42,
+                    "module_abaddr": 7,
+                    "module_hwtype": "FMM",
+                }
+            ],
+        }
+    )
+
+    sensor = ApexOutletIntensitySensor(
+        cast(Any, coordinator),
+        cast(Any, entry),
+        ref=OutletIntensityRef(did="D1", name="Light Intensity", dedupe_key="D1"),
+    )
+    assert (
+        getattr(sensor, "_attr_suggested_object_id", None)
+        == "apex_1_2_3_4_fmm_7_d1_intensity"
     )
 
 

@@ -259,9 +259,218 @@ async def test_binary_sensor_digital_probe_skips_and_fallbacks(
     assert raw.device_info.get("via_device") == (DOMAIN, "ABC")
     assert raw.device_info.get("identifiers") == {(DOMAIN, "ABC_module_PM2_7")}
 
+    # Cover _find_probe branch where the probe entry is no longer a dict.
+    coordinator.data["probes"]["DI_RAW"] = "nope"
+    raw.async_write_ha_state = lambda *args, **kwargs: None
+    raw._handle_coordinator_update()
+
+
+async def test_binary_sensor_module_connected_parses_raw_modules_for_presence(
+    hass, enable_custom_integrations
+):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "1.2.3.4"},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
+    )
+    entry.add_to_hass(hass)
+
+    coordinator = _CoordinatorStub(
+        data={
+            "meta": {"serial": "ABC", "source": "rest"},
+            "network": {},
+            "raw": {"modules": [{"abaddr": 9, "hwtype": "FMM", "present": False}]},
+            "config": {
+                "mconf": [
+                    "nope",  # non-dict -> continue
+                    {"abaddr": "nope", "hwtype": "FMM"},  # bad abaddr -> continue
+                    {"abaddr": 1, "hwtype": ""},  # empty hwtype -> continue
+                    {"abaddr": 2, "hwtype": "TRI"},  # trident family -> continue
+                    {"abaddr": 9, "hwtype": "FMM", "name": "My FMM"},
+                ]
+            },
+            "trident": {"present": False},
+            "probes": {},
+        },
+        device_identifier="ABC",
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
+    added: list[Any] = []
+
+    def _add_entities(new_entities, update_before_add: bool = False):
+        added.extend(list(new_entities))
+
+    from custom_components.apex_fusion import binary_sensor
+
+    await binary_sensor.async_setup_entry(hass, cast(Any, entry), _add_entities)
+
+    module_connected = next(
+        (
+            e
+            for e in added
+            if isinstance(e, binary_sensor.ApexModuleConnectedBinarySensor)
+        ),
+        None,
+    )
+    assert module_connected is not None
+    module_connected.async_write_ha_state = lambda *args, **kwargs: None
+
+    # Top-level raw["modules"] list path.
+    module_connected._handle_coordinator_update()
+    assert module_connected._attr_is_on is False
+
+    # When module exists but no explicit present flag: treat as connected.
+    coordinator.data["raw"]["modules"] = [{"abaddr": 9, "hwtype": "FMM"}]
+    module_connected._handle_coordinator_update()
+    assert module_connected._attr_is_on is True
+
+    # When modules exist but module is absent: disconnected.
+    coordinator.data["raw"]["modules"] = [{"abaddr": 10, "hwtype": "FMM"}]
+    module_connected._handle_coordinator_update()
+    assert module_connected._attr_is_on is False
+
+    # Nested raw container path (raw["data"]["modules"]).
+    coordinator.data["raw"] = {"data": {"modules": [{"abaddr": 9, "present": True}]}}
+    module_connected._handle_coordinator_update()
+    assert module_connected._attr_is_on is True
+
+    # Missing raw modules -> unknown.
+    coordinator.data["raw"] = {}
+    module_connected._handle_coordinator_update()
+    assert module_connected._attr_is_on is None
+
+
+async def test_binary_sensor_module_connected_skips_when_mconf_not_list(
+    hass, enable_custom_integrations
+):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "1.2.3.4"},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
+    )
+    entry.add_to_hass(hass)
+
+    coordinator = _CoordinatorStub(
+        data={
+            "meta": {"serial": "ABC", "source": "rest"},
+            "network": {},
+            "config": {"mconf": "nope"},
+            "trident": {"present": False},
+            "probes": {},
+        },
+        device_identifier="ABC",
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
+    added: list[Any] = []
+
+    def _add_entities(new_entities, update_before_add: bool = False):
+        added.extend(list(new_entities))
+
+    from custom_components.apex_fusion import binary_sensor
+
+    await binary_sensor.async_setup_entry(hass, cast(Any, entry), _add_entities)
+
+    assert not any(
+        isinstance(e, binary_sensor.ApexModuleConnectedBinarySensor) for e in added
+    )
+
+
+async def test_binary_sensor_setup_multi_trident_creates_per_module_entities(
+    hass, enable_custom_integrations
+):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "1.2.3.4"},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
+    )
+    entry.add_to_hass(hass)
+
+    coordinator = _CoordinatorStub(
+        data={
+            "meta": {"serial": "ABC", "source": "rest"},
+            "network": {},
+            "tridents": [
+                {
+                    "present": True,
+                    "abaddr": "nope",
+                    "hwtype": "TNP",
+                    "is_testing": True,
+                    "waste_full": False,
+                    "reagent_a_empty": True,
+                    "reagent_b_empty": False,
+                    "reagent_c_empty": False,
+                },
+                {
+                    "present": True,
+                    "abaddr": 5,
+                    "hwtype": "TNP",
+                    "is_testing": True,
+                    "waste_full": False,
+                    "reagent_a_empty": True,
+                    "reagent_b_empty": False,
+                    "reagent_c_empty": False,
+                },
+                # Duplicate entry: covers the `already added` guard.
+                {
+                    "present": True,
+                    "abaddr": 5,
+                    "hwtype": "TNP",
+                    "is_testing": True,
+                    "waste_full": False,
+                    "reagent_a_empty": True,
+                    "reagent_b_empty": False,
+                    "reagent_c_empty": False,
+                },
+                {
+                    "present": True,
+                    "abaddr": 6,
+                    "hwtype": "TRI",
+                    "is_testing": False,
+                    "waste_full": True,
+                    "reagent_a_empty": False,
+                    "reagent_b_empty": True,
+                    "reagent_c_empty": False,
+                },
+            ],
+            # Legacy key present but should be skipped in multi-trident mode.
+            "trident": {"present": True, "abaddr": 5, "hwtype": "TNP"},
+            "probes": {},
+        },
+        device_identifier="ABC",
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
+    added: list[Any] = []
+
+    def _add_entities(new_entities, update_before_add: bool = False):
+        added.extend(list(new_entities))
+
+    from custom_components.apex_fusion import binary_sensor
+
+    await binary_sensor.async_setup_entry(hass, cast(Any, entry), _add_entities)
+
+    # Multi-trident branch should create per-module entities with correct labels.
+    names = {getattr(e, "_attr_name", "") for e in added}
+    assert "Testing" in names
+    assert "Connected" in names
+    assert "Waste Full" in names
+
+    assert "Reagent 1 Empty" in names
+    assert "Reagent 2 Empty" in names
+    assert "Reagent 3 Empty" in names
+    assert "Reagent A Empty" in names
+    assert "Reagent B Empty" in names
+    assert "Reagent C Empty" in names
+
     # Cover _find_probe branch where probe entry is not a dict.
     coordinator.data["probes"]["1"] = "nope"
     for ent in added:
+        ent.async_write_ha_state = lambda *args, **kwargs: None
         ent._handle_coordinator_update()
 
 

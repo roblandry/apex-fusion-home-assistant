@@ -46,6 +46,7 @@ async def test_number_setup_adds_waste_size_and_sets_value(
         data={
             "meta": {"serial": "ABC"},
             "tridents": [
+                "nope",
                 {"present": True, "abaddr": 5, "waste_size_ml": 450.0},
             ],
             "trident": {"present": True, "abaddr": 5, "waste_size_ml": 450.0},
@@ -84,7 +85,7 @@ async def test_number_setup_adds_waste_size_and_sets_value(
     )
 
     # Cover refresh branches and cleanup.
-    coordinator.data["tridents"][0]["waste_size_ml"] = "nope"
+    coordinator.data["tridents"][1]["waste_size_ml"] = "nope"
     ent._handle_coordinator_update()
     assert ent._attr_native_value is None
     coordinator.data["tridents"] = "nope"
