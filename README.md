@@ -5,6 +5,7 @@
 [![Codecov](https://codecov.io/gh/roblandry/apex-fusion-home-assistant/branch/main/graph/badge.svg)](https://codecov.io/gh/roblandry/apex-fusion-home-assistant)
 [![GitHub Clones](https://img.shields.io/badge/dynamic/json?color=success&label=Clone&query=count&url=https://gist.githubusercontent.com/roblandry/90aeef6ae32b7dd94f74f067de2277fb/raw/clone.json&logo=github)](https://github.com/MShawon/github-clone-count-badge)
 ![GH Code Size](https://img.shields.io/github/languages/code-size/roblandry/apex-fusion-home-assistant)
+![integration installs](https://img.shields.io/badge/dynamic/json?color=41BDF5&logo=home-assistant&label=integration%20installs&suffix=%20installs&cacheSeconds=15600&url=https://analytics.home-assistant.io/custom_integrations.json&query=$.apex_fusion.total)
 [![BuyMeCoffee](https://img.shields.io/badge/Buy%20me%20a%20coffee-donate-FFDD00?logo=buymeacoffee&logoColor=black)](https://www.buymeacoffee.com/roblandry)
 
 # Apex Fusion (Local)
