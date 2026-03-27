@@ -1043,7 +1043,7 @@ async def test_sensor_setup_without_network_or_meta_adds_no_diagnostics(
 
     # Diagnostic entities are always created (even if values are None) so they
     # remain stable across updates.
-    assert len(added) == 7
+    assert len(added) == 8
 
 
 async def test_sensor_simple_rest_debug_mode_creates_one_entity_and_updates(

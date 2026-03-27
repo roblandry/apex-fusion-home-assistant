@@ -117,6 +117,44 @@ def _normalize_trident_status(
     return display, ("testing" in lower), status_key
 
 
+def _trident_error_message(error_code: int | None) -> str | None:
+    """Decode Trident-family error codes.
+
+    The REST payload exposes an integer `errorCode` in `modules[].extra`.
+    Neptune appears to use bit flags; we only map the ones we've observed.
+    Unknown codes are still surfaced as a generic message.
+    """
+
+    if error_code is None:
+        return None
+    if isinstance(error_code, bool):
+        return None
+    if error_code <= 0:
+        return None
+
+    # Observed on Trident (TRI):
+    # - 1024 shows as "Test B Failed" in Apex Fusion.
+    # These appear to be bit flags (may be combined).
+    bit_messages: list[str] = []
+    known_bits = 0
+    for bit, msg in (
+        (512, "Test A Failed"),
+        (1024, "Test B Failed"),
+        (2048, "Test C Failed"),
+    ):
+        if error_code & bit:
+            bit_messages.append(msg)
+            known_bits |= bit
+
+    unknown_bits = error_code & ~known_bits
+    if not bit_messages and unknown_bits == error_code:
+        return f"Error code {error_code}"
+    if unknown_bits:
+        bit_messages.append(f"Error bits {unknown_bits}")
+
+    return ", ".join(bit_messages) or f"Error code {error_code}"
+
+
 def clean_hostname_display(hostname: str | None) -> str | None:
     """Return a display-friendly hostname/tank name.
 
@@ -1404,6 +1442,13 @@ def parse_status_rest(status_obj: dict[str, Any]) -> dict[str, Any]:
 
             consumables = _extract_consumables(extra)
 
+            error_code: int | None = None
+            error_message: str | None = None
+            error_code_any: Any = extra.get("errorCode")
+            if isinstance(error_code_any, int) and not isinstance(error_code_any, bool):
+                error_code = error_code_any if error_code_any > 0 else None
+                error_message = _trident_error_message(error_code_any)
+
             status: str | None = None
             is_testing: bool | None = None
             status_any: Any = extra.get("status")
@@ -1418,6 +1463,8 @@ def parse_status_rest(status_obj: dict[str, Any]) -> dict[str, Any]:
                     "status": status,
                     "status_key": status_key,
                     "is_testing": is_testing,
+                    "error_code": error_code,
+                    "error_message": error_message,
                     "abaddr": abaddr,
                     "hwtype": trident_hwtype,
                     "hwrev": trident_hwrev,

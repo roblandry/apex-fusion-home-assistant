@@ -915,6 +915,38 @@ def test_parse_status_rest_trident_status_normalization_prime_and_testing_codes(
     assert out_testing["trident"]["is_testing"] is True
 
 
+def test_parse_status_rest_trident_error_code_is_decoded_when_present():
+    out = coordinator.parse_status_rest(
+        {
+            "modules": [
+                {
+                    "hwtype": "TRI",
+                    "present": True,
+                    "abaddr": 5,
+                    "extra": {"status": "idle", "errorCode": 1024},
+                }
+            ]
+        }
+    )
+    assert out["trident"]["error_code"] == 1024
+    assert out["trident"]["error_message"] == "Test B Failed"
+
+    out_unknown = coordinator.parse_status_rest(
+        {
+            "modules": [
+                {
+                    "hwtype": "TRI",
+                    "present": True,
+                    "abaddr": 5,
+                    "extra": {"status": "idle", "errorCode": 256},
+                }
+            ]
+        }
+    )
+    assert out_unknown["trident"]["error_code"] == 256
+    assert out_unknown["trident"]["error_message"] == "Error code 256"
+
+
 def test_parse_feed_variants_cover_uncovered_branches():
     # REST feed: float should coerce to int.
     rest_float = {"system": {"serial": "ABC"}, "feed": 2.0}

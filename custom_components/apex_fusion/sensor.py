@@ -288,6 +288,82 @@ async def async_setup_entry(
         )
 
     # Always-available diagnostics (when the controller reports them).
+    def _active_errors_value(data: dict[str, Any]) -> str | None:
+        parts: list[str] = []
+
+        # Trident-family errors.
+        tridents_any: Any = data.get("tridents")
+        if isinstance(tridents_any, list):
+            for t_any in cast(list[Any], tridents_any):
+                if not isinstance(t_any, dict):
+                    continue
+                t = cast(dict[str, Any], t_any)
+                msg_any: Any = t.get("error_message")
+                if not isinstance(msg_any, str) or not msg_any.strip():
+                    continue
+                abaddr_any: Any = t.get("abaddr")
+                label = (
+                    f"Trident ({abaddr_any})"
+                    if isinstance(abaddr_any, int)
+                    else "Trident"
+                )
+                parts.append(f"{label}: {msg_any.strip()}")
+        else:
+            trident_any: Any = data.get("trident")
+            if isinstance(trident_any, dict):
+                msg_any: Any = cast(dict[str, Any], trident_any).get("error_message")
+                if isinstance(msg_any, str) and msg_any.strip():
+                    parts.append(f"Trident: {msg_any.strip()}")
+
+        # Outlet-level error tokens (e.g. "Error_4f").
+        outlets_any: Any = data.get("outlets")
+        if isinstance(outlets_any, list):
+            for o_any in cast(list[Any], outlets_any):
+                if not isinstance(o_any, dict):
+                    continue
+                outlet = cast(dict[str, Any], o_any)
+                status_any: Any = outlet.get("status")
+                if not isinstance(status_any, list):
+                    continue
+                err: str | None = None
+                for item_any in cast(list[Any], status_any):
+                    if item_any is None:
+                        continue
+                    text = str(item_any).strip()
+                    if text.startswith("Error_"):
+                        err = text
+                        break
+                if not err:
+                    continue
+                name_any: Any = outlet.get("name")
+                name = str(name_any).strip() if name_any is not None else "Outlet"
+                parts.append(f"{name}: {err}")
+
+        # MXM-attached device errors.
+        mxm_any: Any = data.get("mxm_devices")
+        if isinstance(mxm_any, dict):
+            for dev_name, dev_any in cast(dict[str, Any], mxm_any).items():
+                if not isinstance(dev_any, dict):
+                    continue
+                dev = cast(dict[str, Any], dev_any)
+                status_any: Any = dev.get("status")
+                if not isinstance(status_any, str) or not status_any.strip():
+                    continue
+                status = status_any.strip()
+                if status.upper() == "OK":
+                    continue
+                idx_any: Any = dev.get("device_index")
+                idx = f"#{idx_any}" if isinstance(idx_any, int) else None
+                label = str(dev_name).strip() if str(dev_name).strip() else "MXM device"
+                if idx:
+                    label = f"{label} ({idx})"
+                parts.append(f"{label}: {status}")
+
+        if not parts:
+            return None
+        # Keep sensor state compact.
+        return "; ".join(parts[:10])
+
     diagnostic_entities.append(
         ApexDiagnosticSensor(
             coordinator,
@@ -296,6 +372,17 @@ async def async_setup_entry(
             name="Last Alert Statement",
             icon=ICON_ALERT_CIRCLE_OUTLINE,
             value_fn=section_field("alerts", "last_statement"),
+        )
+    )
+
+    diagnostic_entities.append(
+        ApexDiagnosticSensor(
+            coordinator,
+            entry,
+            unique_id=f"{serial_for_ids}_diag_active_errors".lower(),
+            name="Active Errors",
+            icon=ICON_ALERT_CIRCLE_OUTLINE,
+            value_fn=_active_errors_value,
         )
     )
 
