@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## v0.1.6
+
+### CI
+
+- add a login check script
+- pytest 100%
+
+### Chores
+
+- Add integration installs badge to README
+
+### Features
+
+- expose error codes
+- add DOS/DQD sensors
+
+### Fixes
+
+- reorder tri/tnp prime buttons to map to correct reagent
+- tnp/tri testing status inconsistent capitalization
+- mxm_status line in selects
+- login regression
+
 ## v0.1.5
 
 ### Chores
@@ -9,6 +32,7 @@ All notable changes to this project will be documented in this file.
 - update meta for no3 and po4
 - Automatically added GitHub issue links to TODOs
 - remove unreachable return
+- v0.1.5
 
 ### Features
 
