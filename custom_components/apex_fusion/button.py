@@ -223,13 +223,18 @@ async def async_setup_entry(
             else:
                 reagent_labels = ("A", "B", "C")
 
+            # Apex exposes Trident-family reagent channels in reverse order
+            # (C,B,A) in both status `levels` and config command payloads.
+            # Map UI order (A/1, B/2, C/3) to controller channel indexes.
+            reagent_channel_indexes = (2, 1, 0)
+
             refs: list[_TridentButtonRef] = [
                 _TridentButtonRef(
                     key=f"{key_prefix}_prime_reagent_{reagent_labels[0].lower()}",
                     name=f"Prime Reagent {reagent_labels[0]}",
                     icon=ICON_PUMP,
                     press_fn=lambda c, abaddr=abaddr_any: c.async_trident_prime_channel(
-                        channel_index=0, trident_abaddr=abaddr
+                        channel_index=reagent_channel_indexes[0], trident_abaddr=abaddr
                     ),
                 ),
                 _TridentButtonRef(
@@ -237,7 +242,7 @@ async def async_setup_entry(
                     name=f"Prime Reagent {reagent_labels[1]}",
                     icon=ICON_PUMP,
                     press_fn=lambda c, abaddr=abaddr_any: c.async_trident_prime_channel(
-                        channel_index=1, trident_abaddr=abaddr
+                        channel_index=reagent_channel_indexes[1], trident_abaddr=abaddr
                     ),
                 ),
                 _TridentButtonRef(
@@ -245,7 +250,7 @@ async def async_setup_entry(
                     name=f"Prime Reagent {reagent_labels[2]}",
                     icon=ICON_PUMP,
                     press_fn=lambda c, abaddr=abaddr_any: c.async_trident_prime_channel(
-                        channel_index=2, trident_abaddr=abaddr
+                        channel_index=reagent_channel_indexes[2], trident_abaddr=abaddr
                     ),
                 ),
                 _TridentButtonRef(
@@ -261,7 +266,7 @@ async def async_setup_entry(
                     name=f"Reset Reagent {reagent_labels[0]}",
                     icon=ICON_FLASK_EMPTY_PLUS_OUTLINE,
                     press_fn=lambda c, abaddr=abaddr_any: c.async_trident_reset_reagent(
-                        reagent_index=0, trident_abaddr=abaddr
+                        reagent_index=reagent_channel_indexes[0], trident_abaddr=abaddr
                     ),
                 ),
                 _TridentButtonRef(
@@ -269,7 +274,7 @@ async def async_setup_entry(
                     name=f"Reset Reagent {reagent_labels[1]}",
                     icon=ICON_FLASK_EMPTY_PLUS_OUTLINE,
                     press_fn=lambda c, abaddr=abaddr_any: c.async_trident_reset_reagent(
-                        reagent_index=1, trident_abaddr=abaddr
+                        reagent_index=reagent_channel_indexes[1], trident_abaddr=abaddr
                     ),
                 ),
                 _TridentButtonRef(
@@ -277,7 +282,7 @@ async def async_setup_entry(
                     name=f"Reset Reagent {reagent_labels[2]}",
                     icon=ICON_FLASK_EMPTY_PLUS_OUTLINE,
                     press_fn=lambda c, abaddr=abaddr_any: c.async_trident_reset_reagent(
-                        reagent_index=2, trident_abaddr=abaddr
+                        reagent_index=reagent_channel_indexes[2], trident_abaddr=abaddr
                     ),
                 ),
                 _TridentButtonRef(

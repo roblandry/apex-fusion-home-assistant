@@ -137,6 +137,134 @@ async def test_button_setup_adds_trident_np_buttons_when_present_false(
     assert coordinator.async_trident_reset_waste.await_count == 1
 
 
+async def test_trident_button_channel_mapping_tri(hass, enable_custom_integrations):
+    """Ensure Prime/Reset buttons map to controller channel ordering (C,B,A)."""
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "1.2.3.4", CONF_PASSWORD: "pw"},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
+    )
+    entry.add_to_hass(hass)
+
+    coordinator = _CoordinatorStub(
+        data={
+            "meta": {"serial": "ABC"},
+            "trident": {"present": True, "abaddr": 5, "hwtype": "TRI"},
+        },
+        device_identifier="ABC",
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
+    added: list[Any] = []
+
+    def _add_entities(new_entities, update_before_add: bool = False):
+        added.extend(list(new_entities))
+
+    from custom_components.apex_fusion import button
+
+    await button.async_setup_entry(hass, cast(Any, entry), _add_entities)
+
+    trident_buttons = [e for e in added if isinstance(e, button.ApexTridentButton)]
+    by_key = {
+        getattr(getattr(e, "_ref", None), "key", None): e for e in trident_buttons
+    }
+
+    # Prime reagent A/B/C should map to channel indexes 2/1/0.
+    await by_key["trident_prime_reagent_a"].async_press()
+    await by_key["trident_prime_reagent_b"].async_press()
+    await by_key["trident_prime_reagent_c"].async_press()
+
+    coordinator.async_trident_prime_channel.assert_any_await(
+        channel_index=2, trident_abaddr=5
+    )
+    coordinator.async_trident_prime_channel.assert_any_await(
+        channel_index=1, trident_abaddr=5
+    )
+    coordinator.async_trident_prime_channel.assert_any_await(
+        channel_index=0, trident_abaddr=5
+    )
+
+    # Reset reagent A/B/C should map to indexes 2/1/0.
+    await by_key["trident_reset_reagent_a"].async_press()
+    await by_key["trident_reset_reagent_b"].async_press()
+    await by_key["trident_reset_reagent_c"].async_press()
+
+    coordinator.async_trident_reset_reagent.assert_any_await(
+        reagent_index=2, trident_abaddr=5
+    )
+    coordinator.async_trident_reset_reagent.assert_any_await(
+        reagent_index=1, trident_abaddr=5
+    )
+    coordinator.async_trident_reset_reagent.assert_any_await(
+        reagent_index=0, trident_abaddr=5
+    )
+
+
+async def test_trident_button_channel_mapping_tnp(hass, enable_custom_integrations):
+    """Ensure NP Prime/Reset buttons map 1/2/3 to channel indexes 2/1/0."""
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "1.2.3.4", CONF_PASSWORD: "pw"},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
+    )
+    entry.add_to_hass(hass)
+
+    coordinator = _CoordinatorStub(
+        data={
+            "meta": {"serial": "ABC"},
+            "trident": {"present": True, "abaddr": 3, "hwtype": "TNP"},
+        },
+        device_identifier="ABC",
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
+    added: list[Any] = []
+
+    def _add_entities(new_entities, update_before_add: bool = False):
+        added.extend(list(new_entities))
+
+    from custom_components.apex_fusion import button
+
+    await button.async_setup_entry(hass, cast(Any, entry), _add_entities)
+
+    trident_buttons = [e for e in added if isinstance(e, button.ApexTridentButton)]
+    by_key = {
+        getattr(getattr(e, "_ref", None), "key", None): e for e in trident_buttons
+    }
+
+    await by_key["trident_prime_reagent_1"].async_press()
+    await by_key["trident_prime_reagent_2"].async_press()
+    await by_key["trident_prime_reagent_3"].async_press()
+
+    coordinator.async_trident_prime_channel.assert_any_await(
+        channel_index=2, trident_abaddr=3
+    )
+    coordinator.async_trident_prime_channel.assert_any_await(
+        channel_index=1, trident_abaddr=3
+    )
+    coordinator.async_trident_prime_channel.assert_any_await(
+        channel_index=0, trident_abaddr=3
+    )
+
+    await by_key["trident_reset_reagent_1"].async_press()
+    await by_key["trident_reset_reagent_2"].async_press()
+    await by_key["trident_reset_reagent_3"].async_press()
+
+    coordinator.async_trident_reset_reagent.assert_any_await(
+        reagent_index=2, trident_abaddr=3
+    )
+    coordinator.async_trident_reset_reagent.assert_any_await(
+        reagent_index=1, trident_abaddr=3
+    )
+    coordinator.async_trident_reset_reagent.assert_any_await(
+        reagent_index=0, trident_abaddr=3
+    )
+
+
 async def test_button_setup_multi_trident_list_creates_addr_prefixed_buttons_and_object_ids(
     hass, enable_custom_integrations
 ):
