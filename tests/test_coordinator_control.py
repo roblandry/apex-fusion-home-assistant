@@ -270,9 +270,12 @@ async def test_update_data_rest_login_rejected_sets_saw_auth_rejection_and_raise
     # REST status probe returns 401, and REST login returns 401 repeatedly.
     sess = _Session(
         cookie_jar=_CookieJar(None),
-        post_responses=[_Resp(401) for _ in range(6)],
+        # Coordinator now does a lightweight preflight GET and retries REST login
+        # several times to match real controller flakiness.
+        post_responses=[_Resp(401) for _ in range(12)],
         put_responses=[],
-        get_responses=[_Resp(401) for _ in range(3)],
+        # 1x REST status probe + 12x preflight GETs during login retries.
+        get_responses=[_Resp(401)] + [_Resp(200) for _ in range(12)],
     )
     monkeypatch.setattr(
         "custom_components.apex_fusion.coordinator.async_get_clientsession",
@@ -312,9 +315,19 @@ async def test_update_data_rest_transient_errors_after_auth_rejection_raise_auth
         cookie_jar=_CookieJar(None),
         # Attempt 1: two 401s -> auth rejected after login-with-retries.
         # Attempts 2-3: transient HTTP status -> caught and treated as retryable.
-        post_responses=[_Resp(401), _Resp(401), _Resp(503), _Resp(503)],
+        post_responses=[
+            # Attempt 1: exhaust login retries.
+            _Resp(401),
+            _Resp(401),
+            _Resp(401),
+            _Resp(401),
+            # Attempts 2-3: transient HTTP status -> caught and treated as retryable.
+            _Resp(503),
+            _Resp(503),
+        ],
         put_responses=[],
-        get_responses=[_Resp(401) for _ in range(3)],
+        # 1x REST status probe + 4x preflight GETs (attempt 1) + 1x preflight each (attempts 2-3).
+        get_responses=[_Resp(401)] + [_Resp(200) for _ in range(6)],
     )
     monkeypatch.setattr(
         "custom_components.apex_fusion.coordinator.async_get_clientsession",
@@ -431,7 +444,9 @@ async def test_rest_login_rejected_raises_http_status(hass, enable_custom_integr
     # Both candidates reject auth; last_status should be set and last_error is None.
     sess = _Session(
         cookie_jar=_CookieJar(None),
-        post_responses=[_Resp(401, text=""), _Resp(403, text="")],
+        # Coordinator retries REST login multiple times before failing.
+        # Ensure the final attempt yields a 403 so the error message includes it.
+        post_responses=[_Resp(401, text="") for _ in range(7)] + [_Resp(403, text="")],
         put_responses=[],
     )
 

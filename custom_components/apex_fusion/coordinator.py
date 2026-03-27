@@ -2292,66 +2292,91 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         last_status: int | None = None
         last_error: Exception | None = None
         for login_user in login_candidates:
-            try:
-                async with async_timeout.timeout(timeout_seconds):
-                    async with session.post(
-                        login_url,
-                        json={
-                            "login": login_user,
-                            "password": password,
-                            "remember_me": False,
-                        },
-                        headers={
-                            "Accept": "*/*",
-                            "Content-Type": "application/json",
-                        },
-                    ) as resp:
-                        last_status = resp.status
-                        if resp.status == 404:
-                            raise FileNotFoundError
-                        if resp.status in (401, 403):
-                            continue
-                        if resp.status == 429:
-                            retry_after = self._parse_retry_after_seconds(resp.headers)
-                            backoff = (
-                                float(retry_after) if retry_after is not None else 300.0
+            max_login_attempts = 4
+            for login_attempt in range(1, max_login_attempts + 1):
+                try:
+                    async with async_timeout.timeout(timeout_seconds):
+                        async with session.post(
+                            login_url,
+                            json={
+                                "login": login_user,
+                                "password": password,
+                                "remember_me": False,
+                            },
+                            headers={
+                                "Accept": "*/*",
+                                "Content-Type": "application/json",
+                                "User-Agent": "HomeAssistant-ApexFusion",
+                            },
+                        ) as resp:
+                            last_status = resp.status
+                            _LOGGER.debug(
+                                "REST login (control) host=%s user=%s HTTP %s attempt=%s/%s",
+                                host,
+                                login_user,
+                                resp.status,
+                                login_attempt,
+                                max_login_attempts,
                             )
-                            self._disable_rest(
-                                seconds=backoff, reason="rate_limited_control"
+                            if resp.status == 404:
+                                raise FileNotFoundError
+                            if resp.status in (401, 403):
+                                if login_attempt < max_login_attempts:
+                                    await asyncio.sleep(0.25 * login_attempt)
+                                    continue
+                                break
+                            if resp.status == 429:
+                                retry_after = self._parse_retry_after_seconds(
+                                    resp.headers
+                                )
+                                backoff = (
+                                    float(retry_after)
+                                    if retry_after is not None
+                                    else 300.0
+                                )
+                                self._disable_rest(
+                                    seconds=backoff, reason="rate_limited_control"
+                                )
+                                raise HomeAssistantError(
+                                    f"Controller rate limited REST login; retry after ~{int(backoff)}s"
+                                )
+
+                            resp.raise_for_status()
+                            body = await resp.text()
+
+                    # Prefer Set-Cookie.
+                    morsel = resp.cookies.get("connect.sid")
+                    if morsel is not None and morsel.value:
+                        self._rest_sid = morsel.value
+                        _set_connect_sid_cookie(
+                            session, base_url=base_url, sid=morsel.value
+                        )
+                        return morsel.value
+
+                    # Fallback: JSON body.
+                    login_any: Any = json.loads(body) if body else {}
+                    if isinstance(login_any, dict):
+                        sid_any: Any = cast(dict[str, Any], login_any).get(
+                            "connect.sid"
+                        )
+                        if isinstance(sid_any, str) and sid_any:
+                            self._rest_sid = sid_any
+                            _set_connect_sid_cookie(
+                                session, base_url=base_url, sid=sid_any
                             )
-                            raise HomeAssistantError(
-                                f"Controller rate limited REST login; retry after ~{int(backoff)}s"
-                            )
+                            return sid_any
 
-                        resp.raise_for_status()
-                        body = await resp.text()
-
-                # Prefer Set-Cookie.
-                morsel = resp.cookies.get("connect.sid")
-                if morsel is not None and morsel.value:
-                    self._rest_sid = morsel.value
-                    _set_connect_sid_cookie(
-                        session, base_url=base_url, sid=morsel.value
-                    )
-                    return morsel.value
-
-                # Fallback: JSON body.
-                login_any: Any = json.loads(body) if body else {}
-                if isinstance(login_any, dict):
-                    sid_any: Any = cast(dict[str, Any], login_any).get("connect.sid")
-                    if isinstance(sid_any, str) and sid_any:
-                        self._rest_sid = sid_any
-                        _set_connect_sid_cookie(session, base_url=base_url, sid=sid_any)
-                        return sid_any
-            except FileNotFoundError:
-                raise
-            except (
-                asyncio.TimeoutError,
-                aiohttp.ClientError,
-                json.JSONDecodeError,
-            ) as err:
-                last_error = err
-                continue
+                except FileNotFoundError:
+                    raise
+                except (
+                    asyncio.TimeoutError,
+                    aiohttp.ClientError,
+                    json.JSONDecodeError,
+                ) as err:
+                    last_error = err
+                    if login_attempt < max_login_attempts:
+                        await asyncio.sleep(0.25 * login_attempt)
+                    continue
 
         self._rest_sid = None
         if last_error is not None:
@@ -2770,6 +2795,7 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     accept_headers = {
                         "Accept": "*/*",
                         "Content-Type": "application/json",
+                        "User-Agent": "HomeAssistant-ApexFusion",
                     }
 
                     def _candidate_status_urls() -> list[str]:
@@ -2957,7 +2983,7 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             The connect.sid value if found, otherwise None.
                         """
 
-                        max_login_attempts = 2
+                        max_login_attempts = 4
 
                         for login_attempt in range(1, max_login_attempts + 1):
                             try:
@@ -2972,7 +2998,11 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     # Clear cookies between attempts to avoid stale/invalid
                                     # session state causing an immediate 401 loop.
                                     try:
-                                        session.cookie_jar.clear()
+                                        cookies = session.cookie_jar.filter_cookies(
+                                            URL(base_url)
+                                        )
+                                        if cookies.get("connect.sid") is not None:
+                                            session.cookie_jar.clear()
                                     except Exception:
                                         pass
 

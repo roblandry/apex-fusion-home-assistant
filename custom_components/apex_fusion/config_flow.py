@@ -326,7 +326,11 @@ async def _async_validate_input(
     if password:
         try:
             login_url = f"{base_url}/rest/login"
-            accept_headers = {"Accept": "*/*", "Content-Type": "application/json"}
+            accept_headers = {
+                "Accept": "*/*",
+                "Content-Type": "application/json",
+                "User-Agent": "HomeAssistant-ApexFusion",
+            }
 
             max_attempts = 2
             for attempt in range(1, max_attempts + 1):
@@ -353,38 +357,49 @@ async def _async_validate_input(
 
                     logged_in = False
                     for login_user in login_candidates:
-                        async with async_timeout.timeout(10):
-                            async with session.post(
-                                login_url,
-                                json={
-                                    "login": login_user,
-                                    "password": password,
-                                    "remember_me": False,
-                                },
-                                headers=accept_headers,
-                            ) as resp:
-                                _LOGGER.debug(
-                                    "REST login HTTP %s content_type=%s",
-                                    resp.status,
-                                    resp.headers.get("Content-Type"),
-                                )
-                                if resp.status == 404:
-                                    raise KeyError("rest_not_supported")
-                                if resp.status in (401, 403):
+                        max_login_attempts = 4
+                        for login_attempt in range(1, max_login_attempts + 1):
+                            async with async_timeout.timeout(10):
+                                async with session.post(
+                                    login_url,
+                                    json={
+                                        "login": login_user,
+                                        "password": password,
+                                        "remember_me": False,
+                                    },
+                                    headers=accept_headers,
+                                ) as resp:
                                     _LOGGER.debug(
-                                        "REST login rejected for user=%s; trying next candidate",
+                                        "REST login HTTP %s content_type=%s user=%s attempt=%s/%s",
+                                        resp.status,
+                                        resp.headers.get("Content-Type"),
                                         login_user,
+                                        login_attempt,
+                                        max_login_attempts,
                                     )
-                                    continue
-                                if _is_transient_http_status(resp.status):
-                                    raise CannotConnect
-                                resp.raise_for_status()
-                                login_body = await resp.text()
+                                    if resp.status == 404:
+                                        raise KeyError("rest_not_supported")
+                                    if resp.status in (401, 403):
+                                        # Some controllers intermittently reject the first login.
+                                        if login_attempt < max_login_attempts:
+                                            await asyncio.sleep(0.25 * login_attempt)
+                                            continue
+                                        _LOGGER.debug(
+                                            "REST login rejected for user=%s; trying next candidate",
+                                            login_user,
+                                        )
+                                        break
+                                    if _is_transient_http_status(resp.status):
+                                        raise CannotConnect
+                                    resp.raise_for_status()
+                                    login_body = await resp.text()
 
-                                morsel = resp.cookies.get("connect.sid")
-                                if morsel is not None and morsel.value:
-                                    login_cookie_sid = morsel.value
-                                logged_in = True
+                                    morsel = resp.cookies.get("connect.sid")
+                                    if morsel is not None and morsel.value:
+                                        login_cookie_sid = morsel.value
+                                    logged_in = True
+                                    break
+                            if logged_in:
                                 break
 
                     if not logged_in:
