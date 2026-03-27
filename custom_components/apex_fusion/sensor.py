@@ -31,6 +31,8 @@ from homeassistant.util import slugify
 from .apex_fusion import (
     ApexDiscovery,
     ApexFusionContext,
+    OutletDoserCapacityRef,
+    OutletDoserRemainingRef,
     OutletIntensityRef,
     OutletMode,
     OutletRef,
@@ -137,6 +139,8 @@ def icon_for_outlet_type(outlet_type: str | None) -> str | None:
     """
 
     t = (outlet_type or "").strip().upper()
+    if t in {"DOS", "DQD"}:
+        return ICON_PUMP
     if "PUMP" in t:
         return ICON_PUMP
     if "LIGHT" in t:
@@ -169,6 +173,8 @@ async def async_setup_entry(
 
     added_probe_keys: set[str] = set()
     added_outlet_intensity_dids: set[str] = set()
+    added_outlet_doser_remaining_dids: set[str] = set()
+    added_outlet_doser_capacity_dids: set[str] = set()
     added_outlet_mode_dids: set[str] = set()
 
     source = str(ctx.meta.get("source") or "").strip().lower()
@@ -209,6 +215,32 @@ async def async_setup_entry(
         if outlet_entities:
             async_add_entities(outlet_entities)
         added_outlet_intensity_dids.update(seen_outlet_dids)
+
+        doser_refs, seen_doser_dids = ApexDiscovery.new_outlet_doser_remaining_refs(
+            coordinator_data,
+            already_added_dids=added_outlet_doser_remaining_dids,
+        )
+        doser_entities: list[SensorEntity] = [
+            ApexOutletDoserRemainingSensor(coordinator, entry, ref=ref)
+            for ref in doser_refs
+        ]
+        if doser_entities:
+            async_add_entities(doser_entities)
+        added_outlet_doser_remaining_dids.update(seen_doser_dids)
+
+        capacity_refs, seen_capacity_dids = (
+            ApexDiscovery.new_outlet_doser_capacity_refs(
+                coordinator_data,
+                already_added_dids=added_outlet_doser_capacity_dids,
+            )
+        )
+        capacity_entities: list[SensorEntity] = [
+            ApexOutletDoserCapacitySensor(coordinator, entry, ref=ref)
+            for ref in capacity_refs
+        ]
+        if capacity_entities:
+            async_add_entities(capacity_entities)
+        added_outlet_doser_capacity_dids.update(seen_capacity_dids)
 
         if expose_outlet_mode_sensors:
             outlet_mode_refs, seen_mode_dids = ApexDiscovery.new_outlet_select_refs(
@@ -1255,6 +1287,316 @@ class ApexOutletIntensitySensor(SensorEntity):
         outlet_type_any: Any = outlet.get("type")
         outlet_type = outlet_type_any if isinstance(outlet_type_any, str) else None
         self._attr_icon = icon_for_outlet_type(outlet_type) or ICON_BRIGHTNESS_PERCENT
+        self._refresh()
+        self.async_write_ha_state()
+
+    async def async_added_to_hass(self) -> None:
+        self._unsub = self._coordinator.async_add_listener(
+            self._handle_coordinator_update
+        )
+        self._handle_coordinator_update()
+
+    async def async_will_remove_from_hass(self) -> None:
+        if self._unsub is not None:
+            self._unsub()
+            self._unsub = None
+
+
+class ApexOutletDoserRemainingSensor(SensorEntity):
+    """Sensor exposing remaining volume for DOS/DQD dosing pump outputs."""
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+    _attr_native_unit_of_measurement = UnitOfVolume.MILLILITERS
+    _attr_device_class = SensorDeviceClass.VOLUME
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(
+        self,
+        coordinator: ApexNeptuneDataUpdateCoordinator,
+        entry: ConfigEntry,
+        *,
+        ref: OutletDoserRemainingRef,
+    ) -> None:
+        super().__init__()
+        self._coordinator = coordinator
+        self._entry = entry
+        self._ref = ref
+        self._unsub: Callable[[], None] | None = None
+
+        ctx = ApexFusionContext.from_entry_and_coordinator(entry, coordinator)
+
+        self._attr_unique_id = (
+            f"{ctx.serial_for_ids}_outlet_doser_remaining_{ref.dedupe_key}".lower()
+        )
+        self._attr_name = ref.name
+
+        outlet = self._find_outlet()
+        outlet_type_any: Any = outlet.get("type")
+        outlet_type = outlet_type_any if isinstance(outlet_type_any, str) else None
+        self._attr_icon = icon_for_outlet_type(outlet_type) or ICON_PUMP
+
+        module_abaddr_any: Any = outlet.get("module_abaddr")
+        module_abaddr = (
+            module_abaddr_any if isinstance(module_abaddr_any, int) else None
+        )
+
+        module_hwtype_hint: str | None = None
+        module_hwtype_any: Any = outlet.get("module_hwtype")
+        if isinstance(module_hwtype_any, str) and module_hwtype_any.strip():
+            module_hwtype_hint = module_hwtype_any
+
+        if not module_hwtype_hint:
+            module_hwtype_hint = normalize_module_hwtype_from_outlet_type(outlet_type)
+
+        if module_abaddr is None:
+            module_abaddr = module_abaddr_from_input_did(ref.did)
+
+        if module_abaddr is None and module_hwtype_hint:
+            module_abaddr = unambiguous_module_abaddr_from_config(
+                coordinator.data or {}, module_hwtype=module_hwtype_hint
+            )
+
+        tank_slug = ctx.tank_slug_with_entry_title(entry.title)
+        did_slug = str(ref.dedupe_key or "").strip().lower() or "doser"
+        if isinstance(module_abaddr, int) and module_hwtype_hint:
+            self._attr_suggested_object_id = ctx.object_id(
+                tank_slug,
+                ctx.module_token(module_hwtype_hint),
+                module_abaddr,
+                did_slug,
+                "remaining_volume",
+            )
+        else:
+            self._attr_suggested_object_id = ctx.object_id(
+                tank_slug, "apex", did_slug, "remaining_volume"
+            )
+
+        module_device_info: DeviceInfo | None = (
+            build_aquabus_child_device_info_from_data(
+                host=ctx.host,
+                controller_meta=ctx.meta,
+                controller_device_identifier=ctx.controller_device_identifier,
+                data=coordinator.data or {},
+                module_abaddr=module_abaddr,
+                tank_slug=tank_slug,
+            )
+            if isinstance(module_abaddr, int)
+            else None
+        )
+
+        self._attr_device_info = module_device_info or build_device_info(
+            host=ctx.host,
+            meta=ctx.meta,
+            device_identifier=ctx.controller_device_identifier,
+            tank_slug=tank_slug,
+        )
+
+        self._attr_available = bool(
+            getattr(self._coordinator, "last_update_success", True)
+        )
+        self._refresh()
+
+    def _find_outlet(self) -> dict[str, Any]:
+        data = self._coordinator.data or {}
+        outlets_any: Any = data.get("outlets", [])
+        if not isinstance(outlets_any, list):
+            return {}
+        for outlet_any in cast(list[Any], outlets_any):
+            if not isinstance(outlet_any, dict):
+                continue
+            outlet = cast(dict[str, Any], outlet_any)
+            if str(outlet.get("device_id") or "") == self._ref.did:
+                return outlet
+        return {}
+
+    def _refresh(self) -> None:
+        outlet = self._find_outlet()
+        remaining_any: Any = outlet.get("doser_remaining_ml")
+        if isinstance(remaining_any, (int, float)) and not isinstance(
+            remaining_any, bool
+        ):
+            self._attr_native_value = float(remaining_any)
+        else:
+            self._attr_native_value = None
+
+        attrs: dict[str, Any] = {}
+        for key in (
+            "state",
+            "type",
+            "output_id",
+            "gid",
+            "status",
+            "doser_capacity_ml",
+            "doser_remaining_ml",
+        ):
+            if key in outlet:
+                attrs[key] = outlet.get(key)
+        self._attr_extra_state_attributes = attrs
+
+    def _handle_coordinator_update(self) -> None:
+        self._attr_available = bool(
+            getattr(self._coordinator, "last_update_success", True)
+        )
+        outlet = self._find_outlet()
+        outlet_type_any: Any = outlet.get("type")
+        outlet_type = outlet_type_any if isinstance(outlet_type_any, str) else None
+        self._attr_icon = icon_for_outlet_type(outlet_type) or ICON_PUMP
+        self._refresh()
+        self.async_write_ha_state()
+
+    async def async_added_to_hass(self) -> None:
+        self._unsub = self._coordinator.async_add_listener(
+            self._handle_coordinator_update
+        )
+        self._handle_coordinator_update()
+
+    async def async_will_remove_from_hass(self) -> None:
+        if self._unsub is not None:
+            self._unsub()
+            self._unsub = None
+
+
+class ApexOutletDoserCapacitySensor(SensorEntity):
+    """Sensor exposing reservoir capacity for DOS/DQD dosing pump outputs."""
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+    _attr_native_unit_of_measurement = UnitOfVolume.MILLILITERS
+    _attr_device_class = SensorDeviceClass.VOLUME
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(
+        self,
+        coordinator: ApexNeptuneDataUpdateCoordinator,
+        entry: ConfigEntry,
+        *,
+        ref: OutletDoserCapacityRef,
+    ) -> None:
+        super().__init__()
+        self._coordinator = coordinator
+        self._entry = entry
+        self._ref = ref
+        self._unsub: Callable[[], None] | None = None
+
+        ctx = ApexFusionContext.from_entry_and_coordinator(entry, coordinator)
+
+        self._attr_unique_id = (
+            f"{ctx.serial_for_ids}_outlet_doser_capacity_{ref.dedupe_key}".lower()
+        )
+        self._attr_name = ref.name
+
+        outlet = self._find_outlet()
+        outlet_type_any: Any = outlet.get("type")
+        outlet_type = outlet_type_any if isinstance(outlet_type_any, str) else None
+        self._attr_icon = icon_for_outlet_type(outlet_type) or ICON_PUMP
+
+        module_abaddr_any: Any = outlet.get("module_abaddr")
+        module_abaddr = (
+            module_abaddr_any if isinstance(module_abaddr_any, int) else None
+        )
+
+        module_hwtype_hint: str | None = None
+        module_hwtype_any: Any = outlet.get("module_hwtype")
+        if isinstance(module_hwtype_any, str) and module_hwtype_any.strip():
+            module_hwtype_hint = module_hwtype_any
+
+        if not module_hwtype_hint:
+            module_hwtype_hint = normalize_module_hwtype_from_outlet_type(outlet_type)
+
+        if module_abaddr is None:
+            module_abaddr = module_abaddr_from_input_did(ref.did)
+
+        if module_abaddr is None and module_hwtype_hint:
+            module_abaddr = unambiguous_module_abaddr_from_config(
+                coordinator.data or {}, module_hwtype=module_hwtype_hint
+            )
+
+        tank_slug = ctx.tank_slug_with_entry_title(entry.title)
+        did_slug = str(ref.dedupe_key or "").strip().lower() or "doser"
+        if isinstance(module_abaddr, int) and module_hwtype_hint:
+            self._attr_suggested_object_id = ctx.object_id(
+                tank_slug,
+                ctx.module_token(module_hwtype_hint),
+                module_abaddr,
+                did_slug,
+                "capacity",
+            )
+        else:
+            self._attr_suggested_object_id = ctx.object_id(
+                tank_slug, "apex", did_slug, "capacity"
+            )
+
+        module_device_info: DeviceInfo | None = (
+            build_aquabus_child_device_info_from_data(
+                host=ctx.host,
+                controller_meta=ctx.meta,
+                controller_device_identifier=ctx.controller_device_identifier,
+                data=coordinator.data or {},
+                module_abaddr=module_abaddr,
+                tank_slug=tank_slug,
+            )
+            if isinstance(module_abaddr, int)
+            else None
+        )
+
+        self._attr_device_info = module_device_info or build_device_info(
+            host=ctx.host,
+            meta=ctx.meta,
+            device_identifier=ctx.controller_device_identifier,
+            tank_slug=tank_slug,
+        )
+
+        self._attr_available = bool(
+            getattr(self._coordinator, "last_update_success", True)
+        )
+        self._refresh()
+
+    def _find_outlet(self) -> dict[str, Any]:
+        data = self._coordinator.data or {}
+        outlets_any: Any = data.get("outlets", [])
+        if not isinstance(outlets_any, list):
+            return {}
+        for outlet_any in cast(list[Any], outlets_any):
+            if not isinstance(outlet_any, dict):
+                continue
+            outlet = cast(dict[str, Any], outlet_any)
+            if str(outlet.get("device_id") or "") == self._ref.did:
+                return outlet
+        return {}
+
+    def _refresh(self) -> None:
+        outlet = self._find_outlet()
+        capacity_any: Any = outlet.get("doser_capacity_ml")
+        if isinstance(capacity_any, (int, float)) and not isinstance(
+            capacity_any, bool
+        ):
+            self._attr_native_value = float(capacity_any)
+        else:
+            self._attr_native_value = None
+
+        attrs: dict[str, Any] = {}
+        for key in (
+            "state",
+            "type",
+            "output_id",
+            "gid",
+            "status",
+            "doser_capacity_ml",
+            "doser_remaining_ml",
+        ):
+            if key in outlet:
+                attrs[key] = outlet.get(key)
+        self._attr_extra_state_attributes = attrs
+
+    def _handle_coordinator_update(self) -> None:
+        self._attr_available = bool(
+            getattr(self._coordinator, "last_update_success", True)
+        )
+        outlet = self._find_outlet()
+        outlet_type_any: Any = outlet.get("type")
+        outlet_type = outlet_type_any if isinstance(outlet_type_any, str) else None
+        self._attr_icon = icon_for_outlet_type(outlet_type) or ICON_PUMP
         self._refresh()
         self.async_write_ha_state()
 

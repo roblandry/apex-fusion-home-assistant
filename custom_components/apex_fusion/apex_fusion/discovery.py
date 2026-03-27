@@ -74,6 +74,36 @@ class OutletRef:
     dedupe_key: str
 
 
+@dataclass(frozen=True)
+class OutletDoserRemainingRef:
+    """Reference to a doser remaining-volume sensor.
+
+    Attributes:
+        did: Outlet device id from the controller payload.
+        name: Friendly name for display in Home Assistant.
+        dedupe_key: Stable dedupe key used in unique_id/object_id generation.
+    """
+
+    did: str
+    name: str
+    dedupe_key: str
+
+
+@dataclass(frozen=True)
+class OutletDoserCapacityRef:
+    """Reference to a doser capacity sensor.
+
+    Attributes:
+        did: Outlet device id from the controller payload.
+        name: Friendly name for display in Home Assistant.
+        dedupe_key: Stable dedupe key used in unique_id/object_id generation.
+    """
+
+    did: str
+    name: str
+    dedupe_key: str
+
+
 # -----------------------------------------------------------------------------
 # Discovery
 # -----------------------------------------------------------------------------
@@ -360,6 +390,196 @@ class ApexDiscovery:
             )
 
             refs.append(OutletRef(did=did, name=outlet_name, dedupe_key=dedupe_key))
+            seen.add(dedupe_key)
+
+        # NOTE: returned set contains dedupe keys, not raw DIDs.
+        return refs, seen
+
+    @staticmethod
+    def new_outlet_doser_remaining_refs(
+        data: Mapping[str, Any] | None,
+        *,
+        already_added_dids: set[str],
+    ) -> tuple[list[OutletDoserRemainingRef], set[str]]:
+        """Discover new doser remaining-volume sensors.
+
+        This targets DOS and DOS Quiet Drive (DQD) outputs that expose
+        `doser_remaining_ml` in coordinator-normalized outlet dicts.
+
+        Args:
+            data: Coordinator data.
+            already_added_dids: Outlet DIDs that have already been used to
+                create entities.
+
+        Returns:
+            Tuple of:
+              - A list of discovered doser remaining-volume references.
+              - A set of outlet DIDs discovered during this call.
+        """
+
+        coordinator_data = data or {}
+        outlets_any: Any = coordinator_data.get("outlets")
+        if not isinstance(outlets_any, list):
+            return [], set()
+
+        did_counts: dict[str, int] = {}
+        for outlet_any in cast(list[Any], outlets_any):
+            if not isinstance(outlet_any, Mapping):
+                continue
+            did_any: Any = cast(Mapping[str, Any], outlet_any).get("device_id")
+            if isinstance(did_any, str) and did_any:
+                did_counts[did_any] = did_counts.get(did_any, 0) + 1
+
+        refs: list[OutletDoserRemainingRef] = []
+        seen: set[str] = set()
+
+        for outlet_any in cast(list[Any], outlets_any):
+            if not isinstance(outlet_any, Mapping):
+                continue
+
+            outlet = cast(Mapping[str, Any], outlet_any)
+            did_any: Any = outlet.get("device_id")
+            did = did_any if isinstance(did_any, str) else None
+            if not did:
+                continue
+
+            module_abaddr_any: Any = outlet.get("module_abaddr")
+            module_abaddr = (
+                module_abaddr_any if isinstance(module_abaddr_any, int) else None
+            )
+            module_hwtype_any: Any = outlet.get("module_hwtype")
+            module_hwtype = (
+                str(module_hwtype_any).strip().upper()
+                if isinstance(module_hwtype_any, str) and module_hwtype_any.strip()
+                else None
+            )
+
+            if did_counts.get(did, 0) > 1:
+                if module_abaddr is not None:
+                    dedupe_key = f"{did}@{module_abaddr}"
+                elif module_hwtype:
+                    dedupe_key = f"{did}@{module_hwtype}"
+                else:
+                    dedupe_key = did
+            else:
+                dedupe_key = did
+
+            if dedupe_key in already_added_dids or dedupe_key in seen:
+                continue
+
+            outlet_type_any: Any = outlet.get("type")
+            outlet_type = outlet_type_any if isinstance(outlet_type_any, str) else None
+            if str(outlet_type or "").strip().lower() not in {"dos", "dqd"}:
+                continue
+
+            remaining_any: Any = outlet.get("doser_remaining_ml")
+            if not isinstance(remaining_any, (int, float)) or isinstance(
+                remaining_any, bool
+            ):
+                continue
+
+            outlet_name = friendly_outlet_name(
+                outlet_name=str(outlet.get("name") or did),
+                outlet_type=outlet_type,
+            )
+
+            refs.append(
+                OutletDoserRemainingRef(
+                    did=did,
+                    name=f"{outlet_name} Remaining Volume",
+                    dedupe_key=dedupe_key,
+                )
+            )
+            seen.add(dedupe_key)
+
+        # NOTE: returned set contains dedupe keys, not raw DIDs.
+        return refs, seen
+
+    @staticmethod
+    def new_outlet_doser_capacity_refs(
+        data: Mapping[str, Any] | None,
+        *,
+        already_added_dids: set[str],
+    ) -> tuple[list[OutletDoserCapacityRef], set[str]]:
+        """Discover new doser capacity sensors.
+
+        This targets DOS and DOS Quiet Drive (DQD) outputs that expose
+        `doser_capacity_ml` in coordinator-normalized outlet dicts.
+        """
+
+        coordinator_data = data or {}
+        outlets_any: Any = coordinator_data.get("outlets")
+        if not isinstance(outlets_any, list):
+            return [], set()
+
+        did_counts: dict[str, int] = {}
+        for outlet_any in cast(list[Any], outlets_any):
+            if not isinstance(outlet_any, Mapping):
+                continue
+            did_any: Any = cast(Mapping[str, Any], outlet_any).get("device_id")
+            if isinstance(did_any, str) and did_any:
+                did_counts[did_any] = did_counts.get(did_any, 0) + 1
+
+        refs: list[OutletDoserCapacityRef] = []
+        seen: set[str] = set()
+
+        for outlet_any in cast(list[Any], outlets_any):
+            if not isinstance(outlet_any, Mapping):
+                continue
+
+            outlet = cast(Mapping[str, Any], outlet_any)
+            did_any: Any = outlet.get("device_id")
+            did = did_any if isinstance(did_any, str) else None
+            if not did:
+                continue
+
+            module_abaddr_any: Any = outlet.get("module_abaddr")
+            module_abaddr = (
+                module_abaddr_any if isinstance(module_abaddr_any, int) else None
+            )
+            module_hwtype_any: Any = outlet.get("module_hwtype")
+            module_hwtype = (
+                str(module_hwtype_any).strip().upper()
+                if isinstance(module_hwtype_any, str) and module_hwtype_any.strip()
+                else None
+            )
+
+            if did_counts.get(did, 0) > 1:
+                if module_abaddr is not None:
+                    dedupe_key = f"{did}@{module_abaddr}"
+                elif module_hwtype:
+                    dedupe_key = f"{did}@{module_hwtype}"
+                else:
+                    dedupe_key = did
+            else:
+                dedupe_key = did
+
+            if dedupe_key in already_added_dids or dedupe_key in seen:
+                continue
+
+            outlet_type_any: Any = outlet.get("type")
+            outlet_type = outlet_type_any if isinstance(outlet_type_any, str) else None
+            if str(outlet_type or "").strip().lower() not in {"dos", "dqd"}:
+                continue
+
+            capacity_any: Any = outlet.get("doser_capacity_ml")
+            if not isinstance(capacity_any, (int, float)) or isinstance(
+                capacity_any, bool
+            ):
+                continue
+
+            outlet_name = friendly_outlet_name(
+                outlet_name=str(outlet.get("name") or did),
+                outlet_type=outlet_type,
+            )
+
+            refs.append(
+                OutletDoserCapacityRef(
+                    did=did,
+                    name=f"{outlet_name} Capacity",
+                    dedupe_key=dedupe_key,
+                )
+            )
             seen.add(dedupe_key)
 
         # NOTE: returned set contains dedupe keys, not raw DIDs.

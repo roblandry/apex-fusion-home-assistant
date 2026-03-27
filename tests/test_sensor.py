@@ -1133,8 +1133,211 @@ async def test_outlet_intensity_sensor_refresh_and_lifecycle_cover_branches():
 
     await ent.async_added_to_hass()
     assert listeners
+
     await ent.async_will_remove_from_hass()
     assert ent._unsub is None
+
+
+async def test_doser_sensors_create_and_update(hass, enable_custom_integrations):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "1.2.3.4"},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
+    )
+    entry.add_to_hass(hass)
+
+    listeners: list[Callable[[], None]] = []
+    coordinator = _CoordinatorStub(
+        data={
+            "meta": {"serial": "ABC", "source": "cgi_json"},
+            "outlets": [
+                {
+                    "device_id": "DOS_1",
+                    "name": "DOS_1",
+                    "type": "dqd",
+                    "state": "TBL",
+                    "status": ["TBL", "", "OK", "9000", "863"],
+                    "doser_capacity_ml": 9000,
+                    "doser_remaining_ml": 863,
+                }
+            ],
+            "probes": {},
+        },
+        listeners=listeners,
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
+    added: list[Any] = []
+
+    def _add_entities(new_entities, update_before_add: bool = False):
+        added.extend(list(new_entities))
+
+    from custom_components.apex_fusion import sensor
+
+    await sensor.async_setup_entry(hass, cast(Any, entry), _add_entities)
+
+    remaining = next(
+        (e for e in added if isinstance(e, sensor.ApexOutletDoserRemainingSensor)),
+        None,
+    )
+    capacity = next(
+        (e for e in added if isinstance(e, sensor.ApexOutletDoserCapacitySensor)),
+        None,
+    )
+    assert remaining is not None
+    assert capacity is not None
+
+    remaining.async_write_ha_state = lambda *args, **kwargs: None
+    capacity.async_write_ha_state = lambda *args, **kwargs: None
+
+    await remaining.async_added_to_hass()
+    await capacity.async_added_to_hass()
+
+    assert remaining.native_value == 863.0
+    assert capacity.native_value == 9000.0
+
+    # Update coordinator data and ensure listener path works.
+    coordinator.data["outlets"][0]["doser_remaining_ml"] = 800
+    coordinator.data["outlets"][0]["doser_capacity_ml"] = 9100
+    for cb in coordinator.listeners or []:
+        cb()
+    remaining._handle_coordinator_update()
+    capacity._handle_coordinator_update()
+    assert remaining.native_value == 800.0
+    assert capacity.native_value == 9100.0
+
+    await remaining.async_will_remove_from_hass()
+    await capacity.async_will_remove_from_hass()
+    assert remaining._unsub is None
+    assert capacity._unsub is None
+
+
+def test_doser_sensor_guard_branches_cover_unavailable_data():
+    """Cover non-list outlets + non-numeric volume branches."""
+
+    from custom_components.apex_fusion import sensor
+    from custom_components.apex_fusion.apex_fusion import (
+        OutletDoserCapacityRef,
+        OutletDoserRemainingRef,
+    )
+
+    entry = MockConfigEntry(domain=DOMAIN, data={CONF_HOST: "1.2.3.4"})
+    coordinator = _CoordinatorStub(
+        data={
+            "meta": {"serial": "ABC", "source": "cgi_json"},
+            "outlets": "nope",
+        }
+    )
+
+    rem = sensor.ApexOutletDoserRemainingSensor(
+        cast(Any, coordinator),
+        cast(Any, entry),
+        ref=OutletDoserRemainingRef(
+            did="DOS_1", name="DOS Remaining", dedupe_key="DOS_1"
+        ),
+    )
+    cap = sensor.ApexOutletDoserCapacitySensor(
+        cast(Any, coordinator),
+        cast(Any, entry),
+        ref=OutletDoserCapacityRef(
+            did="DOS_1", name="DOS Capacity", dedupe_key="DOS_1"
+        ),
+    )
+
+    # These entities are not added to hass in this unit test. Stub state writes
+    # so update handlers can run without requiring a real hass instance.
+    rem.async_write_ha_state = lambda *args, **kwargs: None
+    cap.async_write_ha_state = lambda *args, **kwargs: None
+
+    # Outlets not a list -> find_outlet returns empty dict; refresh sets None.
+    assert rem._find_outlet() == {}
+    assert cap._find_outlet() == {}
+    rem._refresh()
+    cap._refresh()
+    assert rem.native_value is None
+    assert cap.native_value is None
+
+    # Bool values should not be treated as numeric.
+    coordinator.data["outlets"] = [
+        {
+            "device_id": "DOS_1",
+            "type": "dos",
+            "doser_remaining_ml": True,
+            "doser_capacity_ml": False,
+        }
+    ]
+    rem._handle_coordinator_update()
+    cap._handle_coordinator_update()
+    assert rem.native_value is None
+    assert cap.native_value is None
+
+    # List outlets with no matching did: cover non-dict skip + final return {}.
+    coordinator.data["outlets"] = ["nope", {"device_id": "other"}]
+    assert cap._find_outlet() == {}
+    cap._handle_coordinator_update()
+    assert cap.native_value is None
+
+
+def test_doser_sensors_module_suggested_object_id_and_device_info_cover_branches():
+    from custom_components.apex_fusion import sensor
+    from custom_components.apex_fusion.apex_fusion import (
+        OutletDoserCapacityRef,
+        OutletDoserRemainingRef,
+    )
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "1.2.3.4"},
+        title="Apex (1.2.3.4)",
+    )
+    coordinator = _CoordinatorStub(
+        data={
+            "meta": {"serial": "ABC", "source": "cgi_json"},
+            "config": {"mconf": [{"abaddr": 7, "hwtype": "DOS", "name": "DOS"}]},
+            "outlets": [
+                {
+                    "device_id": "DOS_1",
+                    "name": "DOS_1",
+                    "type": "dos",
+                    "module_abaddr": 7,
+                    "module_hwtype": "DOS",
+                    "doser_capacity_ml": 9000,
+                    "doser_remaining_ml": 863,
+                }
+            ],
+            "probes": {},
+        },
+        device_identifier="TEST",
+    )
+
+    rem = sensor.ApexOutletDoserRemainingSensor(
+        cast(Any, coordinator),
+        cast(Any, entry),
+        ref=OutletDoserRemainingRef(
+            did="DOS_1", name="DOS Remaining", dedupe_key="DOS_1"
+        ),
+    )
+    cap = sensor.ApexOutletDoserCapacitySensor(
+        cast(Any, coordinator),
+        cast(Any, entry),
+        ref=OutletDoserCapacityRef(
+            did="DOS_1", name="DOS Capacity", dedupe_key="DOS_1"
+        ),
+    )
+
+    assert (
+        getattr(rem, "_attr_suggested_object_id", None)
+        == "apex_1_2_3_4_dos_7_dos_1_remaining_volume"
+    )
+    assert (
+        getattr(cap, "_attr_suggested_object_id", None)
+        == "apex_1_2_3_4_dos_7_dos_1_capacity"
+    )
+
+    assert rem.device_info is not None
+    assert rem.device_info.get("via_device") == (DOMAIN, "TEST")
+    assert rem.device_info.get("identifiers") == {(DOMAIN, "TEST_module_DOS_7")}
 
 
 async def test_sensor_setup_without_network_or_meta_adds_no_diagnostics(

@@ -20,6 +20,8 @@ from .data_fields import section_field
 from .discovery import (
     ApexDiscovery,
     DigitalProbeRef,
+    OutletDoserCapacityRef,
+    OutletDoserRemainingRef,
     OutletIntensityRef,
     OutletRef,
     ProbeRef,
@@ -57,6 +59,8 @@ __all__ = [
     "ApexFusionContext",
     "DigitalProbeRef",
     "DigitalValueCodec",
+    "OutletDoserCapacityRef",
+    "OutletDoserRemainingRef",
     "OutletIntensityRef",
     "OutletMode",
     "OutletRef",

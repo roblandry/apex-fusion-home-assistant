@@ -46,6 +46,24 @@ _LOGGER = logging.getLogger(LOGGER_NAME)
 _INPUT_DID_MODULE_ABADDR = re.compile(r"^(?P<abaddr>\d+)_")
 
 
+def _to_int(value: Any) -> int | None:
+    """Best-effort conversion to int.
+
+    Accepts real ints (excluding bool), integer-valued floats, and digit-only
+    strings.
+    """
+
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str):
+        t = value.strip()
+        if t.isdigit():
+            return int(t)
+    return None
+
+
 def _status_key(s: str) -> str:
     t = s.strip().lower()
     t = re.sub(r"\s+", " ", t)
@@ -1247,6 +1265,17 @@ def parse_status_rest(status_obj: dict[str, Any]) -> dict[str, Any]:
                 }
             )
 
+            # DOS / DOS Quiet Drive (DQD) dosing pump outputs.
+            # Some controllers encode capacity/remaining in status[3]/status[4].
+            output_type_key = (output_type or "").strip().lower()
+            if output_type_key in {"dos", "dqd"} and isinstance(status_any, list):
+                status_list = cast(list[Any], status_any)
+                capacity_ml = _to_int(status_list[3]) if len(status_list) > 3 else None
+                remaining_ml = _to_int(status_list[4]) if len(status_list) > 4 else None
+                if capacity_ml is not None or remaining_ml is not None:
+                    outlets[-1]["doser_capacity_ml"] = capacity_ml
+                    outlets[-1]["doser_remaining_ml"] = remaining_ml
+
     def _parse_tridents_from_modules() -> list[dict[str, Any]]:
         def _coerce_percent(value: Any) -> int | None:
             if value is None:
@@ -1788,6 +1817,16 @@ def parse_status_cgi_json(status_obj: dict[str, Any]) -> dict[str, Any]:
                     "module_hwtype": module_hwtype,
                 }
             )
+
+            # DOS / DOS Quiet Drive (DQD) dosing pump outputs.
+            output_type_key = (output_type or "").strip().lower()
+            if output_type_key in {"dos", "dqd"} and isinstance(status_any, list):
+                status_list = cast(list[Any], status_any)
+                capacity_ml = _to_int(status_list[3]) if len(status_list) > 3 else None
+                remaining_ml = _to_int(status_list[4]) if len(status_list) > 4 else None
+                if capacity_ml is not None or remaining_ml is not None:
+                    outlets[-1]["doser_capacity_ml"] = capacity_ml
+                    outlets[-1]["doser_remaining_ml"] = remaining_ml
 
     def _parse_feed() -> dict[str, Any] | None:
         def _to_int(v: Any) -> int | None:

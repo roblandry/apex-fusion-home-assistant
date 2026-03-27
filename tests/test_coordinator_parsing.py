@@ -847,6 +847,79 @@ def test_parse_status_cgi_json_outputs_state_none():
     assert out["outlets"][0]["state"] is None
 
 
+def test_parse_status_cgi_json_outputs_extracts_doser_remaining_and_capacity_ml():
+    from custom_components.apex_fusion import coordinator
+
+    out = coordinator.parse_status_cgi_json(
+        {
+            "istat": {
+                "outputs": [
+                    {
+                        "did": "DOS_1",
+                        "name": "DOS_1",
+                        "type": "dqd",
+                        "status": ["TBL", "", "OK", "9000", "863"],
+                    },
+                    {
+                        "did": "DOS_2",
+                        "name": "DOS_2",
+                        "type": "dos",
+                        # Float integer -> exercises float->int conversion.
+                        "status": ["TBL", "", "OK", 12000.0, True],
+                    },
+                    {
+                        "did": "DOS_3",
+                        "name": "DOS_3",
+                        "type": "dos",
+                        # Int -> exercises int pass-through branch.
+                        "status": ["TBL", "", "OK", 5000, 2500],
+                    },
+                ]
+            }
+        }
+    )
+
+    outlets = out.get("outlets")
+    assert isinstance(outlets, list)
+    by_did = {o.get("device_id"): o for o in outlets if isinstance(o, dict)}
+
+    assert by_did["DOS_1"].get("doser_capacity_ml") == 9000
+    assert by_did["DOS_1"].get("doser_remaining_ml") == 863
+    assert by_did["DOS_2"].get("doser_capacity_ml") == 12000
+    # Bool should be rejected by _to_int.
+    assert by_did["DOS_2"].get("doser_remaining_ml") is None
+    assert by_did["DOS_3"].get("doser_capacity_ml") == 5000
+    assert by_did["DOS_3"].get("doser_remaining_ml") == 2500
+
+
+def test_parse_status_rest_outputs_extracts_doser_remaining_and_capacity_ml():
+    from custom_components.apex_fusion import coordinator
+
+    out = coordinator.parse_status_rest(
+        {
+            "system": {"serial": "SER", "hostname": "apex"},
+            "nstat": {},
+            "status": {
+                "outputs": [
+                    {
+                        "did": "DOS_1",
+                        "name": "DOS 1",
+                        "type": "dos",
+                        "status": ["TBL", "", "OK", "9000", "863"],
+                    }
+                ],
+                "inputs": [],
+            },
+        }
+    )
+
+    outlets = out.get("outlets")
+    assert isinstance(outlets, list)
+    assert outlets and isinstance(outlets[0], dict)
+    assert outlets[0].get("doser_capacity_ml") == 9000
+    assert outlets[0].get("doser_remaining_ml") == 863
+
+
 def test_parse_status_rest_ignores_non_list_inputs_outputs():
     out = coordinator.parse_status_rest({"inputs": "x", "outputs": "y"})
     assert out["probes"] == {}

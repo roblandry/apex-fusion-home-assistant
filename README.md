@@ -42,6 +42,7 @@ Contributors are welcome (issues, testing feedback, and PRs).
 - Digital inputs as binary sensors (leak/float switches, etc)
 - Optional **No login (read-only)** mode (visual-only)
 - Output mode as a **read-only sensor** when control is unavailable
+- DOS / DQD dosing pump sensors: **Remaining Volume (mL)** and **Capacity (mL)** when reported by the controller (typically from legacy `status.json` output `status[3]`/`status[4]`)
 - Output control via 3-way selects (Off / Auto / On) when authenticated REST is available
 - Firmware version entities (controller + modules) when REST is available
 - Trident-family waste/reagent support (levels + alerts + controls, when a Trident `TRI` or Trident NP `TNP` is present)
@@ -52,7 +53,7 @@ Contributors are welcome (issues, testing feedback, and PRs).
 This integration is designed for Neptune Apex controllers reachable on your LAN.
 
 - **Written for** controllers that expose the local REST API (for example: `GET /rest/status`, `GET /rest/config`).
-- **Fallback support** for legacy/older firmwares that only expose `GET /cgi-bin/status.xml` (best-effort).
+- **Fallback support** for legacy/older firmwares that only expose `GET /cgi-bin/status.xml` / `GET /cgi-bin/status.json` (best-effort).
 - **Developed against** real controller payloads including Trident-family modules (container level sensors are only created when a Trident-family module is detected).
 
 If your controller/modules behave differently, please consider contributing a redacted dump (see Development below) so support can be expanded safely.
