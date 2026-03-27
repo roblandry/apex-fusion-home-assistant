@@ -1023,6 +1023,106 @@ async def test_rest_login_body_invalid_json_is_ignored(
     assert info["unique_id"] == host
 
 
+async def test_rest_validation_retries_login_after_transient_401(
+    hass, enable_custom_integrations
+):
+    """Cover the REST login retry sleep/continue branch.
+
+    Some controllers intermittently reject the first login attempt even when
+    credentials are correct. The config flow should retry and succeed.
+    """
+
+    from custom_components.apex_fusion import config_flow
+
+    class _CookieMorsel:
+        def __init__(self, value: str):
+            self.value = value
+
+    class _NullTimeout:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class _Resp:
+        def __init__(
+            self, status: int, body: str, *, cookies: dict[str, str] | None = None
+        ):
+            self.status = status
+            self._body = body
+            self.cookies = {k: _CookieMorsel(v) for k, v in (cookies or {}).items()}
+            self.headers = {"Content-Type": "application/json"}
+            # Minimal attributes used by ClientResponseError construction.
+            self.request_info = None
+            self.history = ()
+
+        async def text(self) -> str:
+            return self._body
+
+        def raise_for_status(self) -> None:
+            # Config flow checks status before calling raise_for_status.
+            return None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class _Jar:
+        def __init__(self):
+            self._cookies: dict[str, str] = {}
+
+        def filter_cookies(self, *_args, **_kwargs):
+            return {k: _CookieMorsel(v) for k, v in self._cookies.items()}
+
+        def update_cookies(self, cookies: dict[str, str], response_url=None):
+            self._cookies.update(cookies)
+
+    class _Sess:
+        def __init__(self):
+            self.cookie_jar = _Jar()
+            self._post_attempt = 0
+
+        def post(self, *_args, **_kwargs):
+            self._post_attempt += 1
+            if self._post_attempt == 1:
+                return _Resp(401, "{}")
+            return _Resp(200, "{}", cookies={"connect.sid": "abc"})
+
+        def get(self, *_args, **_kwargs):
+            return _Resp(200, "{}")
+
+    async def _no_sleep(_secs: float):
+        return None
+
+    host = "1.2.3.4"
+    session = _Sess()
+
+    with (
+        patch(
+            "custom_components.apex_fusion.config_flow.async_get_clientsession",
+            return_value=session,
+        ),
+        patch(
+            "custom_components.apex_fusion.config_flow.async_timeout.timeout",
+            return_value=_NullTimeout(),
+        ),
+        patch("custom_components.apex_fusion.config_flow.asyncio.sleep", new=_no_sleep),
+    ):
+        info = await config_flow._async_validate_input(
+            hass,
+            {
+                CONF_HOST: host,
+                CONF_USERNAME: "admin",
+                CONF_PASSWORD: "pw",
+            },
+        )
+
+    assert info["unique_id"] == host
+
+
 async def test_rest_exhausts_retry_loop_then_falls_back_to_xml(
     hass, enable_custom_integrations
 ):

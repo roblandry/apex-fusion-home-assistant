@@ -52,6 +52,134 @@ class _CoordinatorStub:
         return _unsub
 
 
+async def test_active_errors_sensor_aggregates_sources(
+    hass, enable_custom_integrations
+) -> None:
+    """Cover Active Errors aggregation across Trident/outlets/MXM."""
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "1.2.3.4"},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
+    )
+    entry.add_to_hass(hass)
+
+    coordinator = _CoordinatorStub(
+        data={
+            "meta": {"serial": "ABC", "source": "rest"},
+            "tridents": [
+                "nope",
+                {"abaddr": 5, "error_message": " Test B Failed "},
+                {"abaddr": "x", "error_message": " "},
+                {"error_message": "Oops"},
+            ],
+            "outlets": [
+                {"name": None, "status": [None, "  Error_4f ", "OK"]},
+                {"name": "Return", "status": "nope"},
+                "nope",
+            ],
+            "mxm_devices": {
+                "": {"status": "FAIL", "device_index": 1},
+                "Nero": {"status": "OK", "device_index": 2},
+                "Pump": {"status": " ", "device_index": 3},
+                "Bad": "nope",
+            },
+        },
+        listeners=[],
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
+    added: list[Any] = []
+
+    def _add_entities(new_entities, update_before_add: bool = False):
+        added.extend(list(new_entities))
+
+    from custom_components.apex_fusion import sensor
+
+    await sensor.async_setup_entry(hass, cast(Any, entry), _add_entities)
+
+    active = next(
+        (
+            e
+            for e in added
+            if isinstance(e, sensor.ApexDiagnosticSensor)
+            and e._attr_name == "Active Errors"
+        ),
+        None,
+    )
+    assert active is not None
+
+    active.async_write_ha_state = lambda *args, **kwargs: None
+    await active.async_added_to_hass()
+    value = active.native_value
+    assert isinstance(value, str)
+    assert "Trident (5): Test B Failed" in value
+    assert "Trident: Oops" in value
+    assert "Outlet: Error_4f" in value
+    assert "MXM device (#1): FAIL" in value
+
+    # Cover the single-trident fallback branch.
+    coordinator.data.pop("tridents", None)
+    coordinator.data["trident"] = {"error_message": " Single "}
+    for cb in coordinator.listeners or []:
+        cb()
+    active._handle_coordinator_update()
+    assert "Trident: Single" in cast(str, active.native_value)
+
+
+async def test_active_errors_sensor_truncates_to_10(
+    hass, enable_custom_integrations
+) -> None:
+    """Cover the parts[:10] truncation branch."""
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "1.2.3.4"},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
+    )
+    entry.add_to_hass(hass)
+
+    outlets: list[Any] = []
+    for i in range(11):
+        outlets.append({"name": f"O{i}", "status": [f"Error_{i}"]})
+
+    coordinator = _CoordinatorStub(
+        data={
+            "meta": {"serial": "ABC", "source": "rest"},
+            "outlets": outlets,
+        },
+        listeners=[],
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
+    added: list[Any] = []
+
+    def _add_entities(new_entities, update_before_add: bool = False):
+        added.extend(list(new_entities))
+
+    from custom_components.apex_fusion import sensor
+
+    await sensor.async_setup_entry(hass, cast(Any, entry), _add_entities)
+
+    active = next(
+        (
+            e
+            for e in added
+            if isinstance(e, sensor.ApexDiagnosticSensor)
+            and e._attr_name == "Active Errors"
+        ),
+        None,
+    )
+    assert active is not None
+
+    active.async_write_ha_state = lambda *args, **kwargs: None
+    await active.async_added_to_hass()
+    value = cast(str, active.native_value)
+    assert len([p for p in value.split(";") if p.strip()]) == 10
+
+
 def test_sensor_helpers_cover_all_branches():
     from custom_components.apex_fusion.apex_fusion import network_field, section_field
     from custom_components.apex_fusion.apex_fusion.outputs import (

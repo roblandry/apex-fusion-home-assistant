@@ -3194,10 +3194,14 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             raise
                         except aiohttp.ClientResponseError as err:
                             if err.status and _is_transient_http_status(err.status):
+                                try:
+                                    err_text = str(err)
+                                except Exception:  # noqa: BLE001
+                                    err_text = err.__class__.__name__
                                 _LOGGER.debug(
                                     "Transient REST HTTP error (status=%s): %s",
                                     err.status,
-                                    err,
+                                    err_text,
                                 )
                             else:
                                 raise

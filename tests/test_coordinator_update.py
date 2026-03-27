@@ -80,6 +80,9 @@ class _CookieJar:
     def update_cookies(self, cookies: dict[str, str], response_url=None):
         self._cookies.update(cookies)
 
+    def clear(self) -> None:
+        self._cookies.clear()
+
 
 class _Session:
     def __init__(self):
@@ -272,6 +275,114 @@ async def test_rest_config_fallback_nconf_unexpected_error_is_ignored(
         data = await coord._async_update_data()
 
     assert data["meta"]["source"] == "rest"
+    assert data.get("config") is None
+    # Ensure the queued sub-endpoint responses were not consumed.
+    assert len(session._get_queue) == 2
+
+
+async def test_rest_login_retry_clears_stale_cookie_between_attempts(
+    hass, enable_custom_integrations
+):
+    """Cover the cookie-jar clear path inside REST login retries."""
+
+    async def _no_sleep(_secs: float):
+        return None
+
+    session = _Session()
+
+    # Seed a stale cookie so the retry path clears it.
+    session.cookie_jar.update_cookies({"connect.sid": "stale"})
+
+    # Coordinator probes /rest/status without a login first.
+    session.queue_get(_Resp(401, "{}"))
+
+    # First login attempt rejected, second succeeds and sets cookie.
+    session.queue_post(_Resp(401, "{}"))
+    session.queue_post(_Resp(200, "{}", cookies={"connect.sid": "abc"}))
+
+    # Status payload (with cookie).
+    session.queue_get(
+        _Resp(
+            200,
+            '{"nstat": {"ipaddr": "1.2.3.4"}, "system": {"serial": "ABC"}, "inputs": [], "outputs": []}',
+        )
+    )
+
+    # /rest/config may be missing; ignore.
+    session.queue_get(_Resp(404, "{}"))
+
+    coord = await _make_coordinator(hass, host="1.2.3.4")
+
+    with (
+        patch(
+            "custom_components.apex_fusion.coordinator.async_get_clientsession",
+            return_value=session,
+        ),
+        patch(
+            "custom_components.apex_fusion.coordinator.async_timeout.timeout",
+            return_value=_NullTimeout(),
+        ),
+        patch("custom_components.apex_fusion.coordinator.asyncio.sleep", new=_no_sleep),
+    ):
+        data = await coord._async_update_data()
+
+    assert data["meta"]["source"] == "rest"
+    # Ensure the stale cookie was replaced by the established session.
+    morsel = session.cookie_jar.filter_cookies(None).get("connect.sid")
+    assert morsel is not None
+    assert morsel.value == "abc"
+
+
+async def test_rest_login_retry_cookie_clear_exception_is_ignored(
+    hass, enable_custom_integrations
+):
+    """Cover the defensive `except Exception: pass` around cookie clearing."""
+
+    async def _no_sleep(_secs: float):
+        return None
+
+    session = _Session()
+    session.cookie_jar.update_cookies({"connect.sid": "stale"})
+
+    # Force an exception in the cookie-clear block on retry.
+    def _boom_clear() -> None:
+        raise RuntimeError("boom")
+
+    session.cookie_jar.clear = _boom_clear  # type: ignore[method-assign]
+
+    # Coordinator probes /rest/status without a login first.
+    session.queue_get(_Resp(401, "{}"))
+
+    # First login attempt rejected, second succeeds.
+    session.queue_post(_Resp(401, "{}"))
+    session.queue_post(_Resp(200, "{}", cookies={"connect.sid": "abc"}))
+
+    session.queue_get(
+        _Resp(
+            200,
+            '{"nstat": {"ipaddr": "1.2.3.4"}, "system": {"serial": "ABC"}, "inputs": [], "outputs": []}',
+        )
+    )
+    session.queue_get(_Resp(404, "{}"))
+
+    coord = await _make_coordinator(hass, host="1.2.3.4")
+    with (
+        patch(
+            "custom_components.apex_fusion.coordinator.async_get_clientsession",
+            return_value=session,
+        ),
+        patch(
+            "custom_components.apex_fusion.coordinator.async_timeout.timeout",
+            return_value=_NullTimeout(),
+        ),
+        patch("custom_components.apex_fusion.coordinator.asyncio.sleep", new=_no_sleep),
+    ):
+        data = await coord._async_update_data()
+
+    assert data["meta"]["source"] == "rest"
+    morsel = session.cookie_jar.filter_cookies(None).get("connect.sid")
+    assert morsel is not None
+    assert morsel.value == "abc"
 
 
 async def test_rest_trident_waste_size_from_rest_config_mconf(

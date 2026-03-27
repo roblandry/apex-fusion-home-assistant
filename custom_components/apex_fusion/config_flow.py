@@ -399,8 +399,6 @@ async def _async_validate_input(
                                         login_cookie_sid = morsel.value
                                     logged_in = True
                                     break
-                            if logged_in:
-                                break
 
                     if not logged_in:
                         # Credentials were supplied, so failing REST auth should
