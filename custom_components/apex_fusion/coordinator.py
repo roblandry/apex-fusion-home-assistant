@@ -717,7 +717,7 @@ _MXM_STATUS_LINE = re.compile(
 
 def _parse_mxm_devices_from_mconf(
     mconf_obj: dict[str, Any],
-) -> dict[str, dict[str, str]]:
+) -> dict[str, dict[str, Any]]:
     """Extract MXM device metadata from `mconf` (from `/rest/config`).
 
     The MXM module includes a multiline `extra.status` string listing attached
@@ -729,7 +729,7 @@ def _parse_mxm_devices_from_mconf(
     Returns:
         Mapping of device name -> metadata dict.
     """
-    out: dict[str, dict[str, str]] = {}
+    out: dict[str, dict[str, Any]] = {}
 
     mconf_any: Any = mconf_obj.get("mconf")
     if not isinstance(mconf_any, list):
@@ -755,10 +755,26 @@ def _parse_mxm_devices_from_mconf(
             name = match.group("name").strip()
             if not name:
                 continue
+
+            status_raw = match.group("status").strip()
+            status_clean = status_raw
+            device_index: int | None = None
+            suffix_match = re.match(
+                r"^(?P<status>.*?)(?:\s*-\s*(?P<index>\d+))?$", status_raw
+            )
+            if suffix_match is not None:
+                base = (suffix_match.group("status") or "").strip()
+                idx = (suffix_match.group("index") or "").strip()
+                if base:
+                    status_clean = base
+                if idx.isdigit():
+                    device_index = int(idx)
+
             out[name] = {
                 "rev": match.group("rev").strip(),
                 "serial": match.group("serial").strip(),
-                "status": match.group("status").strip(),
+                "status": status_clean,
+                "device_index": device_index,
             }
 
     return out

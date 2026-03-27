@@ -262,6 +262,7 @@ class ApexOutletModeSelect(SelectEntity):
                 attrs["mxm_rev"] = dev.get("rev")
                 attrs["mxm_serial"] = dev.get("serial")
                 attrs["mxm_status"] = dev.get("status")
+                attrs["mxm_device_index"] = dev.get("device_index")
 
         return attrs
 

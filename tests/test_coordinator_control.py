@@ -796,6 +796,41 @@ async def test_refresh_config_now_updates_data(hass, enable_custom_integrations)
     assert trident.get("waste_size_ml") == 450.0
 
 
+async def test_refresh_config_now_mxm_status_strips_device_suffix(
+    hass, enable_custom_integrations
+):
+    coord = await _make_coord(hass)
+    coord.data = {"meta": {"serial": "ABC"}}  # type: ignore[assignment]
+
+    coord.async_rest_get_json = AsyncMock(  # type: ignore[method-assign]
+        return_value={
+            "mconf": [
+                {
+                    "hwtype": "MXM",
+                    "extra": {
+                        "status": "Nero 3 L(x) - Rev 1.2 Ser #: S1 - OK-7\nAxis 90(x) - Rev 1.2 Ser #: S2 - Error_4f-6",
+                    },
+                }
+            ]
+        }
+    )
+
+    await coord.async_refresh_config_now()
+
+    mxm = coord.data.get("mxm_devices")
+    assert isinstance(mxm, dict)
+
+    nero = mxm.get("Nero 3 L")
+    assert isinstance(nero, dict)
+    assert nero.get("status") == "OK"
+    assert nero.get("device_index") == 7
+
+    axis = mxm.get("Axis 90")
+    assert isinstance(axis, dict)
+    assert axis.get("status") == "Error_4f"
+    assert axis.get("device_index") == 6
+
+
 async def test_refresh_config_now_skips_non_trident_or_bad_extra(
     hass, enable_custom_integrations
 ):
