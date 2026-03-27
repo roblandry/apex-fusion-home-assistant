@@ -891,6 +891,30 @@ def test_parse_status_rest_trident_and_alert_variants():
     assert out2b["trident"]["is_testing"] is False
 
 
+def test_parse_status_rest_trident_status_normalization_prime_and_testing_codes():
+    out_prime = coordinator.parse_status_rest(
+        {
+            "modules": [
+                {"hwtype": "TNP", "present": True, "extra": {"status": "prime 1"}}
+            ]
+        }
+    )
+    assert out_prime["trident"]["status"] == "Prime 1"
+    assert out_prime["trident"]["status_key"] == "prime_1"
+    assert out_prime["trident"]["is_testing"] is False
+
+    out_testing = coordinator.parse_status_rest(
+        {
+            "modules": [
+                {"hwtype": "TRI", "present": True, "extra": {"status": "testing no3"}}
+            ]
+        }
+    )
+    assert out_testing["trident"]["status"] == "Testing NO3"
+    assert out_testing["trident"]["status_key"] == "testing_no3"
+    assert out_testing["trident"]["is_testing"] is True
+
+
 def test_parse_feed_variants_cover_uncovered_branches():
     # REST feed: float should coerce to int.
     rest_float = {"system": {"serial": "ABC"}, "feed": 2.0}

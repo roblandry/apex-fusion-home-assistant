@@ -46,6 +46,77 @@ _LOGGER = logging.getLogger(LOGGER_NAME)
 _INPUT_DID_MODULE_ABADDR = re.compile(r"^(?P<abaddr>\d+)_")
 
 
+def _status_key(s: str) -> str:
+    t = s.strip().lower()
+    t = re.sub(r"\s+", " ", t)
+    t = re.sub(r"[^a-z0-9]+", "_", t)
+    return t.strip("_")
+
+
+def _normalize_trident_status(
+    raw_status: str | None,
+) -> tuple[str | None, bool | None, str | None]:
+    """Normalize Trident-family status strings for human display.
+
+    Controllers sometimes emit lowercase or inconsistent casing (e.g. "prime 1",
+    "testing no3"). We normalize for stable display, and also provide a stable
+    lowercase status key suitable for future translation mapping.
+    """
+
+    if raw_status is None:
+        return None, None, None
+
+    raw = str(raw_status).strip()
+    if not raw:
+        return None, None, None
+
+    lower = re.sub(r"\s+", " ", raw).strip().lower()
+
+    # Abbreviations like OK should remain uppercase.
+    if lower in {"ok"}:
+        return "OK", False, "ok"
+
+    if lower in {"idle"}:
+        return "Idle", False, "idle"
+
+    def _fix_analytes(text: str) -> str:
+        # Common analytes/abbreviations.
+        out = text
+        out = re.sub(r"\bno3\b", "NO3", out, flags=re.IGNORECASE)
+        out = re.sub(r"\bpo4\b", "PO4", out, flags=re.IGNORECASE)
+        out = re.sub(r"\bca\s*/\s*mg\b", "Ca/Mg", out, flags=re.IGNORECASE)
+        # Keep single-element analytes in Apex UI style.
+        out = re.sub(r"\balk\b", "Alk", out, flags=re.IGNORECASE)
+        out = re.sub(r"\bca\b", "Ca", out, flags=re.IGNORECASE)
+        out = re.sub(r"\bmg\b", "Mg", out, flags=re.IGNORECASE)
+        return out
+
+    status_key = _status_key(lower)
+
+    # Testing statuses.
+    if lower.startswith("testing"):
+        rest = lower[len("testing") :].strip()
+        if rest:
+            display = f"Testing {_fix_analytes(rest)}"
+        else:
+            display = "Testing"
+        return display, True, status_key
+
+    # Prime statuses.
+    if lower.startswith("prime"):
+        rest = lower[len("prime") :].strip()
+        display = "Prime" if not rest else f"Prime {rest}"
+        display = _fix_analytes(display[:1].upper() + display[1:])
+        return display, False, status_key
+
+    # Generic fallback: sentence-case + analyte fixes.
+    display = raw
+    if display[:1].islower():
+        display = display[:1].upper() + display[1:]
+    display = _fix_analytes(display)
+    return display, ("testing" in lower), status_key
+
+
 def clean_hostname_display(hostname: str | None) -> str | None:
     """Return a display-friendly hostname/tank name.
 
@@ -1321,30 +1392,15 @@ def parse_status_rest(status_obj: dict[str, Any]) -> dict[str, Any]:
             is_testing: bool | None = None
             status_any: Any = extra.get("status")
             if isinstance(status_any, str):
-                s = status_any.strip()
-                if s:
-                    # Match Apex UI capitalization (commonly: "Testing Ca/Mg").
-                    if s.lower().startswith("testing"):
-                        s = "Testing" + s[7:]
-
-                    # Controllers may return simple statuses like "idle"/"ok".
-                    # Normalize those to sentence-case while preserving mixed-content
-                    # statuses like "testing Ca/Mg".
-                    if s.isalpha():
-                        if s.isupper() and len(s) <= 3:
-                            # Preserve common abbreviations like "OK".
-                            status = s
-                        else:
-                            status = s[:1].upper() + s[1:].lower()
-                    else:
-                        status = s
-
-                    is_testing = "testing" in s.lower()
+                status, is_testing, status_key = _normalize_trident_status(status_any)
+            else:
+                status_key = None
 
             tridents.append(
                 {
                     "present": present,
                     "status": status,
+                    "status_key": status_key,
                     "is_testing": is_testing,
                     "abaddr": abaddr,
                     "hwtype": trident_hwtype,
