@@ -1188,6 +1188,13 @@ async def test_doser_sensors_create_and_update(hass, enable_custom_integrations)
     assert remaining is not None
     assert capacity is not None
 
+    # Reservoir-fill snapshots: VOLUME_STORAGE is the only volume device class
+    # that HA permits to pair with state_class=measurement. See issue #30.
+    assert remaining._attr_device_class == sensor.SensorDeviceClass.VOLUME_STORAGE
+    assert remaining._attr_state_class == sensor.SensorStateClass.MEASUREMENT
+    assert capacity._attr_device_class == sensor.SensorDeviceClass.VOLUME_STORAGE
+    assert capacity._attr_state_class == sensor.SensorStateClass.MEASUREMENT
+
     remaining.async_write_ha_state = lambda *args, **kwargs: None
     capacity.async_write_ha_state = lambda *args, **kwargs: None
 

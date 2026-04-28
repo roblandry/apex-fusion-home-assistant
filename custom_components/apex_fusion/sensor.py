@@ -1308,7 +1308,7 @@ class ApexOutletDoserRemainingSensor(SensorEntity):
     _attr_has_entity_name = True
     _attr_should_poll = False
     _attr_native_unit_of_measurement = UnitOfVolume.MILLILITERS
-    _attr_device_class = SensorDeviceClass.VOLUME
+    _attr_device_class = SensorDeviceClass.VOLUME_STORAGE
     _attr_state_class = SensorStateClass.MEASUREMENT
 
     def __init__(
@@ -1463,7 +1463,7 @@ class ApexOutletDoserCapacitySensor(SensorEntity):
     _attr_has_entity_name = True
     _attr_should_poll = False
     _attr_native_unit_of_measurement = UnitOfVolume.MILLILITERS
-    _attr_device_class = SensorDeviceClass.VOLUME
+    _attr_device_class = SensorDeviceClass.VOLUME_STORAGE
     _attr_state_class = SensorStateClass.MEASUREMENT
 
     def __init__(
