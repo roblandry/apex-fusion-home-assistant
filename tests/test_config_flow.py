@@ -518,7 +518,9 @@ async def test_xml_validation_success_when_no_password(hass, aioclient_mock):
     assert info["transport"] == "legacy"
 
 
-async def test_cgi_json_unauthorized_raises_invalid_auth(hass, aioclient_mock):
+async def test_cgi_json_unauthorized_after_rest_404_is_cannot_connect(
+    hass, aioclient_mock
+):
     host = "1.2.3.4"
     aioclient_mock.get(f"http://{host}/rest/status", status=404, text="")
     aioclient_mock.get(
@@ -526,6 +528,8 @@ async def test_cgi_json_unauthorized_raises_invalid_auth(hass, aioclient_mock):
         status=401,
         text="{}",
     )
+
+    aioclient_mock.get(f"http://{host}/cgi-bin/status.xml", status=404, text="")
 
     try:
         await async_validate_input(
@@ -536,10 +540,10 @@ async def test_cgi_json_unauthorized_raises_invalid_auth(hass, aioclient_mock):
                 CONF_PASSWORD: "",
             },
         )
-    except InvalidAuth:
+    except CannotConnect:
         pass
     else:
-        raise AssertionError("Expected InvalidAuth")
+        raise AssertionError("Expected CannotConnect")
 
 
 async def test_cgi_json_invalid_json_falls_back_to_xml(hass, aioclient_mock):
@@ -569,7 +573,9 @@ async def test_cgi_json_invalid_json_falls_back_to_xml(hass, aioclient_mock):
     assert info["transport"] == "legacy"
 
 
-async def test_xml_validation_unauthorized_raises_invalid_auth(hass, aioclient_mock):
+async def test_xml_validation_unauthorized_after_rest_404_is_cannot_connect(
+    hass, aioclient_mock
+):
     host = "1.2.3.4"
     aioclient_mock.get(f"http://{host}/rest/status", status=404, text="")
     aioclient_mock.get(
@@ -592,10 +598,10 @@ async def test_xml_validation_unauthorized_raises_invalid_auth(hass, aioclient_m
                 CONF_PASSWORD: "",  # no REST
             },
         )
-    except InvalidAuth:
+    except CannotConnect:
         pass
     else:
-        raise AssertionError("Expected InvalidAuth")
+        raise AssertionError("Expected CannotConnect")
 
 
 async def test_xml_validation_parse_error_raises_cannot_connect(hass, aioclient_mock):
@@ -1548,6 +1554,18 @@ _XML_OK = "<status><serial>SER8</serial><hostname>apex</hostname></status>"
         ((401, "{}"), (404, ""), (200, _XML_OK), ("legacy", "SER8")),
         ((401, "{}"), (404, ""), (500, ""), InvalidAuth),
         ((403, "{}"), (401, "{}"), (401, ""), InvalidAuth),
+        # CGI JSON 401 still falls through to XML.
+        ((404, ""), (401, "{}"), (200, _XML_OK), ("legacy", "SER8")),
+        ((404, ""), (401, "{}"), (500, ""), CannotConnect),
+        ((401, "{}"), (401, "{}"), (200, _XML_OK), ("legacy", "SER8")),
+        ((401, "{}"), (401, "{}"), (500, ""), InvalidAuth),
+        # CGI JSON 200 with an unusable body falls through to XML.
+        ((404, ""), (200, "{}"), (200, _XML_OK), ("legacy", "SER8")),
+        ((404, ""), (200, ""), (200, _XML_OK), ("legacy", "SER8")),
+        ((404, ""), (200, ""), (500, ""), CannotConnect),
+        ((404, ""), (200, "{}"), (200, "<status"), CannotConnect),
+        # After REST 404 nothing usable is cannot_connect even if auth was refused.
+        ((404, ""), (401, "{}"), (401, ""), CannotConnect),
         # Anything else -> cannot_connect, CGI never probed.
         ((400, ""), (200, _CGI_OK), (200, _XML_OK), CannotConnect),
         ((500, ""), (200, _CGI_OK), (200, _XML_OK), CannotConnect),
