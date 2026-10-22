@@ -90,11 +90,14 @@ failed, check the run under **Actions**, then finish it by hand.
 
 The workflow can fail after pushing the tag but before creating the GitHub
 release, so the snippet below checks the tag on the **remote** and only then
-decides what to do. Set `TAG` (and `NOTES`, the version's `CHANGELOG.md`
-section in a file), then paste the whole block. It finds the release commit
-itself: the first commit on `main` whose `manifest.json` carries the tag's
-version. You can set `COMMIT` to override that, but it must still be on `main`
-and carry the tag's version. Pre-release tags (`-alpha.N`, `-beta.N`, `-rc.N`)
+decides what to do. Set `TAG`, `COMMIT` and `NOTES` (the version's
+`CHANGELOG.md` section in a file), then paste the whole block.
+
+`COMMIT` is required: it is the **head commit of the push** whose release run
+failed, because that is the commit the workflow tags. Take it from the failed
+run's page under **Actions** (the commit shown for the run, which is
+`github.sha` in the run summary). It must be on `main` and carry the tag's
+version, or the block stops. Pre-release tags (`-alpha.N`, `-beta.N`, `-rc.N`)
 are published as pre-releases automatically. The block runs in a subshell and
 stops at the first failure, so nothing after a failed check can run.
 
@@ -103,7 +106,7 @@ stops at the first failure, so nothing after a failed check can run.
   set -euo pipefail
   TAG=v2026.10.25
   NOTES=notes.md
-  COMMIT=            # optional override; leave empty to find it
+  COMMIT="<head sha of the push whose release run failed>"
 
   version=${TAG#v}
   manifest=custom_components/apex_fusion/manifest.json
@@ -116,16 +119,8 @@ stops at the first failure, so nothing after a failed check can run.
   esac
   fail() { echo "error: $*" >&2; exit 1; }
 
+  [ -n "${COMMIT##*<*}" ] || fail "set COMMIT to the push head sha"
   git fetch origin main
-
-  if [ -z "$COMMIT" ]; then
-    commits=$(git rev-list --first-parent --reverse origin/main -- "$manifest")
-    for c in $commits; do
-      v=$(manifest_version "$c" 2>/dev/null || true)
-      if [ "$v" = "$version" ]; then COMMIT=$c; break; fi
-    done
-    [ -n "$COMMIT" ] || fail "no commit on origin/main has version $version"
-  fi
   want=$(git rev-parse "$COMMIT^{commit}")
   git merge-base --is-ancestor "$want" origin/main \
     || fail "$want is not on origin/main"
