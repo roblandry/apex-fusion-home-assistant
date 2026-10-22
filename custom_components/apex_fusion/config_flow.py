@@ -304,14 +304,16 @@ async def _async_probe_rest_gate(
     """Return whether the controller has the ``/rest/`` API.
 
     Controllers with the REST API gate the whole ``/rest/`` prefix behind a login
-    (401/403 without credentials); anything outside it is a plain 404. So one
-    unauthenticated ``GET /rest/status`` decides, deterministically:
+    (401/403 without credentials); anything outside it is a plain 404. The signal
+    must positively identify REST, so one unauthenticated ``GET /rest/status``
+    decides:
 
-    - 401/403: REST is present and wants a login.
-    - 200 with a JSON object: REST is present and open.
-    - 404: REST is absent (legacy controller).
-    - anything else, a timeout or a connection error: unknown, so the caller must
-      not guess.
+    - 401/403, or a 200 with a JSON object: REST is present.
+    - any other definite HTTP answer (404, 400, 405, 501, a 200 that is not a JSON
+      object, ...): REST is absent, so the controller is legacy.
+    - the signal cannot be read (timeout, connection error, HTTP 5xx other than
+      501 Not Implemented): unknown.
+      A 5xx is a transient controller error and must never pin legacy.
 
     Args:
         session: Shared HTTP session.
@@ -321,7 +323,7 @@ async def _async_probe_rest_gate(
         True when REST is present, False when it is absent.
 
     Raises:
-        CannotConnect: If the probe result is not one of the cases above.
+        CannotConnect: If the signal cannot be read.
     """
     try:
         async with async_timeout.timeout(10):
@@ -332,21 +334,23 @@ async def _async_probe_rest_gate(
             ) as resp:
                 status = resp.status
                 _LOGGER.debug("REST gate probe HTTP %s", status)
+                if (
+                    status >= HTTPStatus.INTERNAL_SERVER_ERROR
+                    and status != HTTPStatus.NOT_IMPLEMENTED
+                ):
+                    raise CannotConnect
                 if status in (HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN):
                     return True
-                if status == HTTPStatus.NOT_FOUND:
-                    return False
                 if status == HTTPStatus.OK:
                     body = await resp.text()
                     try:
                         parsed: Any = json.loads(body) if body else None
                     except json.JSONDecodeError:
                         parsed = None
-                    if isinstance(parsed, dict):
-                        return True
+                    return isinstance(parsed, dict)
+                return False
     except (asyncio.TimeoutError, aiohttp.ClientError) as err:
         raise CannotConnect from err
-    raise CannotConnect
 
 
 async def _async_validate_legacy(

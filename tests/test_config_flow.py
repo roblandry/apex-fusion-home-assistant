@@ -1721,17 +1721,56 @@ _SPEC_ROWS = [
         CannotConnect,
     ),
     ("probe 503", False, _routes((503, ""), cgi=(200, _CGI_OK)), CannotConnect),
-    ("probe 400", False, _routes((400, ""), cgi=(200, _CGI_OK)), CannotConnect),
-    ("probe 405", False, _routes((405, ""), cgi=(200, _CGI_OK)), CannotConnect),
-    ("probe 302", False, _routes((302, ""), cgi=(200, _CGI_OK)), CannotConnect),
     (
-        "probe 200 html",
+        "probe 400 -> legacy",
+        False,
+        _routes((400, ""), cgi=(200, _CGI_OK)),
+        ("legacy", "cgi_json", "SER9"),
+    ),
+    (
+        "probe 405 -> legacy",
+        False,
+        _routes((405, ""), cgi=(200, _CGI_OK)),
+        ("legacy", "cgi_json", "SER9"),
+    ),
+    (
+        "probe 501 -> legacy",
+        False,
+        _routes((501, ""), cgi=(200, _CGI_OK)),
+        ("legacy", "cgi_json", "SER9"),
+    ),
+    (
+        "probe 400 + password -> legacy, no login",
+        True,
+        _routes((400, ""), login=_LOGIN_OK, cgi=(200, _CGI_OK)),
+        ("legacy", "cgi_json", "SER9"),
+    ),
+    ("probe 502", False, _routes((502, ""), cgi=(200, _CGI_OK)), CannotConnect),
+    ("probe 504", False, _routes((504, ""), cgi=(200, _CGI_OK)), CannotConnect),
+    (
+        "probe 302 -> legacy",
+        False,
+        _routes((302, ""), cgi=(200, _CGI_OK)),
+        ("legacy", "cgi_json", "SER9"),
+    ),
+    (
+        "probe 200 html -> legacy",
         False,
         _routes((200, "<html>"), cgi=(200, _CGI_OK)),
-        CannotConnect,
+        ("legacy", "cgi_json", "SER9"),
     ),
-    ("probe 200 empty", False, _routes((200, ""), cgi=(200, _CGI_OK)), CannotConnect),
-    ("probe 200 array", False, _routes((200, "[]"), cgi=(200, _CGI_OK)), CannotConnect),
+    (
+        "probe 200 empty -> legacy",
+        False,
+        _routes((200, ""), cgi=(200, _CGI_OK)),
+        ("legacy", "cgi_json", "SER9"),
+    ),
+    (
+        "probe 200 array -> legacy",
+        False,
+        _routes((200, "[]"), cgi=(200, _CGI_OK)),
+        ("legacy", "cgi_json", "SER9"),
+    ),
     (
         "probe timeout",
         True,
@@ -1785,7 +1824,12 @@ async def test_transport_detection_spec_table(hass, has_password, routes, expect
     gate_present = isinstance(probe, tuple) and (
         probe[0] in (401, 403) or (probe[0] == 200 and probe[1] == "{}")
     )
-    gate_absent = isinstance(probe, tuple) and probe[0] == 404
+    gate_absent = (
+        isinstance(probe, tuple)
+        and probe[0] not in range(502, 600)
+        and probe[0] != 500
+        and not gate_present
+    )
     if not (gate_present or gate_absent):
         # Unusable probe: never guess a transport, never probe further.
         assert not legacy_calls
