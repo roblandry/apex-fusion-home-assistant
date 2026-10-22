@@ -54,18 +54,19 @@ def test_repo_sources_are_in_sync() -> None:
 @pytest.mark.parametrize(
     "version",
     [
-        "2026.10.22b1",
+        "2026.10.22-beta.1",
         "2026.10.25",
         "2026.1.5",
-        "2026.12.31rc9",
-        "2026.3.4a1",
-        "2026.10.22.dev3",
+        "2026.12.31-rc.9",
+        "2026.3.4-alpha.1",
         "2028.2.29",
-        "0.1.6",  # legacy, readable as the previous version
+        "2026.10.22-beta.9",
     ],
 )
-def test_valid_versions(version: str) -> None:
+def test_valid_new_versions(version: str) -> None:
+    assert bv.calver_problem(version) is None
     assert bv.is_valid(version)
+    assert not bv.is_legacy(version)
 
 
 @pytest.mark.parametrize(
@@ -74,69 +75,108 @@ def test_valid_versions(version: str) -> None:
         "1",
         "2026.10",
         "v2026.10.22",
+        "v2026.10.22-beta.1",
         "2026.10.22-beta1",
-        "2026.10.22-rc.1",
-        "2026.10.22.b1",
-        "2026.10.22b",
-        "2026.10.22beta1",
-        "2026.10.22b1.post1",
-        "2026.10.22b10",
-        "2026.10.22rc10",
-        "2026.10.22b0",
-        "2026.10.22b01",
+        "2026.10.22-beta",
+        "2026.10.22-beta.",
+        "2026.10.22-beta.0",
+        "2026.10.22-beta.10",
+        "2026.10.22-rc.10",
+        "2026.10.22-beta.01",
+        "2026.10.22-foo.1",
+        "2026.10.22-beta.1.2",
+        "2026.10.22b1",  # old style: previous version only
+        "2026.10.22rc1",
+        "2026.10.22.dev1",
         "2026.010.22",
         "2026.10.022",
         "2026.03.5",
         "2026.2.30",
         "2027.13.1",
         "2026.10.0",
-        "0.1.0b1",  # no new 0.x pre-releases
-        "0.2.0-beta1",
+        "0.1.6",  # legacy: previous version only
+        "0.2.0-beta.1",
         "",
     ],
 )
-def test_invalid_versions(version: str) -> None:
+def test_invalid_as_new_versions(version: str) -> None:
+    assert bv.calver_problem(version) is not None
+
+
+@pytest.mark.parametrize(
+    "version", ["0.1.6", "2026.10.22b1", "2026.10.22rc2", "2026.10.4.dev1"]
+)
+def test_previous_versions_stay_readable(version: str) -> None:
+    assert bv.is_legacy(version)
+    assert bv.is_valid(version)
+
+
+@pytest.mark.parametrize("version", ["banana", "v0.1.6", "2026.10.22-beta1", ""])
+def test_garbage_is_not_valid(version: str) -> None:
     assert not bv.is_valid(version)
-
-
-def test_legacy_cannot_be_set_but_is_readable() -> None:
-    assert bv.is_legacy("0.1.6")
-    assert not bv.is_legacy("2026.10.25")
-    assert not bv.is_legacy("garbage")
-    assert "0.x" in bv.calver_problem("0.2.0")
-    assert bv.calver_problem("2026.10.25") is None
+    assert not bv.is_legacy(version)
 
 
 def test_cap_message_says_to_roll_the_date() -> None:
-    problem = bv.calver_problem("2026.10.22b10")
+    problem = bv.calver_problem("2026.10.22-beta.10")
     assert problem is not None
     assert "cap" in problem
     assert "Roll the date" in problem
 
 
+def test_old_style_message_names_the_new_form() -> None:
+    problem = bv.calver_problem("2026.10.22b1")
+    assert problem is not None
+    assert "-beta.1" in problem
+
+
 def test_prerelease_detection() -> None:
-    for version in ("2026.10.22a1", "2026.10.22b1", "2026.10.22rc1", "2026.1.1.dev1"):
+    for version in (
+        "2026.10.22-alpha.1",
+        "2026.10.22-beta.1",
+        "2026.10.22-rc.1",
+        "2026.10.22b1",
+    ):
         assert bv.is_prerelease(version)
     assert not bv.is_prerelease("2026.10.22")
     assert not bv.is_prerelease("garbage")
 
 
+_ORDERED = [
+    "0.1.6",
+    "2026.10.4.dev1",
+    "2026.10.4-alpha.1",
+    "2026.10.4-beta.1",
+    "2026.10.4-beta.2",
+    "2026.10.4-beta.9",
+    "2026.10.4-rc.1",
+    "2026.10.4",
+    "2026.10.22-beta.1",
+    "2026.10.22-beta.2",
+    "2026.10.22-rc.1",
+    "2026.10.22",
+    "2026.11.1-beta.1",
+    "2027.1.1",
+]
+
+
 def test_ordering() -> None:
-    ordered = [
-        "0.1.6",
-        "2026.10.4.dev1",
-        "2026.10.4a1",
-        "2026.10.4b1",
-        "2026.10.4b2",
-        "2026.10.4b9",
-        "2026.10.4rc1",
-        "2026.10.4",
-        "2026.10.22b1",
-        "2026.10.22",
-        "2026.11.1b1",
-        "2027.1.1",
-    ]
-    assert sorted(reversed(ordered), key=bv.sort_key) == ordered
+    assert sorted(reversed(_ORDERED), key=bv.sort_key) == _ORDERED
+
+
+def test_old_and_new_styles_order_together() -> None:
+    assert bv.sort_key("2026.10.22b2") < bv.sort_key("2026.10.22-beta.3")
+    assert bv.sort_key("2026.10.22-beta.1") < bv.sort_key("2026.10.22rc1")
+
+
+def test_ordering_matches_packaging() -> None:
+    # packaging normalizes -beta.1 to b1, so it is the PEP 440 reference.
+    packaging_version = pytest.importorskip("packaging.version")
+    for low in _ORDERED:
+        for high in _ORDERED:
+            assert (bv.sort_key(low) < bv.sort_key(high)) == (
+                packaging_version.Version(low) < packaging_version.Version(high)
+            )
 
 
 def test_sort_key_rejects_invalid() -> None:
@@ -145,16 +185,17 @@ def test_sort_key_rejects_invalid() -> None:
 
 
 def test_get_and_check(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    root = _make_root(tmp_path, "2026.10.22b1")
+    root = _make_root(tmp_path, "2026.10.22-beta.1")
     assert _run(root, "--get") == 0
-    assert capsys.readouterr().out.strip() == "2026.10.22b1"
+    assert capsys.readouterr().out.strip() == "2026.10.22-beta.1"
     assert _run(root, "--check") == 0
 
 
-def test_check_accepts_legacy_and_rejects_garbage(tmp_path: Path) -> None:
+def test_check_accepts_previous_style_and_rejects_garbage(tmp_path: Path) -> None:
     assert _run(_make_root(tmp_path / "a"), "--check") == 0
-    assert _run(_make_root(tmp_path / "b", "banana"), "--check") == 1
-    assert _run(_make_root(tmp_path / "c", "2026.10.22b10"), "--check") == 1
+    assert _run(_make_root(tmp_path / "b", "2026.10.22b1"), "--check") == 0
+    assert _run(_make_root(tmp_path / "c", "banana"), "--check") == 1
+    assert _run(_make_root(tmp_path / "d", "2026.10.22-beta.10"), "--check") == 1
 
 
 def test_missing_pattern_is_fatal(tmp_path: Path) -> None:
@@ -182,6 +223,7 @@ def test_drift_is_reported(
     assert _run(root, "--check") == 1
     assert _run(root, "--get") == 1
     assert _run(root, "--next-beta") == 1
+    assert _run(root, "--stable") == 1
     assert _run(root, "--check-increase", "0.0.1") == 1
     assert _run(root, "--check-changelog") == 1
     assert _run(root, "--changelog-notes") == 1
@@ -195,14 +237,15 @@ def test_drift_is_reported(
 
 def test_set_writes_manifest_and_preserves_the_rest(tmp_path: Path) -> None:
     root = _make_root(tmp_path)
-    assert _run(root, "--set", "2026.10.22b1") == 0
+    assert _run(root, "--set", "2026.10.22-beta.1") == 0
     data = json.loads((root / _MANIFEST).read_text(encoding="utf-8"))
-    assert data == {"domain": "apex_fusion", "version": "2026.10.22b1"}
-    assert _run(root, "--set", "2026.10.22b1") == 0  # idempotent
+    assert data == {"domain": "apex_fusion", "version": "2026.10.22-beta.1"}
+    assert _run(root, "--set", "2026.10.22-beta.1") == 0  # idempotent
 
 
 @pytest.mark.parametrize(
-    "version", ["v2026.10.22", "2026.10.22b10", "2026.03.05", "0.2.0"]
+    "version",
+    ["v2026.10.22", "2026.10.22-beta.10", "2026.10.22b1", "2026.03.05", "0.2.0"],
 )
 def test_set_rejects_invalid(tmp_path: Path, version: str) -> None:
     root = _make_root(tmp_path)
@@ -212,26 +255,30 @@ def test_set_rejects_invalid(tmp_path: Path, version: str) -> None:
 
 def test_next_beta_new_date() -> None:
     today = dt.date(2026, 3, 5)
-    assert bv.next_beta("0.1.6", today) == "2026.3.5b1"
-    assert bv.next_beta("2026.3.4b7", today) == "2026.3.5b1"
-    assert bv.next_beta("2026.3.4", today) == "2026.3.5b1"
-    # A two-digit day is fine when the date is new.
-    assert bv.next_beta("2026.10.21b3", dt.date(2026, 10, 22)) == "2026.10.22b1"
+    assert bv.next_beta("0.1.6", today) == "2026.3.5-beta.1"
+    assert bv.next_beta("2026.3.4-beta.7", today) == "2026.3.5-beta.1"
+    assert bv.next_beta("2026.3.4", today) == "2026.3.5-beta.1"
+    assert bv.next_beta("2026.3.4b3", today) == "2026.3.5-beta.1"
 
 
-def test_next_beta_same_date_increments() -> None:
-    today = dt.date(2026, 3, 5)
-    assert bv.next_beta("2026.3.5b1", today) == "2026.3.5b2"
-    assert bv.next_beta("2026.3.5b8", today) == "2026.3.5b9"
+def test_next_beta_same_date_increments_on_any_day() -> None:
+    assert bv.next_beta("2026.3.5-beta.1", dt.date(2026, 3, 5)) == "2026.3.5-beta.2"
+    assert (
+        bv.next_beta("2026.10.22-beta.8", dt.date(2026, 10, 22)) == "2026.10.22-beta.9"
+    )
+
+
+def test_next_beta_continues_an_old_style_beta() -> None:
+    assert bv.next_beta("2026.3.5b1", dt.date(2026, 3, 5)) == "2026.3.5-beta.2"
 
 
 def test_next_beta_cap_refuses() -> None:
     with pytest.raises(bv.VersionError, match="cap"):
-        bv.next_beta("2026.3.5b9", dt.date(2026, 3, 5))
+        bv.next_beta("2026.3.5-beta.9", dt.date(2026, 3, 5))
 
 
 def test_next_beta_same_date_non_beta_refuses() -> None:
-    for current in ("2026.3.5", "2026.3.5rc1", "2026.3.5a1"):
+    for current in ("2026.3.5", "2026.3.5-rc.1", "2026.3.5-alpha.1"):
         with pytest.raises(bv.VersionError, match="not a beta"):
             bv.next_beta(current, dt.date(2026, 3, 5))
 
@@ -246,24 +293,14 @@ def test_next_beta_rejects_invalid_current() -> None:
         bv.next_beta("banana", dt.date(2026, 3, 5))
 
 
-def test_next_beta_refuses_same_date_on_two_digit_day() -> None:
-    with pytest.raises(bv.VersionError, match="later date"):
-        bv.next_beta("2026.10.22b1", dt.date(2026, 10, 22))
-
-
-def test_stable_new_date() -> None:
-    assert bv.stable("2026.10.22b1", dt.date(2026, 10, 25)) == "2026.10.25"
+def test_stable() -> None:
+    assert bv.stable("2026.10.22-beta.1", dt.date(2026, 10, 25)) == "2026.10.25"
     assert bv.stable("0.1.6", dt.date(2026, 10, 25)) == "2026.10.25"
-    assert bv.stable("2026.10.4", dt.date(2026, 10, 5)) == "2026.10.5"
-
-
-def test_stable_same_date_single_digit_day_promotes_beta() -> None:
-    assert bv.stable("2026.10.4b2", dt.date(2026, 10, 4)) == "2026.10.4"
+    # Same date works: the dash form ranks correctly on every day.
+    assert bv.stable("2026.10.22-beta.2", dt.date(2026, 10, 22)) == "2026.10.22"
 
 
 def test_stable_refuses() -> None:
-    with pytest.raises(bv.VersionError, match="later date"):
-        bv.stable("2026.10.22b1", dt.date(2026, 10, 22))
     with pytest.raises(bv.VersionError, match="not greater"):
         bv.stable("2026.10.4", dt.date(2026, 10, 4))
     with pytest.raises(bv.VersionError, match="not greater"):
@@ -280,17 +317,16 @@ def test_next_beta_and_stable_cli(
     root = _make_root(tmp_path)
     _today(monkeypatch, 2026, 10, 22)
     assert _run(root, "--next-beta") == 0
-    assert bv.synchronized_version(root) == "2026.10.22b1"
+    assert bv.synchronized_version(root) == "2026.10.22-beta.1"
+    assert _run(root, "--next-beta") == 0
+    assert bv.synchronized_version(root) == "2026.10.22-beta.2"
+    assert _run(root, "--stable") == 0
+    assert bv.synchronized_version(root) == "2026.10.22"
     capsys.readouterr()
 
-    assert _run(root, "--next-beta") == 1  # same date, two-digit day
-    assert _run(root, "--stable") == 1
-    assert "later date" in capsys.readouterr().err
-    assert bv.synchronized_version(root) == "2026.10.22b1"
-
-    _today(monkeypatch, 2026, 10, 25)
-    assert _run(root, "--stable") == 0
-    assert bv.synchronized_version(root) == "2026.10.25"
+    assert _run(root, "--stable") == 1  # already stable today
+    assert _run(root, "--next-beta") == 1  # same date, not a beta
+    assert "not greater" in capsys.readouterr().err
 
     _today(monkeypatch, 2026, 10, 9)  # now in the past
     assert _run(root, "--next-beta") == 1
@@ -303,76 +339,77 @@ def test_next_beta_cli_uses_utc_date(tmp_path: Path) -> None:
     assert _run(root, "--next-beta") == 0
     version = bv.synchronized_version(root)
     # Allow for the clock crossing midnight UTC between the two reads.
-    assert version in {f"{d.year}.{d.month}.{d.day}b1" for d in (today, bv._today())}
-
-
-def test_ordering_matches_packaging() -> None:
-    packaging_version = pytest.importorskip("packaging.version")
-    versions = [
-        "0.1.6",
-        "2026.10.4.dev1",
-        "2026.10.4a1",
-        "2026.10.4b1",
-        "2026.10.4b9",
-        "2026.10.4rc1",
-        "2026.10.4",
-        "2026.10.22b1",
-        "2026.10.22",
-    ]
-    for low in versions:
-        for high in versions:
-            assert (bv.sort_key(low) < bv.sort_key(high)) == (
-                packaging_version.Version(low) < packaging_version.Version(high)
-            )
+    options = {f"{d.year}.{d.month}.{d.day}-beta.1" for d in (today, bv._today())}
+    assert version in options
 
 
 def test_check_increase_ordering(tmp_path: Path) -> None:
-    root = _make_root(tmp_path, "2026.10.4b2")
-    assert _run(root, "--check-increase", "2026.10.4b1") == 0
+    root = _make_root(tmp_path, "2026.10.4-beta.2")
+    assert _run(root, "--check-increase", "2026.10.4-beta.1") == 0
     assert _run(root, "--check-increase", "0.1.6") == 0
-    assert _run(root, "--check-increase", "2026.10.4b2") == 1
+    assert _run(root, "--check-increase", "2026.10.4-beta.2") == 1
     assert _run(root, "--check-increase", "2026.10.5") == 1
     assert _run(root, "--check-increase", "garbage") == 1
 
 
 def test_stable_promotion_is_an_increase(tmp_path: Path) -> None:
     root = _make_root(tmp_path, "2026.10.25")
-    assert _run(root, "--check-increase", "2026.10.22b1") == 0
+    assert _run(root, "--check-increase", "2026.10.22-beta.1") == 0
 
 
 def test_check_increase_rejects_non_calver_current(tmp_path: Path) -> None:
     assert _run(_make_root(tmp_path / "a", "0.1.7"), "--check-increase", "0.1.6") == 1
     assert _run(_make_root(tmp_path / "b", "banana"), "--check-increase", "0.1.6") == 1
+    old_style = _make_root(tmp_path / "c", "2026.10.22b2")
+    assert _run(old_style, "--check-increase", "2026.10.22b1") == 1
 
 
 def test_first_transition_from_legacy(tmp_path: Path) -> None:
-    root = _make_root(tmp_path, "2026.10.22b1")
+    root = _make_root(tmp_path, "2026.10.22-beta.1")
     assert _run(root, "--check-increase", "0.1.6") == 0
+
+
+def test_transition_from_old_style_previous_version(tmp_path: Path) -> None:
+    root = _make_root(tmp_path, "2026.10.25-beta.1")
+    assert _run(root, "--check-increase", "2026.10.22b3") == 0
 
 
 def test_awesomeversion_gate(tmp_path: Path) -> None:
     pytest.importorskip("awesomeversion")
-    # Same date on a two-digit day: PEP 440 says greater, AwesomeVersion
-    # cannot rank it, so the check must fail.
-    same_day = _make_root(tmp_path / "a", "2026.10.22b2")
-    assert _run(same_day, "--check-increase", "2026.10.22b1") == 1
+    # A later beta on the same two-digit day ranks correctly.
+    same_day = _make_root(tmp_path / "a", "2026.10.22-beta.2")
+    assert _run(same_day, "--check-increase", "2026.10.22-beta.1") == 0
     stable_same_day = _make_root(tmp_path / "b", "2026.10.22")
-    assert _run(stable_same_day, "--check-increase", "2026.10.22b1") == 1
-    # A later date passes.
-    later = _make_root(tmp_path / "c", "2026.10.25")
-    assert _run(later, "--check-increase", "2026.10.22b1") == 0
-    # Single-digit days rank fine on the same date.
-    single = _make_root(tmp_path / "d", "2026.10.4b2")
-    assert _run(single, "--check-increase", "2026.10.4b1") == 0
-    # And the first move from the legacy version.
-    first = _make_root(tmp_path / "e", "2026.10.22b1")
+    assert _run(stable_same_day, "--check-increase", "2026.10.22-beta.9") == 0
+    rc = _make_root(tmp_path / "c", "2026.10.22-rc.1")
+    assert _run(rc, "--check-increase", "2026.10.22-beta.9") == 0
+    first = _make_root(tmp_path / "d", "2026.10.22-beta.1")
     assert _run(first, "--check-increase", "0.1.6") == 0
+    # Going backwards is still rejected (here by the PEP 440 ordering).
+    backwards = _make_root(tmp_path / "e", "2026.10.22-beta.1")
+    assert _run(backwards, "--check-increase", "2026.10.22-beta.2") == 1
+
+
+def test_awesomeversion_disagreement_fails(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # PEP 440 says greater but AwesomeVersion does not (the old bN-on-a-
+    # two-digit-day quirk): the gate must block it.
+    monkeypatch.setattr(bv, "awesome_greater", lambda new, base: False)
+    root = _make_root(tmp_path, "2026.10.22-beta.2")
+    assert _run(root, "--check-increase", "2026.10.22-beta.1") == 1
+    assert "AwesomeVersion" in capsys.readouterr().err
 
 
 def test_awesome_greater_values() -> None:
     pytest.importorskip("awesomeversion")
-    assert bv.awesome_greater("2026.10.22b1", "0.1.6") is True
-    assert bv.awesome_greater("2026.10.22b2", "2026.10.22b1") is False
+    assert bv.awesome_greater("2026.10.22-beta.1", "0.1.6") is True
+    assert bv.awesome_greater("2026.10.22-beta.2", "2026.10.22-beta.1") is True
+    assert bv.awesome_greater("2026.10.22", "2026.10.22-beta.2") is True
+    assert bv.awesome_greater("2026.10.22-rc.1", "2026.10.22-beta.9") is True
+    assert bv.awesome_greater("2026.10.22-beta.1", "2026.10.22-beta.2") is False
 
 
 def test_awesomeversion_missing_is_skipped(
@@ -395,7 +432,7 @@ _CHANGELOG = """# Changelog
 
 - one
 
-## v2026.10.22b1
+## v2026.10.22-beta.1
 
 ### Fixes
 
@@ -412,7 +449,7 @@ _CHANGELOG = """# Changelog
 def test_changelog_section(tmp_path: Path) -> None:
     root = _make_root(tmp_path, changelog=_CHANGELOG)
     assert bv.changelog_section("2026.10.25", root) == "### Fixes\n\n- one"
-    assert bv.changelog_section("2026.10.22b1", root) == "### Fixes\n\n- two"
+    assert bv.changelog_section("2026.10.22-beta.1", root) == "### Fixes\n\n- two"
     assert bv.changelog_section("2026.10.20", root) is None  # empty section
     assert bv.changelog_section("2026.10.1", root) is None
     assert bv.changelog_section("2026.10.2", root) == "- not this one"

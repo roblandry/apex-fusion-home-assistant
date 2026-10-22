@@ -4,22 +4,22 @@
 The version lives in ``custom_components/apex_fusion/manifest.json``. To track
 another file, add a ``VersionFile`` entry to ``SOURCES``.
 
-Versions are CalVer, ``YYYY.M.D`` with an optional PEP 440 pre-release suffix:
+Versions are CalVer, ``YYYY.M.D`` with an optional pre-release suffix:
 
-    2026.10.22b1    beta 1 (also aN, rcN, .devN)
-    2026.10.25      stable
+    2026.10.22-beta.1    beta 1 (also -alpha.N and -rc.N)
+    2026.10.25           stable
 
 Month and day have no leading zeros. Pre-release numbers run 1 to 9: there is
-no ``b10``. When a day's betas run out, roll the date forward and start at
-``b1``. The legacy ``0.x.y`` versions stay readable as the *previous* version,
-so the first move from ``0.1.6`` to CalVer is allowed, but no new ``0.x`` can be
-set.
+no ``beta.10``. When a day's betas run out, roll the date forward and start at
+``beta.1``. Plain ``0.x.y`` versions and the earlier ``bN`` style (for example
+``2026.10.22b1``) stay readable as the *previous* version, so moving from
+``0.1.6`` to CalVer is allowed, but no new version may use them.
 
 Usage (paths resolve relative to the repo root):
 
     scripts/bump-version.py --get
     scripts/bump-version.py --check
-    scripts/bump-version.py --set 2026.10.22b1
+    scripts/bump-version.py --set 2026.10.22-beta.1
     scripts/bump-version.py --next-beta
     scripts/bump-version.py --stable
     scripts/bump-version.py --check-increase 0.1.6
@@ -28,10 +28,11 @@ Usage (paths resolve relative to the repo root):
 
 The script never commits, tags or releases. CI does that after the bump merges.
 
-Ordering is also checked with AwesomeVersion (what Home Assistant and HACS use
-to decide "update available"). It does not understand ``bN`` or ``rcN`` on days
-10 to 31, so two releases on the same two-digit day compare as equal there.
-``--check-increase`` therefore requires both orderings to agree.
+Ordering is checked two ways: PEP 440 precedence (alpha < beta < rc < stable)
+and AwesomeVersion, which Home Assistant and HACS use to decide "update
+available". ``--check-increase`` requires both to agree. The dash form is used
+because AwesomeVersion ranks it correctly on every day of the month, which it
+does not for ``bN`` suffixes on days 10 to 31.
 """
 
 from __future__ import annotations
@@ -47,10 +48,13 @@ from typing import NamedTuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# New style: 2026.10.22-beta.1. Old style (previous versions only): 2026.10.22b1.
 _VERSION_RE = re.compile(
-    r"^(\d+)\.(\d+)\.(\d+)(?:(a|b|rc)(\d+)|\.dev(\d+))?$",
+    r"^(\d+)\.(\d+)\.(\d+)"
+    r"(?:-(alpha|beta|rc)\.(\d+)|(a|b|rc)(\d+)|\.dev(\d+))?$",
 )
-_STAGE_RANK = {"dev": 0, "a": 1, "b": 2, "rc": 3, "": 4}
+_STAGE_RANK = {"dev": 0, "alpha": 1, "beta": 2, "rc": 3, "": 4}
+_OLD_STAGE = {"a": "alpha", "b": "beta", "rc": "rc"}
 _PRERELEASE_CAP = 9
 
 
@@ -60,8 +64,9 @@ class Parsed(NamedTuple):
     major: int
     minor: int
     patch: int
-    stage: str  # "", "a", "b", "rc" or "dev"
+    stage: str  # "", "alpha", "beta", "rc" or "dev"
     num: int  # pre-release number, 0 for a final release
+    dash: bool  # written as -beta.N (the only style new versions may use)
 
 
 class VersionError(Exception):
@@ -91,14 +96,16 @@ def parse(version: str) -> Parsed | None:
     match = _VERSION_RE.fullmatch(version)
     if match is None:
         return None
-    major, minor, patch, stage, num, dev = match.groups()
-    return Parsed(
-        int(major),
-        int(minor),
-        int(patch),
-        stage or ("dev" if dev is not None else ""),
-        int(num if num is not None else dev if dev is not None else 0),
-    )
+    major, minor, patch, stage, num, old_stage, old_num, dev = match.groups()
+    if stage is not None:
+        suffix = (stage, int(num), True)
+    elif old_stage is not None:
+        suffix = (_OLD_STAGE[old_stage], int(old_num), False)
+    elif dev is not None:
+        suffix = ("dev", int(dev), False)
+    else:
+        suffix = ("", 0, True)
+    return Parsed(int(major), int(minor), int(patch), *suffix)
 
 
 def _plain(number: str) -> bool:
@@ -111,8 +118,13 @@ def calver_problem(version: str) -> str | None:
     parsed = parse(version)
     if parsed is None:
         return (
-            f"{version!r} is not YYYY.M.D with an optional aN, bN, rcN or .devN "
-            "suffix (for example 2026.10.22b1 or 2026.10.25)"
+            f"{version!r} is not YYYY.M.D with an optional -alpha.N, -beta.N or "
+            "-rc.N suffix (for example 2026.10.22-beta.1 or 2026.10.25)"
+        )
+    if not parsed.dash:
+        return (
+            f"{version!r} uses the old suffix style; write 2026.10.22-beta.1, "
+            "not 2026.10.22b1"
         )
     if any(not _plain(n) for n in re.findall(r"\d+", version)):
         return f"{version!r} has a leading zero; write 2026.3.5, not 2026.03.05"
@@ -122,31 +134,36 @@ def calver_problem(version: str) -> str | None:
         dt.date(parsed.major, parsed.minor, parsed.patch)
     except ValueError:
         return f"{version!r} is not a real calendar date"
-    if parsed.stage in ("a", "b", "rc"):
+    if parsed.stage:
         if parsed.num < 1:
             return f"{version!r}: pre-release numbers start at 1"
         if parsed.num > _PRERELEASE_CAP:
-            marker = parsed.stage
             return (
-                f"{version!r} exceeds the {marker}{_PRERELEASE_CAP} cap. Roll the "
-                f"date forward to today and reset to {marker}1 instead"
+                f"{version!r} exceeds the {parsed.stage}.{_PRERELEASE_CAP} cap. "
+                f"Roll the date forward to today and reset to {parsed.stage}.1 "
+                "instead"
             )
     return None
 
 
 def is_legacy(version: str) -> bool:
-    """Return True for the old plain ``0.x.y`` versions."""
+    """Return True for versions that may only appear as the previous version.
+
+    That is plain ``0.x.y`` and anything written in the old ``bN`` style.
+    """
     parsed = parse(version)
-    return parsed is not None and parsed.major == 0 and parsed.stage == ""
+    return parsed is not None and (
+        (parsed.major == 0 and parsed.stage == "") or not parsed.dash
+    )
 
 
 def is_valid(version: str) -> bool:
-    """Return True if *version* is CalVer or the legacy ``0.x.y`` form."""
+    """Return True if *version* is CalVer or a readable previous version."""
     return is_legacy(version) or calver_problem(version) is None
 
 
 def is_prerelease(version: str) -> bool:
-    """Return True if *version* carries an a/b/rc/dev suffix."""
+    """Return True if *version* carries a pre-release suffix."""
     parsed = parse(version)
     return parsed is not None and parsed.stage != ""
 
@@ -156,7 +173,13 @@ def sort_key(version: str) -> tuple[int, int, int, int, int]:
     parsed = parse(version)
     if parsed is None:
         raise VersionError(f"{version!r} is not a valid version")
-    return (*parsed[:3], _STAGE_RANK[parsed.stage], parsed.num)
+    return (
+        parsed.major,
+        parsed.minor,
+        parsed.patch,
+        _STAGE_RANK[parsed.stage],
+        parsed.num,
+    )
 
 
 def awesome_greater(new: str, base: str) -> bool | None:
@@ -169,13 +192,6 @@ def awesome_greater(new: str, base: str) -> bool | None:
     except ImportError:
         return None
     return bool(AwesomeVersion(new) > AwesomeVersion(base))
-
-
-_TWO_DIGIT_DAY = (
-    "AwesomeVersion (used by HA and HACS) cannot rank two releases that share a "
-    "date on a two-digit day, so {version} would not be offered as an update. "
-    "Use a later date (--set)."
-)
 
 
 def _stamp(today: dt.date) -> str:
@@ -193,37 +209,31 @@ def next_beta(current: str, today: dt.date) -> str:
         raise VersionError(f"current version {current!r} is not valid")
     stamp = _stamp(today)
     if _date(parsed) < (today.year, today.month, today.day):
-        return f"{stamp}b1"
+        return f"{stamp}-beta.1"
     if _date(parsed) > (today.year, today.month, today.day):
         raise VersionError(
             f"current version {current} is dated after today ({stamp}); use --set"
         )
-    if parsed.stage != "b":
+    if parsed.stage != "beta":
         raise VersionError(
             f"{current} already has today's date and is not a beta; "
             "wait until tomorrow or use --set"
         )
     if parsed.num >= _PRERELEASE_CAP:
         raise VersionError(
-            f"{current} is already b{_PRERELEASE_CAP}, the cap. Roll the date "
-            "forward (a later day) and start at b1 with --set"
+            f"{current} is already beta.{_PRERELEASE_CAP}, the cap. Roll the "
+            "date forward (a later day) and start at beta.1 with --set"
         )
-    new = f"{stamp}b{parsed.num + 1}"
-    if today.day >= 10:
-        raise VersionError(_TWO_DIGIT_DAY.format(version=new))
-    return new
+    return f"{stamp}-beta.{parsed.num + 1}"
 
 
 def stable(current: str, today: dt.date) -> str:
     """Return today's stable version, which must rank above *current*."""
-    parsed = parse(current)
-    if parsed is None:
+    if parse(current) is None:
         raise VersionError(f"current version {current!r} is not valid")
     new = _stamp(today)
     if sort_key(new) <= sort_key(current):
         raise VersionError(f"{new} is not greater than the current version {current}")
-    if _date(parsed) == (today.year, today.month, today.day) and today.day >= 10:
-        raise VersionError(_TWO_DIGIT_DAY.format(version=new))
     return new
 
 
@@ -352,9 +362,7 @@ def _check_increase(base: str, root: Path) -> int:
     elif not ranked:
         return _fail(
             f"AwesomeVersion (used by HA and HACS) does not rank {current} above "
-            f"{base}, so an update would not be offered. Releases on a two-digit "
-            "day (10-31) must not share a date with the previous release; cut "
-            "this one on a later day."
+            f"{base}, so an update would not be offered"
         )
     print(f"ok: {base} -> {current}")
     return 0
@@ -399,7 +407,7 @@ def main(argv: list[str] | None = None) -> int:
     action.add_argument(
         "--next-beta",
         action="store_true",
-        help="Write today's next beta (bN+1 on the same date, else b1).",
+        help="Write today's next beta (beta.N+1 on the same date, else beta.1).",
     )
     action.add_argument(
         "--stable",
