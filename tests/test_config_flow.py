@@ -1809,6 +1809,18 @@ _SPEC_ROWS = [
         ("rest", None, "SER1"),
     ),
     (
+        "probe 503 then 200 JSON -> rest",
+        True,
+        _routes([(503, ""), (200, "{}")], login=_LOGIN_OK, status=_REST_OK_STATUS),
+        ("rest", None, "SER1"),
+    ),
+    (
+        "probe 404, timeout, 404 -> cannot_connect",
+        False,
+        _routes([(404, ""), asyncio.TimeoutError(), (404, "")], cgi=(200, _CGI_OK)),
+        CannotConnect,
+    ),
+    (
         "probe 404 x3 -> legacy",
         False,
         _routes([(404, ""), (404, ""), (404, "")], cgi=(200, _CGI_OK)),
@@ -1987,3 +1999,41 @@ async def test_login_falls_back_to_admin_after_the_supplied_username(hass):
     assert info["transport"] == "rest"
     assert posted[:4] == ["rob"] * 4
     assert posted[4] == "admin"
+
+
+@pytest.mark.parametrize(
+    ("probe", "expected_gets", "outcome"),
+    [
+        ([(401, "")], 1, "rest"),
+        ([(403, "")], 1, "rest"),
+        ([(404, ""), (401, "")], 2, "rest"),
+        ([(404, "")], 3, "legacy"),
+        ([(404, ""), (404, ""), (404, "")], 3, "legacy"),
+        ([(404, ""), asyncio.TimeoutError(), (404, "")], 3, CannotConnect),
+        ([asyncio.TimeoutError()], 3, CannotConnect),
+    ],
+)
+async def test_gate_probe_attempt_counts(hass, probe, expected_gets, outcome):
+    """Stops at the first positive signal; otherwise uses all three attempts."""
+    routes = _routes(probe, cgi=(200, _CGI_OK))
+    session = _SpecSession(routes)
+    sleeps: list[float] = []
+
+    async def _sleep(secs: float):
+        sleeps.append(secs)
+
+    with patch("custom_components.apex_fusion.config_flow.asyncio.sleep", new=_sleep):
+        from custom_components.apex_fusion.config_flow import _async_probe_rest_gate
+
+        if outcome is CannotConnect:
+            with pytest.raises(CannotConnect):
+                await _async_probe_rest_gate(cast(Any, session), base_url="http://x")
+        else:
+            result = await _async_probe_rest_gate(
+                cast(Any, session), base_url="http://x"
+            )
+            assert result is (outcome == "rest")
+
+    assert session.calls.count("GET /rest/status") == expected_gets
+    # Backoff between attempts only (0.25 s x attempt), never after the last one.
+    assert sleeps == [0.25 * n for n in range(1, expected_gets)]
