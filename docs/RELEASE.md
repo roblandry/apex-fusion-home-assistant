@@ -90,15 +90,17 @@ this repository in HACS. Everyone else stays on the latest stable release.
 
 ## If the release did not happen
 
-- Check the workflow run under **Actions**. If the release step failed, fix the
-  cause and run **Release on version bump** manually on `main`; it releases the
-  version currently on `main` and does nothing if the tag already exists.
-- To release without CI, tag and publish by hand from the merged commit:
+There is no manual release workflow. If the automatic release was missed or
+failed, check the run under **Actions**, then tag and publish by hand from the
+merged commit on `main`:
 
-  ```sh
-  git tag -a v2026.10.25 -m v2026.10.25 <commit>
-  git push origin v2026.10.25
-  gh release create v2026.10.25 --verify-tag --title v2026.10.25 --notes-file notes.md
-  ```
+```sh
+git tag -a v2026.10.25 -m v2026.10.25 <commit>
+git push origin v2026.10.25
+gh release create v2026.10.25 --verify-tag --title v2026.10.25 \
+  --notes-file notes.md
+```
 
-  Add `--prerelease` for suffixed versions.
+Add `--prerelease` for suffixed versions such as `2026.10.22b1`. Take the notes
+from the version's `CHANGELOG.md` section. Never push a release commit to
+`main` to do this.
