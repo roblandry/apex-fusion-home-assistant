@@ -21,6 +21,7 @@ Usage (paths resolve relative to the repo root):
     scripts/bump-version.py --check
     scripts/bump-version.py --set 2026.10.22b1
     scripts/bump-version.py --next-beta
+    scripts/bump-version.py --stable
     scripts/bump-version.py --check-increase 0.1.6
     scripts/bump-version.py --check-changelog
     scripts/bump-version.py --changelog-notes
@@ -39,6 +40,7 @@ import argparse
 import datetime as dt
 import re
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
@@ -169,16 +171,30 @@ def awesome_greater(new: str, base: str) -> bool | None:
     return bool(AwesomeVersion(new) > AwesomeVersion(base))
 
 
-def next_beta(current: str, today: dt.date) -> tuple[str, list[str]]:
-    """Return the next beta after *current* for *today*, plus any warnings."""
+_TWO_DIGIT_DAY = (
+    "AwesomeVersion (used by HA and HACS) cannot rank two releases that share a "
+    "date on a two-digit day, so {version} would not be offered as an update. "
+    "Use a later date (--set)."
+)
+
+
+def _stamp(today: dt.date) -> str:
+    return f"{today.year}.{today.month}.{today.day}"
+
+
+def _date(parsed: Parsed) -> tuple[int, int, int]:
+    return (parsed.major, parsed.minor, parsed.patch)
+
+
+def next_beta(current: str, today: dt.date) -> str:
+    """Return the next beta after *current* for *today*."""
     parsed = parse(current)
     if parsed is None:
         raise VersionError(f"current version {current!r} is not valid")
-    stamp = f"{today.year}.{today.month}.{today.day}"
-    date = (parsed.major, parsed.minor, parsed.patch)
-    if date < (today.year, today.month, today.day):
-        return f"{stamp}b1", []
-    if date > (today.year, today.month, today.day):
+    stamp = _stamp(today)
+    if _date(parsed) < (today.year, today.month, today.day):
+        return f"{stamp}b1"
+    if _date(parsed) > (today.year, today.month, today.day):
         raise VersionError(
             f"current version {current} is dated after today ({stamp}); use --set"
         )
@@ -190,16 +206,25 @@ def next_beta(current: str, today: dt.date) -> tuple[str, list[str]]:
     if parsed.num >= _PRERELEASE_CAP:
         raise VersionError(
             f"{current} is already b{_PRERELEASE_CAP}, the cap. Roll the date "
-            f"forward (a later day) and start at b1 with --set"
+            "forward (a later day) and start at b1 with --set"
         )
-    warnings: list[str] = []
+    new = f"{stamp}b{parsed.num + 1}"
     if today.day >= 10:
-        warnings.append(
-            f"warning: AwesomeVersion cannot rank two releases on the same "
-            f"two-digit day ({stamp}), so HACS may not offer this update and "
-            "CI will reject it. Cut it on a later day."
-        )
-    return f"{stamp}b{parsed.num + 1}", warnings
+        raise VersionError(_TWO_DIGIT_DAY.format(version=new))
+    return new
+
+
+def stable(current: str, today: dt.date) -> str:
+    """Return today's stable version, which must rank above *current*."""
+    parsed = parse(current)
+    if parsed is None:
+        raise VersionError(f"current version {current!r} is not valid")
+    new = _stamp(today)
+    if sort_key(new) <= sort_key(current):
+        raise VersionError(f"{new} is not greater than the current version {current}")
+    if _date(parsed) == (today.year, today.month, today.day) and today.day >= 10:
+        raise VersionError(_TWO_DIGIT_DAY.format(version=new))
+    return new
 
 
 def _today() -> dt.date:
@@ -285,16 +310,14 @@ def _set_version(version: str, root: Path) -> int:
     return _apply(version, root)
 
 
-def _next_beta(root: Path) -> int:
+def _advance(root: Path, make: Callable[[str, dt.date], str]) -> int:
     current = synchronized_version(root)
     if current is None:
         return 1
     try:
-        new, warnings = next_beta(current, _today())
+        new = make(current, _today())
     except VersionError as exc:
         return _fail(str(exc))
-    for warning in warnings:
-        print(warning, file=sys.stderr)
     return _apply(new, root)
 
 
@@ -379,6 +402,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Write today's next beta (bN+1 on the same date, else b1).",
     )
     action.add_argument(
+        "--stable",
+        action="store_true",
+        help="Write today's date with no suffix (a stable release).",
+    )
+    action.add_argument(
         "--check-increase",
         metavar="BASE",
         help="Fail unless the version is greater than BASE (PEP 440 and AwesomeVersion).",
@@ -407,7 +435,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.set is not None:
         return _set_version(args.set, root)
     if args.next_beta:
-        return _next_beta(root)
+        return _advance(root, next_beta)
+    if args.stable:
+        return _advance(root, stable)
     if args.check_increase is not None:
         return _check_increase(args.check_increase, root)
     if args.check_changelog:

@@ -45,11 +45,13 @@ not see the update.
 
    ```sh
    python3 scripts/bump-version.py --next-beta        # today's next beta
+   python3 scripts/bump-version.py --stable           # today's date, no suffix
    python3 scripts/bump-version.py --set 2026.10.25   # an exact version
    ```
 
    `--next-beta` gives `bN+1` if the current version is a beta from today,
-   otherwise `b1` for today's date. `--get` prints the current version and
+   otherwise `b1` for today's date. `--stable` writes today's date with no
+   suffix. Both refuse a result HACS could not rank (see above). `--get` prints the current version and
    `--check` fails if the version sources disagree.
 
 2. Add a section for the new version at the top of `CHANGELOG.md`, under the
@@ -90,9 +92,11 @@ this repository in HACS. Everyone else stays on the latest stable release.
 
 ## If the release did not happen
 
-There is no manual release workflow. If the automatic release was missed or
-failed, check the run under **Actions**, then tag and publish by hand from the
-merged commit on `main`:
+There is no manual release workflow that edits `main`. If the automatic release
+was missed or failed, check the run under **Actions**. You can re-run **Release
+on version bump** from the Actions tab (it releases the version on `main` and
+skips if the tag exists), or tag and publish by hand from the merged commit on
+`main`:
 
 ```sh
 git tag -a v2026.10.25 -m v2026.10.25 <commit>

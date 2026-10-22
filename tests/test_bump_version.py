@@ -212,15 +212,17 @@ def test_set_rejects_invalid(tmp_path: Path, version: str) -> None:
 
 def test_next_beta_new_date() -> None:
     today = dt.date(2026, 3, 5)
-    assert bv.next_beta("0.1.6", today) == ("2026.3.5b1", [])
-    assert bv.next_beta("2026.3.4b7", today) == ("2026.3.5b1", [])
-    assert bv.next_beta("2026.3.4", today) == ("2026.3.5b1", [])
+    assert bv.next_beta("0.1.6", today) == "2026.3.5b1"
+    assert bv.next_beta("2026.3.4b7", today) == "2026.3.5b1"
+    assert bv.next_beta("2026.3.4", today) == "2026.3.5b1"
+    # A two-digit day is fine when the date is new.
+    assert bv.next_beta("2026.10.21b3", dt.date(2026, 10, 22)) == "2026.10.22b1"
 
 
 def test_next_beta_same_date_increments() -> None:
     today = dt.date(2026, 3, 5)
-    assert bv.next_beta("2026.3.5b1", today) == ("2026.3.5b2", [])
-    assert bv.next_beta("2026.3.5b8", today) == ("2026.3.5b9", [])
+    assert bv.next_beta("2026.3.5b1", today) == "2026.3.5b2"
+    assert bv.next_beta("2026.3.5b8", today) == "2026.3.5b9"
 
 
 def test_next_beta_cap_refuses() -> None:
@@ -244,14 +246,33 @@ def test_next_beta_rejects_invalid_current() -> None:
         bv.next_beta("banana", dt.date(2026, 3, 5))
 
 
-def test_next_beta_warns_on_two_digit_day() -> None:
-    new, warnings = bv.next_beta("2026.10.22b1", dt.date(2026, 10, 22))
-    assert new == "2026.10.22b2"
-    assert len(warnings) == 1
-    assert "AwesomeVersion" in warnings[0]
+def test_next_beta_refuses_same_date_on_two_digit_day() -> None:
+    with pytest.raises(bv.VersionError, match="later date"):
+        bv.next_beta("2026.10.22b1", dt.date(2026, 10, 22))
 
 
-def test_next_beta_cli(
+def test_stable_new_date() -> None:
+    assert bv.stable("2026.10.22b1", dt.date(2026, 10, 25)) == "2026.10.25"
+    assert bv.stable("0.1.6", dt.date(2026, 10, 25)) == "2026.10.25"
+    assert bv.stable("2026.10.4", dt.date(2026, 10, 5)) == "2026.10.5"
+
+
+def test_stable_same_date_single_digit_day_promotes_beta() -> None:
+    assert bv.stable("2026.10.4b2", dt.date(2026, 10, 4)) == "2026.10.4"
+
+
+def test_stable_refuses() -> None:
+    with pytest.raises(bv.VersionError, match="later date"):
+        bv.stable("2026.10.22b1", dt.date(2026, 10, 22))
+    with pytest.raises(bv.VersionError, match="not greater"):
+        bv.stable("2026.10.4", dt.date(2026, 10, 4))
+    with pytest.raises(bv.VersionError, match="not greater"):
+        bv.stable("2026.10.9", dt.date(2026, 10, 4))
+    with pytest.raises(bv.VersionError):
+        bv.stable("banana", dt.date(2026, 10, 4))
+
+
+def test_next_beta_and_stable_cli(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
@@ -262,9 +283,14 @@ def test_next_beta_cli(
     assert bv.synchronized_version(root) == "2026.10.22b1"
     capsys.readouterr()
 
-    assert _run(root, "--next-beta") == 0
-    assert bv.synchronized_version(root) == "2026.10.22b2"
-    assert "warning" in capsys.readouterr().err
+    assert _run(root, "--next-beta") == 1  # same date, two-digit day
+    assert _run(root, "--stable") == 1
+    assert "later date" in capsys.readouterr().err
+    assert bv.synchronized_version(root) == "2026.10.22b1"
+
+    _today(monkeypatch, 2026, 10, 25)
+    assert _run(root, "--stable") == 0
+    assert bv.synchronized_version(root) == "2026.10.25"
 
     _today(monkeypatch, 2026, 10, 9)  # now in the past
     assert _run(root, "--next-beta") == 1
@@ -278,6 +304,26 @@ def test_next_beta_cli_uses_utc_date(tmp_path: Path) -> None:
     version = bv.synchronized_version(root)
     # Allow for the clock crossing midnight UTC between the two reads.
     assert version in {f"{d.year}.{d.month}.{d.day}b1" for d in (today, bv._today())}
+
+
+def test_ordering_matches_packaging() -> None:
+    packaging_version = pytest.importorskip("packaging.version")
+    versions = [
+        "0.1.6",
+        "2026.10.4.dev1",
+        "2026.10.4a1",
+        "2026.10.4b1",
+        "2026.10.4b9",
+        "2026.10.4rc1",
+        "2026.10.4",
+        "2026.10.22b1",
+        "2026.10.22",
+    ]
+    for low in versions:
+        for high in versions:
+            assert (bv.sort_key(low) < bv.sort_key(high)) == (
+                packaging_version.Version(low) < packaging_version.Version(high)
+            )
 
 
 def test_check_increase_ordering(tmp_path: Path) -> None:
