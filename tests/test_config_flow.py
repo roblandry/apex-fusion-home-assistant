@@ -1408,12 +1408,8 @@ async def test_no_login_uses_rest_when_served_without_login(hass, aioclient_mock
 @pytest.mark.parametrize(
     ("status", "text"),
     [
-        (401, "{}"),
-        (403, "{}"),
         (404, ""),
         (405, ""),
-        (200, "<html></html>"),
-        (200, "[]"),
     ],
 )
 async def test_no_login_without_rest_detects_legacy(hass, aioclient_mock, status, text):
@@ -1523,3 +1519,38 @@ async def test_reconfigure_redetect_updates_legacy_format(
         )
     assert entry.data[CONF_TRANSPORT] == TRANSPORT_REST
     assert CONF_LEGACY_FORMAT not in entry.data
+
+
+@pytest.mark.parametrize("text", ["<html></html>", "{no", "[]"])
+async def test_no_login_rest_200_with_unusable_body_is_cannot_connect(
+    hass, aioclient_mock, text
+):
+    host = "1.2.3.4"
+    aioclient_mock.get(f"http://{host}/rest/status", status=200, text=text)
+    aioclient_mock.get(
+        f"http://{host}/cgi-bin/status.json",
+        status=200,
+        text='{"istat": {"serial": "SER9"}}',
+    )
+
+    with pytest.raises(CannotConnect):
+        await async_validate_input(
+            hass, {CONF_HOST: host, CONF_NO_LOGIN: True, CONF_USERNAME: "admin"}
+        )
+
+    assert not any("cgi-bin" in str(c[1]) for c in aioclient_mock.mock_calls)
+
+
+@pytest.mark.parametrize("status", [401, 403])
+async def test_no_login_rest_requiring_login_is_invalid_auth(
+    hass, aioclient_mock, status
+):
+    host = "1.2.3.4"
+    aioclient_mock.get(f"http://{host}/rest/status", status=status, text="{}")
+
+    with pytest.raises(InvalidAuth):
+        await async_validate_input(
+            hass, {CONF_HOST: host, CONF_NO_LOGIN: True, CONF_USERNAME: "admin"}
+        )
+
+    assert not any("cgi-bin" in str(c[1]) for c in aioclient_mock.mock_calls)

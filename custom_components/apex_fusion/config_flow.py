@@ -309,8 +309,10 @@ async def _async_probe_rest_without_login(
         does not serve REST status without a login.
 
     Raises:
-        CannotConnect: If the controller could not be reached or errored
-            transiently; the transport must not be guessed in that case.
+        CannotConnect: If the controller could not be reached, errored
+            transiently, or served an unusable REST payload; the transport must
+            not be guessed in that case.
+        InvalidAuth: If REST is present but requires a login.
     """
     try:
         async with async_timeout.timeout(10):
@@ -318,9 +320,13 @@ async def _async_probe_rest_without_login(
                 f"{base_url}/rest/status", headers={"Accept": "*/*"}
             ) as resp:
                 _LOGGER.debug("REST no-login status HTTP %s", resp.status)
+                if resp.status in (HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN):
+                    # REST is present but wants a login: not a legacy controller.
+                    raise InvalidAuth
                 if resp.status != HTTPStatus.OK:
                     if _is_transient_http_status(resp.status):
                         raise CannotConnect
+                    # 404/405 etc.: this controller has no REST API.
                     return None
                 body = await resp.text()
     except (asyncio.TimeoutError, aiohttp.ClientError) as err:
@@ -328,10 +334,11 @@ async def _async_probe_rest_without_login(
 
     try:
         status_any: Any = json.loads(body) if body else {}
-    except json.JSONDecodeError:
-        return None
+    except json.JSONDecodeError as err:
+        # REST answered 200 but is broken: do not mistake it for legacy.
+        raise CannotConnect from err
     if not isinstance(status_any, dict):
-        return None
+        raise CannotConnect
     status_obj = cast(dict[str, Any], status_any)
 
     hostname = _extract_hostname_from_status_obj(status_obj)
