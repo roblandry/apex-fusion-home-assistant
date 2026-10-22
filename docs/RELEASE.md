@@ -106,3 +106,5 @@ under **Actions**, then finish it by hand.
    Add `--prerelease` for `-alpha`, `-beta` and `-rc` tags.
 
 Never push a release commit to `main` to do this.
+
+A tested recovery script is tracked in #36.
