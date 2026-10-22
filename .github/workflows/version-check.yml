@@ -1,0 +1,42 @@
+name: Version check
+
+# Keeps release PRs honest. Always checks the version sources agree; when a PR
+# changes the version, also checks it is a real increase over the base branch and
+# that CHANGELOG.md has a section for it.
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    name: Version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install version-ordering packages
+        run: python3 -m pip install --quiet awesomeversion==25.8.0 packaging==26.3
+
+      - name: Version sources agree
+        run: python3 scripts/bump-version.py --check
+
+      - name: Check a version change
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          BASE_DIR="$RUNNER_TEMP/base"
+          git worktree add --detach "$BASE_DIR" "$BASE_SHA"
+          BASE_VERSION=$(python3 scripts/bump-version.py --root "$BASE_DIR" --get)
+          VERSION=$(python3 scripts/bump-version.py --get)
+          if [[ "$BASE_VERSION" == "$VERSION" ]]; then
+            echo "Version unchanged at $VERSION; nothing more to check."
+            exit 0
+          fi
+          echo "Version change: $BASE_VERSION -> $VERSION"
+          python3 scripts/bump-version.py --check-increase "$BASE_VERSION"
+          python3 scripts/bump-version.py --check-changelog
