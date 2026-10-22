@@ -7,10 +7,15 @@ via `nstat.latestFirmware` and `nstat.updateFirmware`.
 Module-level update availability is not consistently exposed in controller
 payloads. This platform only creates module update entities when there are
 strong signals that an update is relevant/available.
+
+Update availability is decided by `firmware_update_available` rather than by the
+controller's `updateFirmware` flag alone: the flag can be stale (False) while the
+controller reports a newer `latestFirmware`.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any, Callable, cast
 
@@ -33,6 +38,59 @@ from .coordinator import (
     build_module_device_info_from_data,
     build_trident_device_info,
 )
+
+# Apex firmware strings look like "5.15J_6B26" (installed) or "5.16_AC26"
+# (latest): <major>.<minor>[family letter]_<build>. The optional J/L letter is the
+# hardware family, not part of the release identity.
+_FIRMWARE_RE = re.compile(r"^(\d+)\.(\d+)[A-Za-z]?_([0-9A-Za-z]+)$")
+
+
+def normalize_firmware(value: str | None) -> tuple[int, int, str] | None:
+    """Parse an Apex firmware string into (major, minor, build).
+
+    The optional family letter (e.g. the "J" in "5.15J_6B26") is dropped.
+
+    Returns:
+        The normalized tuple, or None when the string is missing or unparseable.
+    """
+    if value is None:
+        return None
+    m = _FIRMWARE_RE.match(value.strip())
+    if m is None:
+        return None
+    return int(m.group(1)), int(m.group(2)), m.group(3)
+
+
+def firmware_update_available(
+    latest: str | None, installed: str | None, flag: bool | None = None
+) -> bool:
+    """Decide whether `latest` represents an update over `installed`.
+
+    Rules:
+    - If major.minor differs, the numerically greater one is newer.
+    - If major.minor is equal and the build code differs, an update is
+      available. Build codes are opaque; their order is never inferred.
+    - If the normalized versions are equal, the controller `flag` decides
+      (True means update available; False/None means none).
+    - If either string is unparseable, fall back to string inequality when both
+      are present.
+    - If either string is missing, only a True `flag` reports an update.
+
+    A False flag never hides a visibly newer version.
+    """
+    if latest is None or installed is None:
+        return flag is True
+
+    new = normalize_firmware(latest)
+    old = normalize_firmware(installed)
+    if new is None or old is None:
+        return latest != installed or flag is True
+
+    if new[:2] != old[:2]:
+        return new[:2] > old[:2] or flag is True
+    if new[2] != old[2]:
+        return True
+    return flag is True
 
 
 def _raw_nstat(data: dict[str, Any]) -> dict[str, Any]:
@@ -109,6 +167,7 @@ class _UpdateRef:
     installed_fn: Callable[[dict[str, Any]], str | None]
     latest_fn: Callable[[dict[str, Any]], str | None]
     release_summary_fn: Callable[[dict[str, Any]], str | None]
+    update_flag_fn: Callable[[dict[str, Any]], bool | None] = lambda _data: None
     module_hwtype: str | None = None
     module_abaddr: int | None = None
 
@@ -212,6 +271,16 @@ class ApexUpdateEntity(UpdateEntity):
         self._attr_latest_version = self._ref.latest_fn(data)
         self._attr_release_summary = self._ref.release_summary_fn(data)
 
+    def version_is_newer(self, latest_version: str, installed_version: str) -> bool:
+        """Compare Apex firmware strings instead of using AwesomeVersion.
+
+        Home Assistant only calls this when the two strings are not identical
+        (see `UpdateEntity.state`). Apex build codes are not orderable and the
+        family letter must be ignored, so use `firmware_update_available`.
+        """
+        flag = self._ref.update_flag_fn(self._coordinator.data or {})
+        return firmware_update_available(latest_version, installed_version, flag)
+
     def _handle_coordinator_update(self) -> None:
         self._refresh_attrs()
         self.async_write_ha_state()
@@ -246,39 +315,8 @@ def _controller_latest(data: dict[str, Any]) -> str | None:
     return str(latest_any).strip() or None if latest_any is not None else None
 
 
-def _controller_latest_effective(data: dict[str, Any]) -> str | None:
-    """Return the effective latest version.
-
-    Home Assistant derives update availability from whether latest_version differs
-    from installed_version, so we suppress the reported latest when the controller
-    explicitly says there is no update available.
-
-    Args:
-        data: Coordinator data dict.
-
-    Returns:
-        Effective latest version string, or None if unknown.
-    """
-    installed = _controller_installed(data)
-    reported_latest = _controller_latest(data)
-
-    flag = _controller_update_firmware_flag(data)
-    if flag is False and installed:
-        return installed
-
-    return reported_latest
-
-
 def _controller_release_summary(data: dict[str, Any]) -> str | None:
-    installed = _controller_installed(data)
-    reported_latest = _controller_latest(data)
-    if not installed or not reported_latest:
-        return None
-
-    flag = _controller_update_firmware_flag(data)
-    if flag is False and installed != reported_latest:
-        return f"Latest reported by controller: {reported_latest}"
-
+    """Controller firmware has no extra context beyond the version strings."""
     return None
 
 
@@ -367,22 +405,29 @@ def _module_refs(data: dict[str, Any], serial_for_ids: str) -> list[_UpdateRef]:
                 update_any: Any = (mconf_module or {}).get("update")
                 update_flag = update_any if isinstance(update_any, bool) else None
 
-                # If config explicitly says there is no update, suppress any
-                # reported "latest" so HA shows state=off.
-                if update_flag is False and installed:
-                    return installed
+                if reported_latest is not None:
+                    return reported_latest
 
                 # If an update is available but no version is provided, expose
                 # a placeholder so HA can represent availability.
-                if update_flag is True and reported_latest is None:
+                if update_flag is True:
                     return "Update available"
 
-                # If the module doesn't report a latest version and config is
-                # unavailable, assume up-to-date so HA doesn't show "unknown".
-                if update_flag is None and reported_latest is None and installed:
-                    return installed
+                # No reported latest and no update signal: assume up-to-date so
+                # HA doesn't show "unknown".
+                return installed
 
-                return reported_latest
+            def _update_flag_fn(
+                _data: dict[str, Any],
+                *,
+                hwtype: str = hwtype,
+                module_id: str = module_id,
+            ) -> bool | None:
+                mconf_module = _find_mconf_module(
+                    _data, hwtype=hwtype, module_id=module_id
+                )
+                update_any: Any = (mconf_module or {}).get("update")
+                return update_any if isinstance(update_any, bool) else None
 
             def _release_summary_fn_config(
                 _data: dict[str, Any],
@@ -396,29 +441,12 @@ def _module_refs(data: dict[str, Any], serial_for_ids: str) -> list[_UpdateRef]:
                 if not status_module:
                     return None
 
-                installed = _installed_from_status_fn(
-                    _data, hwtype=hwtype, module_id=module_id
-                )
-
                 mconf_module = _find_mconf_module(
                     _data, hwtype=hwtype, module_id=module_id
                 )
                 update_stat_any: Any = (mconf_module or {}).get("updateStat")
                 if isinstance(update_stat_any, int) and update_stat_any:
                     return f"updateStat={update_stat_any}"
-
-                update_any: Any = (mconf_module or {}).get("update")
-                if isinstance(update_any, bool) and update_any is False and installed:
-                    reported_latest_any: Any = status_module.get(
-                        "latestFirmware"
-                    ) or status_module.get("latestSw")
-                    reported_latest = (
-                        str(reported_latest_any).strip() or None
-                        if reported_latest_any is not None
-                        else None
-                    )
-                    if reported_latest and installed != reported_latest:
-                        return f"Latest reported by controller: {reported_latest}"
 
                 sw = str(status_module.get("swstat") or "").strip() or None
                 return sw
@@ -449,6 +477,7 @@ def _module_refs(data: dict[str, Any], serial_for_ids: str) -> list[_UpdateRef]:
                     installed_fn=_installed_from_status_fn,
                     latest_fn=_latest_effective_fn,
                     release_summary_fn=_release_summary_fn_config,
+                    update_flag_fn=_update_flag_fn,
                     module_hwtype=hwtype,
                     module_abaddr=abaddr_any if isinstance(abaddr_any, int) else None,
                 )
@@ -552,6 +581,24 @@ def _module_refs(data: dict[str, Any], serial_for_ids: str) -> list[_UpdateRef]:
                 return sw
             return None
 
+        def _update_flag_fn_raw(
+            _data: dict[str, Any], *, module_id: str = module_id, hwtype: str = hwtype
+        ) -> bool | None:
+            for m in _raw_modules(_data):
+                m_hw = str(m.get("hwtype") or m.get("hwType") or "").strip().upper()
+                if m_hw != hwtype:
+                    continue
+                m_ab = m.get("abaddr")
+                m_id = str(m_ab) if isinstance(m_ab, int) else str(m_ab or "").strip()
+                if not m_id:
+                    m_id = str(m.get("did") or m.get("id") or hwtype).strip()
+                if m_id != module_id:
+                    continue
+                sw_any: Any = m.get("swstat")
+                sw = str(sw_any) if sw_any is not None else None
+                return True if _swstat_indicates_update(sw) is True else None
+            return None
+
         refs.append(
             _UpdateRef(
                 unique_id=f"{serial_for_ids}_update_{module_id}".lower(),
@@ -559,6 +606,7 @@ def _module_refs(data: dict[str, Any], serial_for_ids: str) -> list[_UpdateRef]:
                 installed_fn=_installed_fn,
                 latest_fn=_latest_fn,
                 release_summary_fn=_release_summary_fn,
+                update_flag_fn=_update_flag_fn_raw,
                 module_hwtype=hwtype,
                 module_abaddr=abaddr if isinstance(abaddr, int) else None,
             )
@@ -579,8 +627,9 @@ async def async_setup_entry(
         unique_id=f"{serial_for_ids}_update_firmware".lower(),
         name="Firmware",
         installed_fn=_controller_installed,
-        latest_fn=_controller_latest_effective,
+        latest_fn=_controller_latest,
         release_summary_fn=_controller_release_summary,
+        update_flag_fn=_controller_update_firmware_flag,
     )
 
     async_add_entities([ApexUpdateEntity(coordinator, entry, ref=controller_ref)])
