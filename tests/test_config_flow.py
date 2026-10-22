@@ -1521,36 +1521,73 @@ async def test_reconfigure_redetect_updates_legacy_format(
     assert CONF_LEGACY_FORMAT not in entry.data
 
 
-@pytest.mark.parametrize("text", ["<html></html>", "{no", "[]"])
-async def test_no_login_rest_200_with_unusable_body_is_cannot_connect(
-    hass, aioclient_mock, text
+_REST_OK = '{"system": {"serial": "SER1", "hostname": "tank"}}'
+_CGI_OK = '{"istat": {"serial": "SER9", "hostname": "apex"}}'
+_XML_OK = "<status><serial>SER8</serial><hostname>apex</hostname></status>"
+
+
+@pytest.mark.parametrize(
+    ("rest", "cgi", "xml", "expected"),
+    [
+        # 200 + non-empty JSON object -> REST (legacy never probed).
+        ((200, _REST_OK), (200, _CGI_OK), (200, _XML_OK), ("rest", "SER1")),
+        # 200 but unusable body -> cannot_connect, CGI never probed.
+        ((200, ""), (200, _CGI_OK), (200, _XML_OK), CannotConnect),
+        ((200, "{no"), (200, _CGI_OK), (200, _XML_OK), CannotConnect),
+        ((200, "<html></html>"), (200, _CGI_OK), (200, _XML_OK), CannotConnect),
+        ((200, "[]"), (200, _CGI_OK), (200, _XML_OK), CannotConnect),
+        ((200, "{}"), (200, _CGI_OK), (200, _XML_OK), CannotConnect),
+        # 404/405 -> legacy: CGI JSON, then XML, else cannot_connect.
+        ((404, ""), (200, _CGI_OK), (200, _XML_OK), ("legacy", "SER9")),
+        ((405, ""), (200, _CGI_OK), (200, _XML_OK), ("legacy", "SER9")),
+        ((404, ""), (404, ""), (200, _XML_OK), ("legacy", "SER8")),
+        ((404, ""), (404, ""), (500, ""), CannotConnect),
+        # 401/403 -> legacy if it works, else invalid_auth.
+        ((401, "{}"), (200, _CGI_OK), (200, _XML_OK), ("legacy", "SER9")),
+        ((403, "{}"), (200, _CGI_OK), (200, _XML_OK), ("legacy", "SER9")),
+        ((401, "{}"), (404, ""), (200, _XML_OK), ("legacy", "SER8")),
+        ((401, "{}"), (404, ""), (500, ""), InvalidAuth),
+        ((403, "{}"), (401, "{}"), (401, ""), InvalidAuth),
+        # Anything else -> cannot_connect, CGI never probed.
+        ((400, ""), (200, _CGI_OK), (200, _XML_OK), CannotConnect),
+        ((500, ""), (200, _CGI_OK), (200, _XML_OK), CannotConnect),
+        ((503, ""), (200, _CGI_OK), (200, _XML_OK), CannotConnect),
+    ],
+)
+async def test_no_login_probe_decision_table(
+    hass, aioclient_mock, rest, cgi, xml, expected
 ):
     host = "1.2.3.4"
-    aioclient_mock.get(f"http://{host}/rest/status", status=200, text=text)
-    aioclient_mock.get(
-        f"http://{host}/cgi-bin/status.json",
-        status=200,
-        text='{"istat": {"serial": "SER9"}}',
-    )
+    aioclient_mock.get(f"http://{host}/rest/status", status=rest[0], text=rest[1])
+    aioclient_mock.get(f"http://{host}/cgi-bin/status.json", status=cgi[0], text=cgi[1])
+    aioclient_mock.get(f"http://{host}/cgi-bin/status.xml", status=xml[0], text=xml[1])
+    data = {CONF_HOST: host, CONF_NO_LOGIN: True, CONF_USERNAME: "admin"}
+
+    if isinstance(expected, type):
+        with pytest.raises(expected):
+            await async_validate_input(hass, data)
+        probed_legacy = any("cgi-bin" in str(c[1]) for c in aioclient_mock.mock_calls)
+        # Only 401/403/404/405 may consult legacy.
+        assert probed_legacy is (rest[0] in (401, 403, 404, 405))
+        return
+
+    info = await async_validate_input(hass, data)
+    assert (info["transport"], info["unique_id"]) == expected
+    if expected[0] == "rest":
+        assert not any("cgi-bin" in str(c[1]) for c in aioclient_mock.mock_calls)
+
+
+async def test_no_login_rest_timeout_is_cannot_connect_without_probing_cgi(
+    hass, aioclient_mock
+):
+    import asyncio
+
+    host = "1.2.3.4"
+    aioclient_mock.get(f"http://{host}/rest/status", exc=asyncio.TimeoutError())
+    aioclient_mock.get(f"http://{host}/cgi-bin/status.json", status=200, text=_CGI_OK)
 
     with pytest.raises(CannotConnect):
         await async_validate_input(
             hass, {CONF_HOST: host, CONF_NO_LOGIN: True, CONF_USERNAME: "admin"}
         )
-
-    assert not any("cgi-bin" in str(c[1]) for c in aioclient_mock.mock_calls)
-
-
-@pytest.mark.parametrize("status", [401, 403])
-async def test_no_login_rest_requiring_login_is_invalid_auth(
-    hass, aioclient_mock, status
-):
-    host = "1.2.3.4"
-    aioclient_mock.get(f"http://{host}/rest/status", status=status, text="{}")
-
-    with pytest.raises(InvalidAuth):
-        await async_validate_input(
-            hass, {CONF_HOST: host, CONF_NO_LOGIN: True, CONF_USERNAME: "admin"}
-        )
-
     assert not any("cgi-bin" in str(c[1]) for c in aioclient_mock.mock_calls)

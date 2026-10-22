@@ -296,7 +296,7 @@ def _apply_detected_transport(data: dict[str, Any], info: dict[str, str]) -> Non
 
 async def _async_probe_rest_without_login(
     session: aiohttp.ClientSession, *, base_url: str, host: str
-) -> dict[str, str] | None:
+) -> tuple[dict[str, str] | None, bool]:
     """Probe for a REST API that can be read without logging in.
 
     Args:
@@ -305,14 +305,15 @@ async def _async_probe_rest_without_login(
         host: Controller host (for the title).
 
     Returns:
-        Validation info for the REST transport, or `None` when the controller
-        does not serve REST status without a login.
+        ``(info, needs_login)``. ``info`` is the REST validation info for a 200
+        with a non-empty JSON object. Otherwise ``info`` is `None` and the caller
+        probes legacy: 404/405 mean REST is not supported, 401/403 mean REST
+        wants a login (``needs_login``; if legacy fails too that is invalid_auth).
 
     Raises:
-        CannotConnect: If the controller could not be reached, errored
-            transiently, or served an unusable REST payload; the transport must
-            not be guessed in that case.
-        InvalidAuth: If REST is present but requires a login.
+        CannotConnect: Any other status, a timeout/connection error, or a 200
+            with an empty/unparseable/non-object/empty-object body. The
+            transport must not be guessed in those cases.
     """
     try:
         async with async_timeout.timeout(10):
@@ -321,23 +322,21 @@ async def _async_probe_rest_without_login(
             ) as resp:
                 _LOGGER.debug("REST no-login status HTTP %s", resp.status)
                 if resp.status in (HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN):
-                    # REST is present but wants a login: not a legacy controller.
-                    raise InvalidAuth
+                    return None, True
+                if resp.status in (HTTPStatus.NOT_FOUND, HTTPStatus.METHOD_NOT_ALLOWED):
+                    return None, False
                 if resp.status != HTTPStatus.OK:
-                    if _is_transient_http_status(resp.status):
-                        raise CannotConnect
-                    # 404/405 etc.: this controller has no REST API.
-                    return None
+                    raise CannotConnect
                 body = await resp.text()
     except (asyncio.TimeoutError, aiohttp.ClientError) as err:
         raise CannotConnect from err
 
     try:
-        status_any: Any = json.loads(body) if body else {}
+        status_any: Any = json.loads(body) if body else None
     except json.JSONDecodeError as err:
         # REST answered 200 but is broken: do not mistake it for legacy.
         raise CannotConnect from err
-    if not isinstance(status_any, dict):
+    if not isinstance(status_any, dict) or not status_any:
         raise CannotConnect
     status_obj = cast(dict[str, Any], status_any)
 
@@ -349,6 +348,88 @@ async def _async_probe_rest_without_login(
         "title": title,
         "unique_id": _extract_serial_from_status_obj(status_obj) or host,
         "transport": TRANSPORT_REST,
+    }, False
+
+
+async def _async_validate_legacy(
+    session: aiohttp.ClientSession,
+    *,
+    base_url: str,
+    host: str,
+    url: str,
+    auth: aiohttp.BasicAuth | None,
+    try_cgi_json: bool,
+) -> dict[str, str]:
+    """Validate against the legacy endpoints (status.json, then status.xml)."""
+    if try_cgi_json:
+        json_url = f"{base_url}/cgi-bin/status.json"
+        try:
+            _LOGGER.debug("Trying CGI JSON validation: %s", json_url)
+            async with async_timeout.timeout(10):
+                async with session.get(json_url) as resp:
+                    _LOGGER.debug("CGI JSON status HTTP %s", resp.status)
+                    if resp.status in (401, 403):
+                        raise InvalidAuth
+                    if resp.status == 404:
+                        raise FileNotFoundError
+                    resp.raise_for_status()
+                    body = await resp.text()
+
+            status_any: Any = json.loads(body) if body else {}
+            status_obj: dict[str, Any] = (
+                cast(dict[str, Any], status_any) if isinstance(status_any, dict) else {}
+            )
+
+            serial = _extract_serial_from_status_obj(status_obj)
+            hostname = _extract_hostname_from_status_obj(status_obj)
+            hostname_disp = clean_hostname_display(hostname) if hostname else None
+            title_hostname = hostname_disp or hostname
+            title = f"{title_hostname} ({host})" if title_hostname else f"Apex ({host})"
+            return {
+                "title": title,
+                "unique_id": serial or host,
+                "transport": TRANSPORT_LEGACY,
+                "legacy_format": LEGACY_FORMAT_CGI_JSON,
+            }
+
+        except FileNotFoundError:
+            _LOGGER.debug("CGI status.json not found; trying status.xml")
+        except InvalidAuth:
+            raise
+        except (
+            asyncio.TimeoutError,
+            aiohttp.ClientError,
+            json.JSONDecodeError,
+        ) as err:
+            _LOGGER.debug("CGI JSON validation failed; trying status.xml: %s", err)
+
+    try:
+        _LOGGER.debug("Trying XML validation: %s", url)
+        async with async_timeout.timeout(10):
+            async with session.get(url, auth=auth) as resp:
+                _LOGGER.debug("XML status HTTP %s", resp.status)
+                if resp.status in (401, 403):
+                    raise InvalidAuth
+                resp.raise_for_status()
+                body = await resp.text()
+
+        root = ET.fromstring(body)
+        serial = (root.findtext("./serial") or "").strip() or None
+        hostname = (root.findtext("./hostname") or "").strip() or None
+
+    except InvalidAuth:
+        raise
+    except (asyncio.TimeoutError, aiohttp.ClientError, ET.ParseError) as err:
+        raise CannotConnect from err
+
+    hostname_disp = clean_hostname_display(hostname) if hostname else None
+    title_hostname = hostname_disp or hostname
+    title = f"{title_hostname} ({host})" if title_hostname else f"Apex ({host})"
+    return {
+        "title": title,
+        "unique_id": serial or host,
+        "transport": TRANSPORT_LEGACY,
+        "legacy_format": LEGACY_FORMAT_XML,
     }
 
 
@@ -630,82 +711,31 @@ async def async_validate_input(
 
     # Read-only mode: use REST when the controller serves it without a login.
     if not password:
-        rest_info = await _async_probe_rest_without_login(
+        rest_info, rest_needs_login = await _async_probe_rest_without_login(
             session, base_url=base_url, host=host
         )
         if rest_info is not None:
             return rest_info
 
-        # Otherwise prefer the CGI JSON endpoint first.
-        json_url = f"{base_url}/cgi-bin/status.json"
+        # Legacy controller (REST answered 404/405), or REST asked for a login.
         try:
-            _LOGGER.debug("Trying CGI JSON validation: %s", json_url)
-            async with async_timeout.timeout(10):
-                async with session.get(json_url) as resp:
-                    _LOGGER.debug("CGI JSON status HTTP %s", resp.status)
-                    if resp.status in (401, 403):
-                        raise InvalidAuth
-                    if resp.status == 404:
-                        raise FileNotFoundError
-                    resp.raise_for_status()
-                    body = await resp.text()
-
-            status_any: Any = json.loads(body) if body else {}
-            status_obj: dict[str, Any] = (
-                cast(dict[str, Any], status_any) if isinstance(status_any, dict) else {}
+            return await _async_validate_legacy(
+                session,
+                base_url=base_url,
+                host=host,
+                url=url,
+                auth=auth,
+                try_cgi_json=True,
             )
-
-            serial = _extract_serial_from_status_obj(status_obj)
-            hostname = _extract_hostname_from_status_obj(status_obj)
-            hostname_disp = clean_hostname_display(hostname) if hostname else None
-            title_hostname = hostname_disp or hostname
-            title = f"{title_hostname} ({host})" if title_hostname else f"Apex ({host})"
-            return {
-                "title": title,
-                "unique_id": serial or host,
-                "transport": TRANSPORT_LEGACY,
-                "legacy_format": LEGACY_FORMAT_CGI_JSON,
-            }
-
-        except FileNotFoundError:
-            _LOGGER.debug("CGI status.json not found; trying status.xml")
-        except InvalidAuth:
+        except (CannotConnect, InvalidAuth) as err:
+            if rest_needs_login:
+                # REST is there but wants a login and legacy does not work either.
+                raise InvalidAuth from err
             raise
-        except (
-            asyncio.TimeoutError,
-            aiohttp.ClientError,
-            json.JSONDecodeError,
-        ) as err:
-            _LOGGER.debug("CGI JSON validation failed; trying status.xml: %s", err)
 
-    try:
-        _LOGGER.debug("Trying XML validation: %s", url)
-        async with async_timeout.timeout(10):
-            async with session.get(url, auth=auth) as resp:
-                _LOGGER.debug("XML status HTTP %s", resp.status)
-                if resp.status in (401, 403):
-                    raise InvalidAuth
-                resp.raise_for_status()
-                body = await resp.text()
-
-        root = ET.fromstring(body)
-        serial = (root.findtext("./serial") or "").strip() or None
-        hostname = (root.findtext("./hostname") or "").strip() or None
-
-    except InvalidAuth:
-        raise
-    except (asyncio.TimeoutError, aiohttp.ClientError, ET.ParseError) as err:
-        raise CannotConnect from err
-
-    hostname_disp = clean_hostname_display(hostname) if hostname else None
-    title_hostname = hostname_disp or hostname
-    title = f"{title_hostname} ({host})" if title_hostname else f"Apex ({host})"
-    return {
-        "title": title,
-        "unique_id": serial or host,
-        "transport": TRANSPORT_LEGACY,
-        "legacy_format": LEGACY_FORMAT_XML,
-    }
+    return await _async_validate_legacy(
+        session, base_url=base_url, host=host, url=url, auth=auth, try_cgi_json=False
+    )
 
 
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
