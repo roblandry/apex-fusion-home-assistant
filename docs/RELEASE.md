@@ -11,8 +11,10 @@ The project uses [semver](https://semver.org/) and is still on `0.x`:
   existing setups, or anything that needs a migration or user action.
 - **Patch** (`0.1.6` to `0.1.7`): bug fixes and small additions that need
   nothing from users.
-- **Pre-releases** use `-alpha.N`, `-beta.N` or `-rc.N` (for example
-  `0.2.0-rc.1`). They are published as GitHub pre-releases.
+- **Pre-releases** use a PEP 440 suffix: `aN`, `bN` or `rcN` (for example
+  `0.2.0b1`, `0.2.0rc1`). No dashes or dots. They order as
+  `0.1.6 < 0.2.0b1 < 0.2.0b2 < 0.2.0rc1 < 0.2.0`, and are published as GitHub
+  pre-releases (tag `v0.2.0b1`).
 
 The version is stored in `custom_components/apex_fusion/manifest.json`, and
 `scripts/bump-version.py` is the only thing that should edit it.
@@ -23,7 +25,7 @@ The version is stored in `custom_components/apex_fusion/manifest.json`, and
 
    ```sh
    python3 scripts/bump-version.py --bump patch    # or minor / major
-   python3 scripts/bump-version.py --set 0.2.0-rc.1  # an exact version
+   python3 scripts/bump-version.py --set 0.2.0b1   # an exact version
    ```
 
    `--get` prints the current version and `--check` fails if the version
@@ -48,6 +50,16 @@ The version is stored in `custom_components/apex_fusion/manifest.json`, and
    section. If there is none, notes are generated from the Conventional Commit
    subjects since the previous tag.
 
+## Beta to stable
+
+1. Cut the beta: bump to `0.2.0b1` and merge as above. CI publishes it as a
+   pre-release.
+2. Test it. If it needs fixes, merge them and cut `0.2.0b2`, and so on.
+3. When it is good, bump to `0.2.0` and merge. CI publishes a normal release.
+
+HACS only offers pre-releases to users who enable **Show beta versions** for
+this repository in HACS. Everyone else stays on the latest stable release.
+
 HACS shows the GitHub release to users, so the release notes are what they see
 when an update is offered.
 
@@ -64,6 +76,6 @@ when an update is offered.
   gh release create v0.1.7 --verify-tag --title v0.1.7 --notes-file notes.md
   ```
 
-  Add `--prerelease` for `-alpha`, `-beta` and `-rc` versions.
+  Add `--prerelease` for `aN`, `bN` and `rcN` versions.
 
 There are no backports: fixes ship as a new release from `main`.

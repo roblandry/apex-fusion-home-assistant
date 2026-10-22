@@ -46,33 +46,54 @@ def test_repo_sources_are_in_sync() -> None:
 
 
 @pytest.mark.parametrize(
-    "version", ["0.1.6", "1.0.0", "0.2.0-rc.1", "0.1.0-beta.3", "3.4.5-alpha.1"]
+    "version", ["0.1.6", "1.0.0", "0.2.0b1", "0.2.0rc1", "0.1.0a3", "10.20.30rc12"]
 )
 def test_valid_versions(version: str) -> None:
     assert bv.is_valid(version)
 
 
 @pytest.mark.parametrize(
-    "version", ["1", "1.2", "v1.2.3", "1.2.3b1", "1.2.3-rc1", "1.2.3-foo.1", ""]
+    "version",
+    [
+        "1",
+        "1.2",
+        "v0.2.0",
+        "0.2.0-beta1",
+        "0.2.0.b1",
+        "0.2.0b",
+        "0.2.0beta1",
+        "0.2.0.dev1",
+        "0.2.0b1.post1",
+        "0.2.0-rc.1",
+        "",
+    ],
 )
 def test_invalid_versions(version: str) -> None:
     assert not bv.is_valid(version)
 
 
 def test_prerelease_detection() -> None:
-    assert bv.is_prerelease("0.2.0-rc.1")
+    for version in ("0.2.0a1", "0.2.0b1", "0.2.0rc1"):
+        assert bv.is_prerelease(version)
     assert not bv.is_prerelease("0.2.0")
+    assert not bv.is_prerelease("garbage")
 
 
 def test_ordering() -> None:
     ordered = [
-        "0.1.0-alpha.1",
-        "0.1.0-beta.1",
-        "0.1.0-rc.1",
-        "0.1.0-rc.2",
+        "0.1.0a1",
+        "0.1.0b1",
+        "0.1.0rc1",
+        "0.1.0rc2",
         "0.1.0",
-        "0.1.1",
+        "0.1.6",
+        "0.2.0a1",
+        "0.2.0b1",
+        "0.2.0b2",
+        "0.2.0b10",
+        "0.2.0rc1",
         "0.2.0",
+        "0.2.1",
         "1.0.0",
     ]
     assert sorted(reversed(ordered), key=bv.sort_key) == ordered
@@ -155,7 +176,7 @@ def test_bump(tmp_path: Path, part: str, expected: str) -> None:
 
 
 def test_bump_refuses_prerelease(tmp_path: Path) -> None:
-    root = _make_root(tmp_path, "0.2.0-rc.1")
+    root = _make_root(tmp_path, "0.2.0rc1")
     assert _run(root, "--bump", "patch") == 1
 
 
@@ -173,7 +194,7 @@ def test_check_increase_rejects_invalid_current(tmp_path: Path) -> None:
 
 def test_prerelease_to_final_is_an_increase(tmp_path: Path) -> None:
     root = _make_root(tmp_path, "0.2.0")
-    assert _run(root, "--check-increase", "0.2.0-rc.1") == 0
+    assert _run(root, "--check-increase", "0.2.0rc1") == 0
 
 
 _CHANGELOG = """# Changelog

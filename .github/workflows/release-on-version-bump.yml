@@ -43,7 +43,7 @@ jobs:
           {
             echo "version=$VERSION"
             echo "tag=v$VERSION"
-            if [[ "$VERSION" == *-* ]]; then
+            if [[ "$VERSION" =~ (a|b|rc)[0-9]+$ ]]; then
               echo "prerelease=true"
             else
               echo "prerelease=false"

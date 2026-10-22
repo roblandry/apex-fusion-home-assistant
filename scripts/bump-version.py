@@ -14,8 +14,9 @@ Usage (run from anywhere; paths resolve relative to the repo root):
     scripts/bump-version.py --check-changelog
     scripts/bump-version.py --changelog-notes
 
-Versions are semver: ``X.Y.Z``, optionally with a pre-release suffix of
-``-alpha.N``, ``-beta.N`` or ``-rc.N`` (the repo has shipped ``v0.1.0-rc.2``).
+Versions are ``X.Y.Z``, optionally with a PEP 440 pre-release suffix ``aN``,
+``bN`` or ``rcN`` (``0.2.0b1``, ``0.2.0rc1``). Ordering is
+``0.1.6 < 0.2.0a1 < 0.2.0b1 < 0.2.0b2 < 0.2.0rc1 < 0.2.0``.
 The script never commits, tags or releases. CI does that after the bump merges.
 """
 
@@ -30,9 +31,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 _SEMVER_RE = re.compile(
-    r"^(\d+)\.(\d+)\.(\d+)(?:-(alpha|beta|rc)\.(\d+))?$",
+    r"^(\d+)\.(\d+)\.(\d+)(?:(a|b|rc)(\d+))?$",
 )
-_PRERELEASE_RANK = {"alpha": 0, "beta": 1, "rc": 2}
+_PRERELEASE_RANK = {"a": 0, "b": 1, "rc": 2}
 
 
 @dataclass(frozen=True)
@@ -59,12 +60,13 @@ def is_valid(version: str) -> bool:
 
 
 def is_prerelease(version: str) -> bool:
-    """Return True if *version* carries an alpha/beta/rc suffix."""
-    return "-" in version
+    """Return True if *version* carries an a/b/rc suffix."""
+    match = _SEMVER_RE.fullmatch(version)
+    return match is not None and match.group(4) is not None
 
 
 def sort_key(version: str) -> tuple[int, int, int, int, int, int]:
-    """Return a key that orders valid versions per semver precedence."""
+    """Return a key that orders valid versions (PEP 440 pre-release order)."""
     match = _SEMVER_RE.fullmatch(version)
     if match is None:
         raise SystemExit(f"error: {version!r} is not a valid version")
@@ -132,8 +134,7 @@ def changelog_section(version: str, root: Path = REPO_ROOT) -> str | None:
 def _set_version(version: str, root: Path) -> int:
     if not is_valid(version):
         print(
-            f"error: {version!r} is not valid; expected X.Y.Z or "
-            "X.Y.Z-(alpha|beta|rc).N",
+            f"error: {version!r} is not valid; expected X.Y.Z or X.Y.Z(a|b|rc)N",
             file=sys.stderr,
         )
         return 1
