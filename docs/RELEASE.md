@@ -83,68 +83,26 @@ this repository in HACS. Everyone else stays on the latest stable release.
 
 ## If the release did not happen
 
-There is no manual release workflow. The automatic release only happens when a
-push to `main` raises the version, so re-running it or pushing an unrelated
-change will not release anything. If the automatic release was missed or
-failed, check the run under **Actions**, then finish it by hand.
+There is no manual release workflow, and the automatic release only happens when
+a push to `main` raises the version. If it was missed or failed, check the run
+under **Actions**, then finish it by hand.
 
-The workflow can fail after pushing the tag but before creating the GitHub
-release, so the snippet below checks the tag on the **remote** and only then
-decides what to do. Set `TAG`, `COMMIT` and `NOTES` (the version's
-`CHANGELOG.md` section in a file), then paste the whole block.
+> Double-check the tag and commit before running; this publishes a release.
 
-`COMMIT` is required: it is the **head commit of the push** whose release run
-failed, because that is the commit the workflow tags. Take it from the failed
-run's page under **Actions** (the commit shown for the run, which is
-`github.sha` in the run summary). It must be on `main` and carry the tag's
-version, or the block stops. Pre-release tags (`-alpha.N`, `-beta.N`, `-rc.N`)
-are published as pre-releases automatically. The block runs in a subshell and
-stops at the first failure, so nothing after a failed check can run.
+1. Find the merge commit on `main` that raised the version. If the tag
+   `vX` already exists, check that it points at that commit
+   (`git rev-list -n1 vX`). If it is missing, create it there:
 
-```sh
-(
-  set -euo pipefail
-  TAG=v2026.10.25
-  NOTES=notes.md
-  COMMIT="<head sha of the push whose release run failed>"
+   ```sh
+   git tag -a vX <commit> -m vX && git push origin vX
+   ```
 
-  version=${TAG#v}
-  manifest=custom_components/apex_fusion/manifest.json
-  manifest_version() {
-    git show "$1:$manifest" | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])'
-  }
-  case "$TAG" in
-    *-alpha.*|*-beta.*|*-rc.*) pre=--prerelease ;;
-    *) pre= ;;
-  esac
-  fail() { echo "error: $*" >&2; exit 1; }
+2. Publish the release, with the version's `CHANGELOG.md` section as the notes:
 
-  [ -n "${COMMIT##*<*}" ] || fail "set COMMIT to the push head sha"
-  git fetch origin main
-  want=$(git rev-parse "$COMMIT^{commit}")
-  git merge-base --is-ancestor "$want" origin/main \
-    || fail "$want is not on origin/main"
-  have=$(manifest_version "$want")
-  [ "$have" = "$version" ] || fail "$want carries version $have, not $version"
+   ```sh
+   gh release create vX --verify-tag --title vX --notes-file notes.md
+   ```
 
-  # Where the tag points on the remote: the peeled commit of an annotated tag,
-  # or the tag itself if it is lightweight.
-  remote=$(git ls-remote origin "refs/tags/$TAG^{}" | cut -f1)
-  if [ -z "$remote" ]; then
-    remote=$(git ls-remote origin "refs/tags/$TAG" | cut -f1)
-  fi
+   Add `--prerelease` for `-alpha`, `-beta` and `-rc` tags.
 
-  if [ -z "$remote" ]; then
-    git tag -a "$TAG" -m "$TAG" "$want"
-    git push origin "refs/tags/$TAG"
-    gh release create "$TAG" --verify-tag --title "$TAG" --notes-file "$NOTES" $pre
-  elif [ "$remote" = "$want" ]; then
-    gh release create "$TAG" --verify-tag --title "$TAG" --notes-file "$NOTES" $pre
-  else
-    fail "$TAG on the remote points at $remote, not $want; not touching it"
-  fi
-)
-```
-
-If it reports a mismatch, stop and ask before changing the tag. Never push a
-release commit to `main` to do this.
+Never push a release commit to `main` to do this.
