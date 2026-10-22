@@ -81,6 +81,11 @@ async def test_update_setup_creates_controller_update_entity(
     assert ent.name == "Firmware"
     assert ent.installed_version == "5.12J_CA25"
     assert ent.latest_version == "5.12_CA25"
+    # 5.12J_CA25 and 5.12_CA25 are the same release (the J is the hardware
+    # family letter), so the versions compare equal after normalization. Here the
+    # controller flag is True, and with equal versions the flag decides: update
+    # available. (A flag of False in the same situation is "off"; see
+    # test_update_controller_same_release_flag_false_is_off.)
     assert ent.state == "on"
 
     # Cover entity listener wiring and update handler.
@@ -290,7 +295,7 @@ async def test_update_module_device_name_uses_mconf_name_when_present(
     assert fmm.device_info.get("via_device") == (DOMAIN, "TEST")
 
 
-async def test_update_controller_suppresses_latest_when_no_update(
+async def test_update_controller_same_release_flag_false_is_off(
     hass, enable_custom_integrations
 ):
     entry = MockConfigEntry(
@@ -326,12 +331,11 @@ async def test_update_controller_suppresses_latest_when_no_update(
     await update.async_setup_entry(hass, cast(Any, entry), _add_entities)
 
     ent = next(e for e in added if _device_model(e) == "AC6J")
-    # When the controller says there is no update, state should be off.
+    # Same release (family letter ignored) and flag False: no update. The raw
+    # controller-reported strings are exposed unchanged.
     assert ent.installed_version == "5.12J_CA25"
-    assert ent.latest_version == "5.12J_CA25"
+    assert ent.latest_version == "5.12_CA25"
     assert ent.state == "off"
-    # But we still expose the controller-reported latest as context.
-    assert ent.release_summary == "Latest reported by controller: 5.12_CA25"
 
 
 async def test_update_controller_prefers_nconf_update_flag_over_nstat(
@@ -373,7 +377,7 @@ async def test_update_controller_prefers_nconf_update_flag_over_nstat(
     await update.async_setup_entry(hass, cast(Any, entry), _add_entities)
 
     ent = next(e for e in added if _device_model(e) == "AC6J")
-    assert ent.latest_version == "5.12J_CA25"
+    assert ent.latest_version == "5.12_CA25"
     assert ent.state == "off"
 
 
@@ -724,7 +728,8 @@ def test_update_helpers_cover_branches():
     )
 
     pm2_ref = next(r for r in refs_cfg if r.module_hwtype == "PM2")
-    # config says no update -> suppress latest
+    # config says no update, but a differing reported latest is still surfaced
+    # (the flag no longer hides it; HA compares the versions).
     assert (
         pm2_ref.latest_fn(
             {
@@ -742,10 +747,10 @@ def test_update_helpers_cover_branches():
                 },
             }
         )
-        == "3"
+        == "4"
     )
 
-    # ...but still provide context about controller-reported latest
+    # No updateStat and no swstat -> no release summary.
     assert (
         pm2_ref.release_summary_fn(
             {
@@ -763,7 +768,7 @@ def test_update_helpers_cover_branches():
                 },
             }
         )
-        == "Latest reported by controller: 4"
+        is None
     )
 
     # Cover: latest_fn returns None when module disappears or is not present.
