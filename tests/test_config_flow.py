@@ -151,8 +151,8 @@ async def test_user_flow_creates_entry(hass, enable_custom_integrations):
         "custom_components.apex_fusion.config_flow.async_validate_input",
         new=AsyncMock(
             return_value={
-                "title": "Apex (1.2.3.4)",
-                "unique_id": "1.2.3.4",
+                "title": "Apex (192.0.2.4)",
+                "unique_id": "192.0.2.4",
                 "transport": TRANSPORT_REST,
             }
         ),
@@ -161,15 +161,15 @@ async def test_user_flow_creates_entry(hass, enable_custom_integrations):
             DOMAIN,
             context={"source": "user"},
             data={
-                CONF_HOST: "1.2.3.4",
+                CONF_HOST: "192.0.2.4",
                 CONF_USERNAME: "admin",
                 CONF_PASSWORD: "pw",
             },
         )
 
     assert result["type"] == FlowResultType.CREATE_ENTRY
-    assert result["title"] == "Apex (1.2.3.4)"
-    assert result["data"][CONF_HOST] == "1.2.3.4"
+    assert result["title"] == "Apex (192.0.2.4)"
+    assert result["data"][CONF_HOST] == "192.0.2.4"
     assert result["data"][CONF_TRANSPORT] == TRANSPORT_REST
 
 
@@ -187,14 +187,14 @@ async def test_reauth_flow_is_supported_and_updates_entry(
     """
     entry = MockConfigEntry(
         domain=DOMAIN,
-        title="Apex (1.2.3.4)",
+        title="Apex (192.0.2.4)",
         data={
-            CONF_HOST: "1.2.3.4",
+            CONF_HOST: "192.0.2.4",
             CONF_USERNAME: "admin",
             CONF_PASSWORD: "old",
             CONF_TRANSPORT: TRANSPORT_REST,
         },
-        unique_id="1.2.3.4",
+        unique_id="192.0.2.4",
     )
     entry.add_to_hass(hass)
 
@@ -212,8 +212,8 @@ async def test_reauth_flow_is_supported_and_updates_entry(
         "custom_components.apex_fusion.config_flow.async_validate_input",
         new=AsyncMock(
             return_value={
-                "title": "Apex (1.2.3.4)",
-                "unique_id": "1.2.3.4",
+                "title": "Apex (192.0.2.4)",
+                "unique_id": "192.0.2.4",
                 "transport": TRANSPORT_REST,
             }
         ),
@@ -248,14 +248,14 @@ async def test_reconfigure_flow_is_supported_and_updates_entry(
     """
     entry = MockConfigEntry(
         domain=DOMAIN,
-        title="Apex (1.2.3.4)",
+        title="Apex (192.0.2.4)",
         data={
-            CONF_HOST: "1.2.3.4",
+            CONF_HOST: "192.0.2.4",
             CONF_USERNAME: "admin",
             CONF_PASSWORD: "old",
             CONF_TRANSPORT: TRANSPORT_LEGACY,
         },
-        unique_id="1.2.3.4",
+        unique_id="192.0.2.4",
     )
     entry.add_to_hass(hass)
 
@@ -273,7 +273,7 @@ async def test_reconfigure_flow_is_supported_and_updates_entry(
         new=AsyncMock(
             return_value={
                 "title": "Apex (apex.local)",
-                "unique_id": "1.2.3.4",
+                "unique_id": "192.0.2.4",
                 "transport": TRANSPORT_REST,
             }
         ),
@@ -1298,15 +1298,15 @@ async def _reconfigure(hass, entry, *, detected: str, redetect: bool | None):
         context={"source": "reconfigure", "entry_id": entry.entry_id},
         data=None,
     )
-    user_input: dict[str, Any] = {CONF_HOST: "1.2.3.4", CONF_USERNAME: "admin"}
+    user_input: dict[str, Any] = {CONF_HOST: "192.0.2.4", CONF_USERNAME: "admin"}
     if redetect is not None:
         user_input[CONF_REDETECT_TRANSPORT] = redetect
     with patch(
         "custom_components.apex_fusion.config_flow.async_validate_input",
         new=AsyncMock(
             return_value={
-                "title": "Apex (1.2.3.4)",
-                "unique_id": "1.2.3.4",
+                "title": "Apex (192.0.2.4)",
+                "unique_id": "192.0.2.4",
                 "transport": detected,
             }
         ),
@@ -1329,10 +1329,12 @@ async def _reconfigure(hass, entry, *, detected: str, redetect: bool | None):
 async def test_reconfigure_redetect_option_controls_stored_transport(
     hass, enable_custom_integrations, stored, detected, redetect, expected
 ):
-    data = {CONF_HOST: "1.2.3.4", CONF_USERNAME: "admin", CONF_PASSWORD: "pw"}
+    data = {CONF_HOST: "192.0.2.4", CONF_USERNAME: "admin", CONF_PASSWORD: "pw"}
     if stored is not None:
         data[CONF_TRANSPORT] = stored
-    entry = MockConfigEntry(domain=DOMAIN, title="Apex", data=data, unique_id="1.2.3.4")
+    entry = MockConfigEntry(
+        domain=DOMAIN, title="Apex", data=data, unique_id="192.0.2.4"
+    )
     entry.add_to_hass(hass)
 
     result = await _reconfigure(hass, entry, detected=detected, redetect=redetect)
@@ -1346,7 +1348,7 @@ async def test_reconfigure_redetect_option_controls_stored_transport(
 
 @pytest.mark.usefixtures("rest_gate_present")
 async def test_rest_validation_reports_rest_transport(hass, aioclient_mock):
-    host = "1.2.3.4"
+    host = "192.0.2.4"
     aioclient_mock.post(
         f"http://{host}/rest/login",
         status=200,
@@ -1374,12 +1376,12 @@ async def test_reconfigure_redetect_updates_legacy_format(
         domain=DOMAIN,
         title="Apex",
         data={
-            CONF_HOST: "1.2.3.4",
+            CONF_HOST: "192.0.2.4",
             CONF_USERNAME: "admin",
             CONF_PASSWORD: "pw",
             CONF_TRANSPORT: TRANSPORT_REST,
         },
-        unique_id="1.2.3.4",
+        unique_id="192.0.2.4",
     )
     entry.add_to_hass(hass)
 
@@ -1389,8 +1391,8 @@ async def test_reconfigure_redetect_updates_legacy_format(
         data=None,
     )
     info = {
-        "title": "Apex (1.2.3.4)",
-        "unique_id": "1.2.3.4",
+        "title": "Apex (192.0.2.4)",
+        "unique_id": "192.0.2.4",
         "transport": TRANSPORT_LEGACY,
         "legacy_format": "cgi_json",
     }
@@ -1401,7 +1403,7 @@ async def test_reconfigure_redetect_updates_legacy_format(
         await hass.config_entries.flow.async_configure(
             flow["flow_id"],
             user_input={
-                CONF_HOST: "1.2.3.4",
+                CONF_HOST: "192.0.2.4",
                 CONF_USERNAME: "admin",
                 CONF_REDETECT_TRANSPORT: True,
             },
@@ -1414,7 +1416,7 @@ async def test_reconfigure_redetect_updates_legacy_format(
         context={"source": "reconfigure", "entry_id": entry.entry_id},
         data=None,
     )
-    info = {"title": "Apex", "unique_id": "1.2.3.4", "transport": TRANSPORT_REST}
+    info = {"title": "Apex", "unique_id": "192.0.2.4", "transport": TRANSPORT_REST}
     with patch(
         "custom_components.apex_fusion.config_flow.async_validate_input",
         new=AsyncMock(return_value=info),
@@ -1422,7 +1424,7 @@ async def test_reconfigure_redetect_updates_legacy_format(
         await hass.config_entries.flow.async_configure(
             flow["flow_id"],
             user_input={
-                CONF_HOST: "1.2.3.4",
+                CONF_HOST: "192.0.2.4",
                 CONF_USERNAME: "admin",
                 CONF_REDETECT_TRANSPORT: True,
             },
@@ -1661,7 +1663,7 @@ _SPEC_ROWS = [
         "404+cgi ok object w/ istat only",
         False,
         _routes((404, ""), cgi=(200, '{"istat": {}}'), xml=(200, _XML_OK)),
-        ("legacy", "cgi_json", "1.2.3.4"),
+        ("legacy", "cgi_json", "192.0.2.4"),
     ),
     (
         "404+xml software attr only",
@@ -1669,7 +1671,7 @@ _SPEC_ROWS = [
         _routes(
             (404, ""), cgi=(404, ""), xml=(200, '<status software="5.1"></status>')
         ),
-        ("legacy", "xml", "1.2.3.4"),
+        ("legacy", "xml", "192.0.2.4"),
     ),
     (
         "404+xml serial only",
@@ -1869,7 +1871,7 @@ _SPEC_ROWS = [
 async def test_transport_detection_spec_table(hass, has_password, routes, expected):
     probes = list(routes["GET /rest/status"])
     session = _SpecSession(routes)
-    data = {CONF_HOST: "1.2.3.4", CONF_USERNAME: "admin"}
+    data = {CONF_HOST: "192.0.2.4", CONF_USERNAME: "admin"}
     data[CONF_PASSWORD] = "pw" if has_password else ""
 
     async def _no_sleep(_secs: float):
@@ -1939,7 +1941,7 @@ async def test_gate_probe_makes_up_to_three_attempts_and_login_up_to_four(hass):
     async def _no_sleep(_secs: float):
         return None
 
-    data = {CONF_HOST: "1.2.3.4", CONF_USERNAME: "admin", CONF_PASSWORD: "pw"}
+    data = {CONF_HOST: "192.0.2.4", CONF_USERNAME: "admin", CONF_PASSWORD: "pw"}
     for session, expect in ((legacy, None), (rest, InvalidAuth)):
         with (
             patch(
@@ -1993,11 +1995,11 @@ async def test_login_falls_back_to_admin_after_the_supplied_username(hass):
     ):
         info = await async_validate_input(
             hass,
-            {CONF_HOST: "1.2.3.4", CONF_USERNAME: "rob", CONF_PASSWORD: "pw"},
+            {CONF_HOST: "192.0.2.4", CONF_USERNAME: "user", CONF_PASSWORD: "pw"},
         )
 
     assert info["transport"] == "rest"
-    assert posted[:4] == ["rob"] * 4
+    assert posted[:4] == ["user"] * 4
     assert posted[4] == "admin"
 
 

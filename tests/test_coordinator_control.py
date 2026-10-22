@@ -130,13 +130,13 @@ async def _make_coord(
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={
-            CONF_HOST: "1.2.3.4",
+            CONF_HOST: "192.0.2.4",
             CONF_USERNAME: "user",
             CONF_PASSWORD: password,
             CONF_TRANSPORT: TRANSPORT_REST,
         },
-        unique_id="1.2.3.4",
-        title="Apex (1.2.3.4)",
+        unique_id="192.0.2.4",
+        title="Apex (192.0.2.4)",
     )
     entry.add_to_hass(hass)
     return ApexNeptuneDataUpdateCoordinator(hass, entry=cast(Any, entry))
@@ -268,13 +268,13 @@ async def test_update_data_rest_login_rejected_sets_saw_auth_rejection_and_raise
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={
-            CONF_HOST: "1.2.3.4",
+            CONF_HOST: "192.0.2.4",
             CONF_USERNAME: "user",
             CONF_PASSWORD: "pw",
             CONF_TRANSPORT: TRANSPORT_REST,
         },
-        unique_id="1.2.3.4",
-        title="Apex (1.2.3.4)",
+        unique_id="192.0.2.4",
+        title="Apex (192.0.2.4)",
     )
     entry.add_to_hass(hass)
     coord = ApexNeptuneDataUpdateCoordinator(hass, entry=cast(Any, entry))
@@ -317,13 +317,13 @@ async def test_update_data_rest_transient_errors_after_auth_rejection_raise_auth
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={
-            CONF_HOST: "1.2.3.4",
+            CONF_HOST: "192.0.2.4",
             CONF_USERNAME: "user",
             CONF_PASSWORD: "pw",
             CONF_TRANSPORT: TRANSPORT_REST,
         },
-        unique_id="1.2.3.4",
-        title="Apex (1.2.3.4)",
+        unique_id="192.0.2.4",
+        title="Apex (192.0.2.4)",
     )
     entry.add_to_hass(hass)
     coord = ApexNeptuneDataUpdateCoordinator(hass, entry=cast(Any, entry))

@@ -931,7 +931,7 @@ async def test_cgi_json_404_falls_back_to_xml(hass, enable_custom_integrations):
         )
     )
 
-    coord = await _make_coordinator(hass, host="1.2.3.4", transport=TRANSPORT_LEGACY)
+    coord = await _make_coordinator(hass, host="192.0.2.4", transport=TRANSPORT_LEGACY)
 
     with (
         patch(
@@ -956,7 +956,7 @@ async def test_cgi_json_unauthorized_raises_auth_failed(
     # CGI JSON endpoint 401
     session.queue_get(_Resp(401, "{}"))
 
-    coord = await _make_coordinator(hass, host="1.2.3.4", transport=TRANSPORT_LEGACY)
+    coord = await _make_coordinator(hass, host="192.0.2.4", transport=TRANSPORT_LEGACY)
 
     with (
         patch(
@@ -1713,7 +1713,7 @@ async def test_cgi_json_invalid_body_logs_and_falls_back_to_xml(
     )
 
     coord = await _make_coordinator(
-        hass, host="1.2.3.4", password="", transport=TRANSPORT_LEGACY
+        hass, host="192.0.2.4", password="", transport=TRANSPORT_LEGACY
     )
 
     with (
@@ -1926,7 +1926,7 @@ async def test_xml_unauthorized_raises_auth_failed(hass, enable_custom_integrati
     )
 
     coord = await _make_coordinator(
-        hass, host="1.2.3.4", password="", transport=TRANSPORT_LEGACY
+        hass, host="192.0.2.4", password="", transport=TRANSPORT_LEGACY
     )
 
     with (
@@ -1995,7 +1995,7 @@ async def test_status_xml_unauthorized_logs_and_raises_auth_failed(
     )
 
     coord = await _make_coordinator(
-        hass, host="1.2.3.4", password="", transport=TRANSPORT_LEGACY
+        hass, host="192.0.2.4", password="", transport=TRANSPORT_LEGACY
     )
 
     with (
@@ -2070,8 +2070,8 @@ def _patched(session):
 async def test_update_without_stored_transport_fails(hass, enable_custom_integrations):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "1.2.3.4", CONF_PASSWORD: "pw"},
-        unique_id="1.2.3.4",
+        data={CONF_HOST: "192.0.2.4", CONF_PASSWORD: "pw"},
+        unique_id="192.0.2.4",
     )
     entry.add_to_hass(hass)
     coord = ApexNeptuneDataUpdateCoordinator(hass, entry=cast(Any, entry))
@@ -2083,7 +2083,7 @@ async def test_update_without_stored_transport_fails(hass, enable_custom_integra
 async def test_legacy_transport_never_touches_rest(hass, enable_custom_integrations):
     session = _Session()
     session.queue_get(_Resp(200, _CGI_OK))
-    coord = await _make_coordinator(hass, host="1.2.3.4", transport=TRANSPORT_LEGACY)
+    coord = await _make_coordinator(hass, host="192.0.2.4", transport=TRANSPORT_LEGACY)
 
     p1, p2 = _patched(session)
     with p1, p2:
@@ -2107,7 +2107,7 @@ async def test_rest_outage_makes_update_fail_then_recovers_on_rest(
     )
     # Legacy endpoints must stay untouched for the whole sequence.
     session.queue_get(_Resp(200, _CGI_OK))
-    coord = await _make_coordinator(hass, host="1.2.3.4", password="")
+    coord = await _make_coordinator(hass, host="192.0.2.4", password="")
 
     p1, p2 = _patched(session)
     with p1, p2:
@@ -2124,7 +2124,7 @@ async def test_no_login_rest_non_object_payload_fails_update(
 ):
     session = _Session()
     session.queue_get(_Resp(200, "[]"))
-    coord = await _make_coordinator(hass, host="1.2.3.4", password="")
+    coord = await _make_coordinator(hass, host="192.0.2.4", password="")
 
     p1, p2 = _patched(session)
     with p1, p2, pytest.raises(UpdateFailed):
@@ -2137,7 +2137,7 @@ async def test_no_login_rest_requiring_login_triggers_reauth(
     session = _Session()
     session.queue_get(_Resp(401, "{}"))
     session.queue_get(_Resp(200, _CGI_OK))
-    coord = await _make_coordinator(hass, host="1.2.3.4", password="")
+    coord = await _make_coordinator(hass, host="192.0.2.4", password="")
 
     p1, p2 = _patched(session)
     with p1, p2, pytest.raises(ConfigEntryAuthFailed):
@@ -2151,7 +2151,7 @@ async def test_legacy_xml_parse_error_fails_update(hass, enable_custom_integrati
     session.queue_get(_Resp(404, "{}"))
     session.queue_get(_Resp(200, "<status"))
     coord = await _make_coordinator(
-        hass, host="1.2.3.4", password="", transport=TRANSPORT_LEGACY
+        hass, host="192.0.2.4", password="", transport=TRANSPORT_LEGACY
     )
 
     p1, p2 = _patched(session)
@@ -2166,7 +2166,7 @@ async def test_legacy_xml_unexpected_error_fails_update(
     session.queue_get(_Resp(404, "{}"))
     session.queue_get(RuntimeError("boom"))
     coord = await _make_coordinator(
-        hass, host="1.2.3.4", password="", transport=TRANSPORT_LEGACY
+        hass, host="192.0.2.4", password="", transport=TRANSPORT_LEGACY
     )
 
     p1, p2 = _patched(session)
@@ -2196,12 +2196,12 @@ async def _legacy_coord(hass, fmt):
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={
-            CONF_HOST: "1.2.3.4",
+            CONF_HOST: "192.0.2.4",
             CONF_PASSWORD: "",
             CONF_TRANSPORT: TRANSPORT_LEGACY,
             CONF_LEGACY_FORMAT: fmt,
         },
-        unique_id="1.2.3.4",
+        unique_id="192.0.2.4",
     )
     entry.add_to_hass(hass)
     return ApexNeptuneDataUpdateCoordinator(hass, entry=cast(Any, entry))
