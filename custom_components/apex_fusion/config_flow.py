@@ -307,7 +307,6 @@ _GATE_ABSENT_STATUSES = frozenset(
         HTTPStatus.BAD_REQUEST,
         HTTPStatus.METHOD_NOT_ALLOWED,
         HTTPStatus.NOT_IMPLEMENTED,
-        HTTPStatus.FOUND,
     }
 )
 
@@ -319,8 +318,7 @@ async def _async_probe_rest_gate_once(
 
     Returns:
         True for the positive REST signal (401/403, or a 200 JSON object). False
-        only for the definite non-REST answers: 404, 400, 405, 501, 302 (a plain
-        redirect away from the path, which the REST gate never does) and a 200
+        only for the definite non-REST answers: 404, 400, 405, 501 and a 200
         whose body is not a JSON object. `None` (indeterminate, treated as
         transient) for everything else: a timeout, a connection error, an
         unreadable body, any other 3xx, 408, 429 and any other 4xx/5xx.
@@ -460,7 +458,13 @@ async def _async_validate_legacy(
                             _extract_hostname_from_status_obj(status_obj),
                             LEGACY_FORMAT_CGI_JSON,
                         )
-    except (asyncio.TimeoutError, aiohttp.ClientError, json.JSONDecodeError) as err:
+    except (
+        asyncio.TimeoutError,
+        aiohttp.ClientError,
+        UnicodeDecodeError,
+        ValueError,  # includes json.JSONDecodeError
+        RecursionError,
+    ) as err:
         _LOGGER.debug("status.json not usable: %s", err)
 
     try:
@@ -480,7 +484,14 @@ async def _async_validate_legacy(
                             (root.findtext("./hostname") or "").strip() or None,
                             LEGACY_FORMAT_XML,
                         )
-    except (asyncio.TimeoutError, aiohttp.ClientError, ET.ParseError) as err:
+    except (
+        asyncio.TimeoutError,
+        aiohttp.ClientError,
+        ET.ParseError,
+        UnicodeDecodeError,
+        ValueError,
+        RecursionError,
+    ) as err:
         _LOGGER.debug("status.xml not usable: %s", err)
 
     raise CannotConnect

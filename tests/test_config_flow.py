@@ -1439,16 +1439,19 @@ _XML_OK = (
     '<status software="5.1"><serial>SER8</serial><hostname>apex</hostname></status>'
 )
 _OK = (200, "")
+_BAD_BODY = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad")
 
 
 class _SpecResp:
-    def __init__(self, status: int, body: str = "") -> None:
+    def __init__(self, status: int, body: Any = "") -> None:
         self.status = status
         self._body = body
         self.headers: dict[str, str] = {}
         self.cookies: dict[str, Any] = {}
 
     async def text(self) -> str:
+        if isinstance(self._body, BaseException):
+            raise self._body
         return self._body
 
     def raise_for_status(self) -> None:
@@ -1754,10 +1757,34 @@ _SPEC_ROWS = [
     ("probe 502", False, _routes((502, ""), cgi=(200, _CGI_OK)), CannotConnect),
     ("probe 504", False, _routes((504, ""), cgi=(200, _CGI_OK)), CannotConnect),
     (
-        "probe 302 -> legacy",
+        "probe 302 x3 -> cannot_connect",
         False,
         _routes((302, ""), cgi=(200, _CGI_OK)),
-        ("legacy", "cgi_json", "SER9"),
+        CannotConnect,
+    ),
+    (
+        "unreadable status.json, xml ok -> xml",
+        False,
+        _routes((404, ""), cgi=(200, _BAD_BODY), xml=(200, _XML_OK)),
+        ("legacy", "xml", "SER8"),
+    ),
+    (
+        "unreadable status.json and status.xml -> cannot_connect",
+        False,
+        _routes((404, ""), cgi=(200, _BAD_BODY), xml=(200, _BAD_BODY)),
+        CannotConnect,
+    ),
+    (
+        "unreadable status.xml only -> cannot_connect",
+        False,
+        _routes((404, ""), cgi=(404, ""), xml=(200, _BAD_BODY)),
+        CannotConnect,
+    ),
+    (
+        "deeply nested status.json, xml ok -> xml",
+        False,
+        _routes((404, ""), cgi=(200, "[" * 100000), xml=(200, _XML_OK)),
+        ("legacy", "xml", "SER8"),
     ),
     (
         "probe 200 html -> legacy",
@@ -1940,7 +1967,7 @@ async def test_transport_detection_spec_table(hass, has_password, routes, expect
             return True
         if code == 200:
             return body == "{}"
-        return False if code in (404, 400, 405, 501, 302) else None
+        return False if code in (404, 400, 405, 501) else None
 
     # Replay the probe attempts the way the session serves them (the last queued
     # answer repeats), stopping at the first positive signal.
@@ -2117,7 +2144,7 @@ class _BodySession:
         (_BodyResp(418, None), None),
         (_BodyResp(500, None), None),
         (_BodyResp(404, None), False),
-        (_BodyResp(302, None), False),
+        (_BodyResp(302, None), None),
     ],
 )
 async def test_gate_probe_once_classification(resp, expected):
