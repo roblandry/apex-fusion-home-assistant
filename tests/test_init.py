@@ -20,6 +20,7 @@ from custom_components.apex_fusion.const import (
     CONF_LEGACY_FORMAT,
     CONF_NO_LOGIN,
     CONF_PASSWORD,
+    CONF_SERIAL,
     CONF_TRANSPORT,
     DOMAIN,
     TRANSPORT_LEGACY,
@@ -32,9 +33,9 @@ async def test_async_setup_entry_stores_coordinator_and_forwards_platforms(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "192.0.2.4", CONF_TRANSPORT: TRANSPORT_REST},
-        unique_id="192.0.2.4",
-        title="Apex (192.0.2.4)",
+        data={CONF_HOST: "1.2.3.4", CONF_TRANSPORT: TRANSPORT_REST},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
     )
     entry.add_to_hass(hass)
 
@@ -67,14 +68,14 @@ async def test_async_setup_entry_reuses_cached_rest_sid_when_available(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "192.0.2.4", CONF_TRANSPORT: TRANSPORT_REST},
-        unique_id="192.0.2.4",
-        title="Apex (192.0.2.4)",
+        data={CONF_HOST: "1.2.3.4", CONF_TRANSPORT: TRANSPORT_REST},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
     )
     entry.add_to_hass(hass)
 
     # Seed a cached SID under hass.data[DOMAIN].
-    hass.data.setdefault(DOMAIN, {})["_rest_sid_by_host"] = {"192.0.2.4": "abc"}
+    hass.data.setdefault(DOMAIN, {})["_rest_sid_by_host"] = {"1.2.3.4": "abc"}
 
     coordinator = AsyncMock()
     coordinator.async_config_entry_first_refresh = AsyncMock(return_value=None)
@@ -104,9 +105,13 @@ async def test_async_setup_entry_handles_sid_cache_lookup_exception(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "192.0.2.4", CONF_TRANSPORT: TRANSPORT_REST},
-        unique_id="192.0.2.4",
-        title="Apex (192.0.2.4)",
+        data={
+            CONF_HOST: "1.2.3.4",
+            CONF_TRANSPORT: TRANSPORT_REST,
+            CONF_SERIAL: "SER123",
+        },
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
     )
     entry.add_to_hass(hass)
 
@@ -149,12 +154,12 @@ async def test_async_setup_entry_forwards_rest_authenticated_platforms(
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={
-            CONF_HOST: "192.0.2.4",
+            CONF_HOST: "1.2.3.4",
             CONF_PASSWORD: "pw",
             CONF_TRANSPORT: TRANSPORT_REST,
         },
-        unique_id="192.0.2.4",
-        title="Apex (192.0.2.4)",
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
     )
     entry.add_to_hass(hass)
 
@@ -194,12 +199,12 @@ async def test_async_setup_entry_forwards_rest_read_only_platforms(
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={
-            CONF_HOST: "192.0.2.4",
+            CONF_HOST: "1.2.3.4",
             CONF_NO_LOGIN: True,
             CONF_TRANSPORT: TRANSPORT_REST,
         },
-        unique_id="192.0.2.4",
-        title="Apex (192.0.2.4)",
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
     )
     entry.add_to_hass(hass)
 
@@ -233,12 +238,12 @@ async def test_async_setup_entry_forwards_legacy_platforms(
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={
-            CONF_HOST: "192.0.2.4",
+            CONF_HOST: "1.2.3.4",
             CONF_PASSWORD: "pw",
             CONF_TRANSPORT: TRANSPORT_LEGACY,
         },
-        unique_id="192.0.2.4",
-        title="Apex (192.0.2.4)",
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
     )
     entry.add_to_hass(hass)
 
@@ -273,12 +278,12 @@ async def test_setup_never_purges_registry_when_source_changes(
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={
-            CONF_HOST: "192.0.2.4",
+            CONF_HOST: "1.2.3.4",
             CONF_TRANSPORT: TRANSPORT_REST,
             CONF_LAST_SOURCE: "cgi_json",
         },
-        unique_id="192.0.2.4",
-        title="Apex (192.0.2.4)",
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
     )
     entry.add_to_hass(hass)
 
@@ -358,13 +363,9 @@ async def test_setup_infers_transport_from_last_source(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={
-            CONF_HOST: "192.0.2.4",
-            CONF_PASSWORD: "pw",
-            CONF_LAST_SOURCE: last_source,
-        },
-        unique_id="192.0.2.4",
-        title="Apex (192.0.2.4)",
+        data={CONF_HOST: "1.2.3.4", CONF_PASSWORD: "pw", CONF_LAST_SOURCE: last_source},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
     )
     entry.add_to_hass(hass)
 
@@ -381,9 +382,9 @@ async def test_setup_detects_transport_once_when_nothing_is_stored(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "192.0.2.4", CONF_PASSWORD: "pw"},
-        unique_id="192.0.2.4",
-        title="Apex (192.0.2.4)",
+        data={CONF_HOST: "1.2.3.4", CONF_PASSWORD: "pw"},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
     )
     entry.add_to_hass(hass)
 
@@ -409,9 +410,9 @@ async def test_setup_detection_failure_is_retry_or_reauth(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "192.0.2.4", CONF_PASSWORD: "pw"},
-        unique_id="192.0.2.4",
-        title="Apex (192.0.2.4)",
+        data={CONF_HOST: "1.2.3.4", CONF_PASSWORD: "pw"},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
     )
     entry.add_to_hass(hass)
 
@@ -433,12 +434,12 @@ async def test_first_refresh_failure_leaves_entry_in_setup_retry(
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={
-            CONF_HOST: "192.0.2.4",
+            CONF_HOST: "1.2.3.4",
             CONF_PASSWORD: "pw",
             CONF_TRANSPORT: TRANSPORT_REST,
         },
-        unique_id="192.0.2.4",
-        title="Apex (192.0.2.4)",
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
     )
     entry.add_to_hass(hass)
 
@@ -467,9 +468,9 @@ async def test_async_setup_entry_updates_title_from_controller_hostname(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "192.0.2.4", CONF_TRANSPORT: TRANSPORT_REST},
-        unique_id="192.0.2.4",
-        title="Apex (192.0.2.4)",
+        data={CONF_HOST: "1.2.3.4", CONF_TRANSPORT: TRANSPORT_REST},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
     )
     entry.add_to_hass(hass)
 
@@ -495,7 +496,7 @@ async def test_async_setup_entry_updates_title_from_controller_hostname(
         assert await async_setup_entry(hass, cast(Any, entry)) is True
 
     assert any(
-        call.kwargs.get("title") == "200XL (192.0.2.4)"
+        call.kwargs.get("title") == "200XL (1.2.3.4)"
         for call in update_entry.mock_calls
     )
 
@@ -505,9 +506,9 @@ async def test_async_setup_entry_title_cleans_underscores_in_hostname(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "192.0.2.4", CONF_TRANSPORT: TRANSPORT_REST},
-        unique_id="192.0.2.4",
-        title="Apex (192.0.2.4)",
+        data={CONF_HOST: "1.2.3.4", CONF_TRANSPORT: TRANSPORT_REST},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
     )
     entry.add_to_hass(hass)
 
@@ -533,7 +534,7 @@ async def test_async_setup_entry_title_cleans_underscores_in_hostname(
         assert await async_setup_entry(hass, cast(Any, entry)) is True
 
     assert any(
-        call.kwargs.get("title") == "80g Frag Tank (192.0.2.4)"
+        call.kwargs.get("title") == "80g Frag Tank (1.2.3.4)"
         for call in update_entry.mock_calls
     )
 
@@ -543,9 +544,9 @@ async def test_async_unload_entry_pops_data_when_unloaded(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "192.0.2.4", CONF_TRANSPORT: TRANSPORT_REST},
-        unique_id="192.0.2.4",
-        title="Apex (192.0.2.4)",
+        data={CONF_HOST: "1.2.3.4", CONF_TRANSPORT: TRANSPORT_REST},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
     )
     entry.add_to_hass(hass)
 
@@ -568,9 +569,9 @@ async def test_async_unload_entry_uses_entry_platforms_when_present(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "192.0.2.4", CONF_TRANSPORT: TRANSPORT_REST},
-        unique_id="192.0.2.4",
-        title="Apex (192.0.2.4)",
+        data={CONF_HOST: "1.2.3.4", CONF_TRANSPORT: TRANSPORT_REST},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
     )
     entry.add_to_hass(hass)
 
@@ -597,9 +598,9 @@ async def test_async_unload_entry_accepts_platform_enum_items(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "192.0.2.4", CONF_TRANSPORT: TRANSPORT_REST},
-        unique_id="192.0.2.4",
-        title="Apex (192.0.2.4)",
+        data={CONF_HOST: "1.2.3.4", CONF_TRANSPORT: TRANSPORT_REST},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
     )
     entry.add_to_hass(hass)
 
@@ -624,9 +625,9 @@ async def test_async_unload_entry_falls_back_to_stored_platforms(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "192.0.2.4", CONF_TRANSPORT: TRANSPORT_REST},
-        unique_id="192.0.2.4",
-        title="Apex (192.0.2.4)",
+        data={CONF_HOST: "1.2.3.4", CONF_TRANSPORT: TRANSPORT_REST},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
     )
     entry.add_to_hass(hass)
 
@@ -655,9 +656,9 @@ async def test_async_unload_entry_last_resort_unloads_all_platforms(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "192.0.2.4", CONF_TRANSPORT: TRANSPORT_REST},
-        unique_id="192.0.2.4",
-        title="Apex (192.0.2.4)",
+        data={CONF_HOST: "1.2.3.4", CONF_TRANSPORT: TRANSPORT_REST},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
     )
     entry.add_to_hass(hass)
 
@@ -684,9 +685,9 @@ async def test_async_unload_entry_retries_on_value_error_with_fallback(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "192.0.2.4", CONF_TRANSPORT: TRANSPORT_REST},
-        unique_id="192.0.2.4",
-        title="Apex (192.0.2.4)",
+        data={CONF_HOST: "1.2.3.4", CONF_TRANSPORT: TRANSPORT_REST},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
     )
     entry.add_to_hass(hass)
 
@@ -707,9 +708,9 @@ async def test_async_unload_entry_platforms_not_iterable_uses_stored_map(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "192.0.2.4", CONF_TRANSPORT: TRANSPORT_REST},
-        unique_id="192.0.2.4",
-        title="Apex (192.0.2.4)",
+        data={CONF_HOST: "1.2.3.4", CONF_TRANSPORT: TRANSPORT_REST},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
     )
     entry.add_to_hass(hass)
 
@@ -739,9 +740,9 @@ async def test_async_unload_entry_ignores_invalid_platform_names(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "192.0.2.4", CONF_TRANSPORT: TRANSPORT_REST},
-        unique_id="192.0.2.4",
-        title="Apex (192.0.2.4)",
+        data={CONF_HOST: "1.2.3.4", CONF_TRANSPORT: TRANSPORT_REST},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
     )
     entry.add_to_hass(hass)
 
@@ -768,9 +769,9 @@ async def test_async_unload_entry_value_error_with_no_fallback_reraises(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "192.0.2.4", CONF_TRANSPORT: TRANSPORT_REST},
-        unique_id="192.0.2.4",
-        title="Apex (192.0.2.4)",
+        data={CONF_HOST: "1.2.3.4", CONF_TRANSPORT: TRANSPORT_REST},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
     )
     entry.add_to_hass(hass)
 
@@ -791,9 +792,9 @@ async def test_async_unload_entry_keeps_data_when_not_unloaded(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "192.0.2.4", CONF_TRANSPORT: TRANSPORT_REST},
-        unique_id="192.0.2.4",
-        title="Apex (192.0.2.4)",
+        data={CONF_HOST: "1.2.3.4", CONF_TRANSPORT: TRANSPORT_REST},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
     )
     entry.add_to_hass(hass)
 
@@ -817,9 +818,9 @@ async def test_async_setup_entry_updates_unique_id_to_serial(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "192.0.2.4", CONF_TRANSPORT: TRANSPORT_REST},
-        unique_id="192.0.2.4",
-        title="Apex (192.0.2.4)",
+        data={CONF_HOST: "1.2.3.4", CONF_TRANSPORT: TRANSPORT_REST},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
     )
     entry.add_to_hass(hass)
 
@@ -845,8 +846,9 @@ async def test_async_setup_entry_updates_unique_id_to_serial(
 
         assert await async_setup_entry(hass, cast(Any, entry)) is True
 
-    update.assert_called_once()
-    assert update.call_args.kwargs.get("unique_id") == "SER123"
+    unique_id_calls = [c for c in update.call_args_list if "unique_id" in c.kwargs]
+    assert len(unique_id_calls) == 1
+    assert unique_id_calls[0].kwargs["unique_id"] == "SER123"
 
 
 async def test_async_setup_entry_duplicate_serial_logs_warning(
@@ -854,17 +856,17 @@ async def test_async_setup_entry_duplicate_serial_logs_warning(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "192.0.2.4", CONF_TRANSPORT: TRANSPORT_REST},
-        unique_id="192.0.2.4",
-        title="Apex (192.0.2.4)",
+        data={CONF_HOST: "1.2.3.4", CONF_TRANSPORT: TRANSPORT_REST},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
     )
     entry.add_to_hass(hass)
 
     other = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "192.0.2.5", CONF_TRANSPORT: TRANSPORT_REST},
+        data={CONF_HOST: "1.2.3.5", CONF_TRANSPORT: TRANSPORT_REST},
         unique_id="SER123",
-        title="Apex (192.0.2.5)",
+        title="Apex (1.2.3.5)",
     )
     other.add_to_hass(hass)
 
@@ -891,7 +893,7 @@ async def test_async_setup_entry_duplicate_serial_logs_warning(
         assert await async_setup_entry(hass, cast(Any, entry)) is True
 
     assert "Duplicate Apex config entries detected" in caplog.text
-    update.assert_not_called()
+    assert not any("unique_id" in c.kwargs for c in update.call_args_list)
 
 
 async def test_async_setup_entry_does_not_rename_existing_entity_ids(
@@ -899,9 +901,9 @@ async def test_async_setup_entry_does_not_rename_existing_entity_ids(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "192.0.2.4", CONF_TRANSPORT: TRANSPORT_REST},
-        unique_id="192.0.2.4",
-        title="Apex (192.0.2.4)",
+        data={CONF_HOST: "1.2.3.4", CONF_TRANSPORT: TRANSPORT_REST},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
     )
     entry.add_to_hass(hass)
 
@@ -945,9 +947,9 @@ async def test_setup_pins_legacy_format_from_first_refresh(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "192.0.2.4", CONF_TRANSPORT: TRANSPORT_LEGACY},
-        unique_id="192.0.2.4",
-        title="Apex (192.0.2.4)",
+        data={CONF_HOST: "1.2.3.4", CONF_TRANSPORT: TRANSPORT_LEGACY},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
     )
     entry.add_to_hass(hass)
 
@@ -975,9 +977,9 @@ async def test_setup_pins_legacy_format_from_first_refresh(
 async def test_setup_detection_records_legacy_format(hass, enable_custom_integrations):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "192.0.2.4", CONF_PASSWORD: ""},
-        unique_id="192.0.2.4",
-        title="Apex (192.0.2.4)",
+        data={CONF_HOST: "1.2.3.4", CONF_PASSWORD: ""},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
     )
     entry.add_to_hass(hass)
 

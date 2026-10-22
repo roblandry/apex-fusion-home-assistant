@@ -59,7 +59,9 @@ class ApexFusionContext:
         meta_any: Any = data.get("meta", {})
         meta = cast(dict[str, Any], meta_any) if isinstance(meta_any, dict) else {}
 
-        serial_for_ids = str(meta.get("serial") or host or "apex").replace(":", "_")
+        # Same token the device identifier uses, so unique ids never depend on the
+        # transport or on whether a given payload happens to carry the serial.
+        serial_for_ids = coordinator.device_identifier.replace(":", "_")
 
         hostname_raw = str(meta.get("hostname") or "")
         hostname_disp = clean_hostname_display(hostname_raw) or ""
