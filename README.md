@@ -312,6 +312,7 @@ When present, they appear as output mode selects (Off/Auto/On). Setting them to 
 - Create and use `.venv`
 - Run tests: `.venv/bin/pytest -q`
 - Lint: `.venv/bin/ruff check .`
+- Releases: see [docs/RELEASE.md](docs/RELEASE.md)
 - Optional (commit messages): `pip install -r requirements.txt` then run `cz commit` for an interactive Conventional Commit prompt
 
 ### Contributions
