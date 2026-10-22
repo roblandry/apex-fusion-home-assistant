@@ -18,6 +18,7 @@ from custom_components.apex_fusion.const import (
     CONF_LEGACY_FORMAT,
     CONF_NO_LOGIN,
     CONF_PASSWORD,
+    CONF_SERIAL,
     CONF_TRANSPORT,
     CONF_USERNAME,
     DOMAIN,
@@ -1256,14 +1257,23 @@ async def test_rest_rate_limited_on_login_sets_backoff_and_fails_update(
 async def test_coordinator_device_identifier_and_serial_cache(
     hass, enable_custom_integrations
 ):
-    coord = await _make_coordinator(hass, host="1.2.3.4")
+    coord = await _make_coordinator(hass, host="192.0.2.4")
 
-    # Default: stable non-IP fallback.
-    assert coord.device_identifier.startswith("entry:")
+    # Default: the entry's original unique_id (never an "entry:" token).
+    assert coord.device_identifier == "192.0.2.4"
 
-    # Cached serial takes priority.
+    # A serial seen in the data wins over that fallback.
     coord._cached_serial = "SER123"
     assert coord.device_identifier == "SER123"
+
+    # The serial persisted on the entry wins over everything and never changes.
+    hass.config_entries.async_update_entry(
+        coord.entry, data={**coord.entry.data, CONF_SERIAL: "STORED1"}
+    )
+    assert coord.device_identifier == "STORED1"
+    coord._cached_serial = "OTHER"
+    assert coord.device_identifier == "STORED1"
+    coord._cached_serial = "SER123"
 
     # meta non-dict is normalized, and cached serial is injected when missing.
     data = coord._apply_serial_cache({"meta": "nope"})

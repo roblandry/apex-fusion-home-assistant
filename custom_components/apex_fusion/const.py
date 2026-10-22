@@ -32,6 +32,12 @@ CONF_TRANSPORT: Final = "transport"
 TRANSPORT_REST: Final = "rest"
 TRANSPORT_LEGACY: Final = "legacy"
 
+# Stable controller identity: the controller serial, persisted on first setup. It
+# is the device identifier and the prefix of every unique_id, so it must never
+# depend on the transport or on the host/IP. A controller that reports no serial
+# falls back to the entry's original unique_id (kept for the entry's lifetime).
+CONF_SERIAL: Final = "serial"
+
 # Legacy controllers expose status.json and status.xml. status.xml keys probes by
 # name (no ``did``), so the working format is pinned too: flipping between the two
 # would create a second set of entities.

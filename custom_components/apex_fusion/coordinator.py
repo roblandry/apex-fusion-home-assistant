@@ -34,6 +34,7 @@ from .const import (
     CONF_LEGACY_FORMAT,
     CONF_NO_LOGIN,
     CONF_PASSWORD,
+    CONF_SERIAL,
     CONF_TRANSPORT,
     CONF_USERNAME,
     DEFAULT_SCAN_INTERVAL,
@@ -1984,16 +1985,21 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     @property
     def device_identifier(self) -> str:
-        """Return a stable non-IP identifier for this controller.
+        """Return the stable, transport-independent identifier for this controller.
 
-        Prefer controller serial; fall back to config entry id (stable, non-IP).
+        This is the serial persisted on the config entry. Until it has been
+        persisted (first setup) the serial seen in the data is used, and for a
+        controller that never reports one, the entry's original unique_id.
 
         Returns:
             Identifier for use in the HA device registry.
         """
+        stored = str(self.entry.data.get(CONF_SERIAL) or "").strip()
+        if stored:
+            return stored
         if self._cached_serial:
             return self._cached_serial
-        return f"entry:{self.entry.entry_id}"
+        return str(self.entry.unique_id or self.entry.entry_id)
 
     def _apply_serial_cache(self, data: dict[str, Any]) -> dict[str, Any]:
         meta_any: Any = data.get("meta")

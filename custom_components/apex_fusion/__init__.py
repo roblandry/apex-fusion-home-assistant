@@ -20,6 +20,7 @@ from .const import (
     CONF_LEGACY_FORMAT,
     CONF_NO_LOGIN,
     CONF_PASSWORD,
+    CONF_SERIAL,
     CONF_TRANSPORT,
     DOMAIN,
     LEGACY_FORMAT_CGI_JSON,
@@ -35,6 +36,7 @@ from .coordinator import (
     legacy_format_from_entry_data,
     transport_from_entry_data,
 )
+from .migration import CONFIG_ENTRY_VERSION, migrate_v1_to_v2
 
 _LOGGER = logging.getLogger(LOGGER_NAME)
 
@@ -178,6 +180,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # controller is added under different hostnames/IPs.
     serial: str | None = str(meta.get("serial") or "").strip() or None
 
+    # Persist the controller identity once; every device identifier and unique_id
+    # is derived from it, so it must not change with the transport or the host.
+    stored_identity = str(entry.data.get(CONF_SERIAL) or "").strip()
+    identity = stored_identity or serial or str(entry.unique_id or "").strip()
+    if identity and identity != stored_identity:
+        hass.config_entries.async_update_entry(
+            entry, data={**entry.data, CONF_SERIAL: identity}
+        )
+
     if serial and entry.unique_id != serial:
         other_entries = hass.config_entries.async_entries(DOMAIN)
         if any(
@@ -222,6 +233,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry.entry_id
     ] = list(platforms)
 
+    return True
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Migrate a config entry to the current version.
+
+    Args:
+        hass: Home Assistant instance.
+        entry: The config entry.
+
+    Returns:
+        True when the entry is at (or was migrated to) the current version.
+    """
+    if entry.version > CONFIG_ENTRY_VERSION:
+        # Created by a newer release; do not touch it.
+        return False
+    if entry.version < 2:
+        await migrate_v1_to_v2(hass, entry)
     return True
 
 

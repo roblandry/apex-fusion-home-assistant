@@ -20,6 +20,7 @@ from custom_components.apex_fusion.const import (
     CONF_LEGACY_FORMAT,
     CONF_NO_LOGIN,
     CONF_PASSWORD,
+    CONF_SERIAL,
     CONF_TRANSPORT,
     DOMAIN,
     TRANSPORT_LEGACY,
@@ -104,7 +105,11 @@ async def test_async_setup_entry_handles_sid_cache_lookup_exception(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "192.0.2.4", CONF_TRANSPORT: TRANSPORT_REST},
+        data={
+            CONF_HOST: "192.0.2.4",
+            CONF_TRANSPORT: TRANSPORT_REST,
+            CONF_SERIAL: "SER123",
+        },
         unique_id="192.0.2.4",
         title="Apex (192.0.2.4)",
     )
@@ -845,8 +850,9 @@ async def test_async_setup_entry_updates_unique_id_to_serial(
 
         assert await async_setup_entry(hass, cast(Any, entry)) is True
 
-    update.assert_called_once()
-    assert update.call_args.kwargs.get("unique_id") == "SER123"
+    unique_id_calls = [c for c in update.call_args_list if "unique_id" in c.kwargs]
+    assert len(unique_id_calls) == 1
+    assert unique_id_calls[0].kwargs["unique_id"] == "SER123"
 
 
 async def test_async_setup_entry_duplicate_serial_logs_warning(
@@ -891,7 +897,7 @@ async def test_async_setup_entry_duplicate_serial_logs_warning(
         assert await async_setup_entry(hass, cast(Any, entry)) is True
 
     assert "Duplicate Apex config entries detected" in caplog.text
-    update.assert_not_called()
+    assert not any("unique_id" in c.kwargs for c in update.call_args_list)
 
 
 async def test_async_setup_entry_does_not_rename_existing_entity_ids(
