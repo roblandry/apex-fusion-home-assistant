@@ -81,11 +81,9 @@ this repository in HACS. Everyone else stays on the latest stable release.
 
 ## If the release did not happen
 
-There is no manual release workflow that edits `main`. If the automatic release
-was missed or failed, check the run under **Actions**. You can re-run **Release
-on version bump** from the Actions tab (it releases the version on `main` and
-skips if the tag exists), or tag and publish by hand from the merged commit on
-`main`:
+There is no manual release workflow. If the automatic release was missed or
+failed, check the run under **Actions**, then tag and publish by hand from the
+merged commit on `main`:
 
 ```sh
 git tag -a v2026.10.25 -m v2026.10.25 <commit>
