@@ -90,30 +90,48 @@ failed, check the run under **Actions**, then finish it by hand.
 
 The workflow can fail after pushing the tag but before creating the GitHub
 release, so the snippet below checks the tag on the **remote** and only then
-decides what to do. Fill in the three variables, then paste the whole block. It
-runs in a subshell and stops at the first failure, so nothing after a failed
-check can run. `COMMIT` is the merge commit on `main` that raised the version,
-and the notes come from the version's `CHANGELOG.md` section.
+decides what to do. Set `TAG` (and `NOTES`, the version's `CHANGELOG.md`
+section in a file), then paste the whole block. It finds the release commit
+itself: the first commit on `main` whose `manifest.json` carries the tag's
+version. You can set `COMMIT` to override that, but it must still be on `main`
+and carry the tag's version. Pre-release tags (`-alpha.N`, `-beta.N`, `-rc.N`)
+are published as pre-releases automatically. The block runs in a subshell and
+stops at the first failure, so nothing after a failed check can run.
 
 ```sh
 (
   set -euo pipefail
   TAG=v2026.10.25
-  COMMIT=<release merge commit sha>
   NOTES=notes.md
-  PRERELEASE=false   # true for suffixed versions such as 2026.10.22-beta.1
+  COMMIT=            # optional override; leave empty to find it
 
-  release() {
-    if [ "$PRERELEASE" = true ]; then
-      gh release create "$TAG" --verify-tag --title "$TAG" \
-        --notes-file "$NOTES" --prerelease
-    else
-      gh release create "$TAG" --verify-tag --title "$TAG" --notes-file "$NOTES"
-    fi
+  version=${TAG#v}
+  manifest=custom_components/apex_fusion/manifest.json
+  manifest_version() {
+    git show "$1:$manifest" | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])'
   }
+  case "$TAG" in
+    *-alpha.*|*-beta.*|*-rc.*) pre=--prerelease ;;
+    *) pre= ;;
+  esac
+  fail() { echo "error: $*" >&2; exit 1; }
 
   git fetch origin main
+
+  if [ -z "$COMMIT" ]; then
+    commits=$(git rev-list --first-parent --reverse origin/main -- "$manifest")
+    for c in $commits; do
+      v=$(manifest_version "$c" 2>/dev/null || true)
+      if [ "$v" = "$version" ]; then COMMIT=$c; break; fi
+    done
+    [ -n "$COMMIT" ] || fail "no commit on origin/main has version $version"
+  fi
   want=$(git rev-parse "$COMMIT^{commit}")
+  git merge-base --is-ancestor "$want" origin/main \
+    || fail "$want is not on origin/main"
+  have=$(manifest_version "$want")
+  [ "$have" = "$version" ] || fail "$want carries version $have, not $version"
+
   # Where the tag points on the remote: the peeled commit of an annotated tag,
   # or the tag itself if it is lightweight.
   remote=$(git ls-remote origin "refs/tags/$TAG^{}" | cut -f1)
@@ -124,12 +142,11 @@ and the notes come from the version's `CHANGELOG.md` section.
   if [ -z "$remote" ]; then
     git tag -a "$TAG" -m "$TAG" "$want"
     git push origin "refs/tags/$TAG"
-    release
+    gh release create "$TAG" --verify-tag --title "$TAG" --notes-file "$NOTES" $pre
   elif [ "$remote" = "$want" ]; then
-    release
+    gh release create "$TAG" --verify-tag --title "$TAG" --notes-file "$NOTES" $pre
   else
-    echo "error: $TAG on the remote points at $remote, not $want; not touching it" >&2
-    exit 1
+    fail "$TAG on the remote points at $remote, not $want; not touching it"
   fi
 )
 ```
