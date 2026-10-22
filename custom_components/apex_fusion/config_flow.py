@@ -28,11 +28,15 @@ from yarl import URL
 from .const import (
     CONF_HOST,
     CONF_NO_LOGIN,
+    CONF_REDETECT_TRANSPORT,
+    CONF_TRANSPORT,
     DEFAULT_PASSWORD,
     DEFAULT_STATUS_PATH,
     DEFAULT_USERNAME,
     DOMAIN,
     LOGGER_NAME,
+    TRANSPORT_LEGACY,
+    TRANSPORT_REST,
 )
 from .coordinator import build_base_url, build_status_url, clean_hostname_display
 
@@ -124,6 +128,7 @@ def _step_reconfigure_schema(existing: dict[str, Any]) -> vol.Schema:
             vol.Optional(CONF_NO_LOGIN, default=no_login_default): bool,
             vol.Optional(CONF_USERNAME, default=username_default): str,
             vol.Optional(CONF_PASSWORD): str,
+            vol.Optional(CONF_REDETECT_TRANSPORT, default=False): bool,
         }
     )
 
@@ -276,20 +281,73 @@ def _extract_serial_from_status_obj(status_obj: dict[str, Any]) -> str | None:
     return None
 
 
-async def _async_validate_input(
+async def _async_probe_rest_without_login(
+    session: aiohttp.ClientSession, *, base_url: str, host: str
+) -> dict[str, str] | None:
+    """Probe for a REST API that can be read without logging in.
+
+    Args:
+        session: Shared HTTP session.
+        base_url: Controller base URL.
+        host: Controller host (for the title).
+
+    Returns:
+        Validation info for the REST transport, or `None` when the controller
+        does not serve REST status without a login.
+
+    Raises:
+        CannotConnect: If the controller could not be reached or errored
+            transiently; the transport must not be guessed in that case.
+    """
+    try:
+        async with async_timeout.timeout(10):
+            async with session.get(
+                f"{base_url}/rest/status", headers={"Accept": "*/*"}
+            ) as resp:
+                _LOGGER.debug("REST no-login status HTTP %s", resp.status)
+                if resp.status != HTTPStatus.OK:
+                    if _is_transient_http_status(resp.status):
+                        raise CannotConnect
+                    return None
+                body = await resp.text()
+    except (asyncio.TimeoutError, aiohttp.ClientError) as err:
+        raise CannotConnect from err
+
+    try:
+        status_any: Any = json.loads(body) if body else {}
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(status_any, dict):
+        return None
+    status_obj = cast(dict[str, Any], status_any)
+
+    hostname = _extract_hostname_from_status_obj(status_obj)
+    hostname_disp = clean_hostname_display(hostname) if hostname else None
+    title_hostname = hostname_disp or hostname
+    title = f"{title_hostname} ({host})" if title_hostname else f"Apex ({host})"
+    return {
+        "title": title,
+        "unique_id": _extract_serial_from_status_obj(status_obj) or host,
+        "transport": TRANSPORT_REST,
+    }
+
+
+async def async_validate_input(
     hass: HomeAssistant, data: dict[str, Any]
 ) -> dict[str, str]:
     """Validate user input.
 
-    Tries REST first (if a password is provided and no-login is disabled),
-    then falls back to the unauthenticated CGI/ XML status endpoints.
+    Detects the transport once: REST when the controller serves it, the legacy
+    CGI/XML endpoints when it does not (404). A flaky REST API is reported as
+    `CannotConnect` rather than being mistaken for a legacy controller.
 
     Args:
         hass: Home Assistant instance.
         data: User-provided config data.
 
     Returns:
-        A dict containing a display title and unique_id.
+        A dict containing a display title, unique_id and the detected
+        transport (`rest` or `legacy`).
 
     Raises:
         CannotConnect: If the device cannot be reached.
@@ -529,7 +587,11 @@ async def _async_validate_input(
                         if title_hostname
                         else f"Apex ({host})"
                     )
-                    return {"title": title, "unique_id": serial or host}
+                    return {
+                        "title": title,
+                        "unique_id": serial or host,
+                        "transport": TRANSPORT_REST,
+                    }
 
                 except (asyncio.TimeoutError, aiohttp.ClientError) as err:
                     _LOGGER.debug("Transient REST validation error: %s", err)
@@ -539,17 +601,22 @@ async def _async_validate_input(
             raise CannotConnect
 
         except KeyError:
-            # No REST, try XML.
-            _LOGGER.debug("REST not supported; falling back to status.xml")
-            pass
+            # The controller has no REST API (404): it is a legacy controller.
+            _LOGGER.debug("REST not supported; using the legacy transport")
         except InvalidAuth:
             raise
-        except (CannotConnect, json.JSONDecodeError) as err:
-            # REST flaky? Try XML before failing.
-            _LOGGER.debug("REST validation failed; trying status.xml: %s", err)
+        except json.JSONDecodeError as err:
+            raise CannotConnect from err
 
-    # If no password is configured, prefer the CGI JSON endpoint first.
+    # Read-only mode: use REST when the controller serves it without a login.
     if not password:
+        rest_info = await _async_probe_rest_without_login(
+            session, base_url=base_url, host=host
+        )
+        if rest_info is not None:
+            return rest_info
+
+        # Otherwise prefer the CGI JSON endpoint first.
         json_url = f"{base_url}/cgi-bin/status.json"
         try:
             _LOGGER.debug("Trying CGI JSON validation: %s", json_url)
@@ -573,7 +640,11 @@ async def _async_validate_input(
             hostname_disp = clean_hostname_display(hostname) if hostname else None
             title_hostname = hostname_disp or hostname
             title = f"{title_hostname} ({host})" if title_hostname else f"Apex ({host})"
-            return {"title": title, "unique_id": serial or host}
+            return {
+                "title": title,
+                "unique_id": serial or host,
+                "transport": TRANSPORT_LEGACY,
+            }
 
         except FileNotFoundError:
             _LOGGER.debug("CGI status.json not found; trying status.xml")
@@ -608,7 +679,11 @@ async def _async_validate_input(
     hostname_disp = clean_hostname_display(hostname) if hostname else None
     title_hostname = hostname_disp or hostname
     title = f"{title_hostname} ({host})" if title_hostname else f"Apex ({host})"
-    return {"title": title, "unique_id": serial or host}
+    return {
+        "title": title,
+        "unique_id": serial or host,
+        "transport": TRANSPORT_LEGACY,
+    }
 
 
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -644,7 +719,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 normalized_input[CONF_PASSWORD] = ""
 
             try:
-                info = await _async_validate_input(self.hass, normalized_input)
+                info = await async_validate_input(self.hass, normalized_input)
             except CannotConnect:
                 errors["base"] = "cannot_connect"
             except InvalidAuth:
@@ -653,6 +728,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 _LOGGER.exception("Unexpected exception")
                 errors["base"] = "unknown"
             else:
+                normalized_input[CONF_TRANSPORT] = info["transport"]
                 await self.async_set_unique_id(info["unique_id"])
 
                 # If this controller is already configured, treat running the flow
@@ -727,7 +803,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 merged[CONF_USERNAME] = DEFAULT_USERNAME
                 merged[CONF_PASSWORD] = ""
             try:
-                await _async_validate_input(self.hass, merged)
+                await async_validate_input(self.hass, merged)
             except CannotConnect:
                 errors["base"] = "cannot_connect"
             except InvalidAuth:
@@ -797,6 +873,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             merged: dict[str, Any] = dict(entry.data)
             merged.update(user_input)
+            redetect = bool(merged.pop(CONF_REDETECT_TRANSPORT, False))
 
             merged.setdefault(CONF_NO_LOGIN, bool(entry.data.get(CONF_NO_LOGIN, False)))
             if bool(merged.get(CONF_NO_LOGIN)):
@@ -814,7 +891,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     )
 
             try:
-                info = await _async_validate_input(self.hass, merged)
+                info = await async_validate_input(self.hass, merged)
             except CannotConnect:
                 errors["base"] = "cannot_connect"
             except InvalidAuth:
@@ -846,6 +923,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     self.hass.config_entries.async_update_entry(
                         entry, unique_id=info["unique_id"]
                     )
+
+                # The transport is only replaced on request (or when none is
+                # stored yet), so a reconfigure never silently switches it.
+                if redetect or not entry.data.get(CONF_TRANSPORT):
+                    merged[CONF_TRANSPORT] = info["transport"]
 
                 self.hass.config_entries.async_update_entry(
                     entry, data=merged, title=info["title"]

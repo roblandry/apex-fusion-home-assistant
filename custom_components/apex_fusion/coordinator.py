@@ -1,8 +1,8 @@
 """Coordinator for fetching/parsing Apex controller state.
 
 Strategy:
-- Prefer the REST API when credentials work.
-- Use alternate endpoints when REST is unavailable.
+- Each config entry is pinned to one transport (REST or legacy), chosen once.
+- Only that transport is polled; failures make entities unavailable.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ import logging
 import re
 import time
 import xml.etree.ElementTree as ET
+from collections.abc import Mapping
 from http import HTTPStatus
 from typing import Any, cast
 
@@ -29,8 +30,10 @@ from yarl import URL
 
 from .const import (
     CONF_HOST,
+    CONF_LAST_SOURCE,
     CONF_NO_LOGIN,
     CONF_PASSWORD,
+    CONF_TRANSPORT,
     CONF_USERNAME,
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_STATUS_PATH,
@@ -38,9 +41,41 @@ from .const import (
     DOMAIN,
     LOGGER_NAME,
     MODULE_HWTYPE_FRIENDLY_NAMES,
+    TRANSPORT_LEGACY,
+    TRANSPORT_REST,
 )
 
 _LOGGER = logging.getLogger(LOGGER_NAME)
+
+
+def _safe_str(err: BaseException) -> str:
+    """Describe an exception without letting a broken ``__str__`` escape."""
+    try:
+        return str(err)
+    except Exception:  # noqa: BLE001
+        return err.__class__.__name__
+
+
+def transport_from_entry_data(data: Mapping[str, Any]) -> str | None:
+    """Return the transport stored on a config entry, if it can be determined.
+
+    Args:
+        data: Config entry data.
+
+    Returns:
+        ``"rest"`` or ``"legacy"``; ``None`` when nothing usable is stored. Entries
+        written by releases that chose a source per poll carry ``last_source``,
+        which is mapped here.
+    """
+    stored = str(data.get(CONF_TRANSPORT) or "").strip().lower()
+    if stored in (TRANSPORT_REST, TRANSPORT_LEGACY):
+        return stored
+    last = str(data.get(CONF_LAST_SOURCE) or "").strip().lower()
+    if last == TRANSPORT_REST:
+        return TRANSPORT_REST
+    if last in ("cgi_json", "xml"):
+        return TRANSPORT_LEGACY
+    return None
 
 
 _INPUT_DID_MODULE_ABADDR = re.compile(r"^(?P<abaddr>\d+)_")
@@ -2727,608 +2762,587 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             extra={"prime": payload}, trident_abaddr=trident_abaddr
         )
 
+    @property
+    def transport(self) -> str | None:
+        """Return the transport this entry is pinned to (``rest``/``legacy``)."""
+        return transport_from_entry_data(self.entry.data)
+
     async def _async_update_data(self) -> dict[str, Any]:
-        """Fetch and parse controller status.
+        """Fetch and parse controller status from the pinned transport.
+
+        The transport is chosen once (config flow) and stored on the config
+        entry. An outage never switches transport: it fails the update so the
+        entities become unavailable.
 
         Returns:
             Coordinator data dict.
 
         Raises:
-            UpdateFailed: If updates fail in a non-recoverable way.
+            ConfigEntryAuthFailed: If the controller rejects the credentials.
+            UpdateFailed: If the pinned transport cannot be read.
         """
+        transport = self.transport
+        if transport == TRANSPORT_REST:
+            return await self._async_update_rest()
+        if transport == TRANSPORT_LEGACY:
+            return await self._async_update_legacy()
+        raise UpdateFailed("No transport is stored for this entry; reconfigure it")
+
+    def _update_params(self) -> tuple[str, str, str, str]:
+        """Return (host, username, password, base_url) for this entry."""
         host = str(self.entry.data[CONF_HOST])
-        no_login = bool(self.entry.data.get(CONF_NO_LOGIN, False))
         username = str(self.entry.data.get(CONF_USERNAME, ""))
         password = str(self.entry.data.get(CONF_PASSWORD, ""))
-
-        if no_login:
+        if bool(self.entry.data.get(CONF_NO_LOGIN, False)):
             # Explicit read-only / unauthenticated mode.
             username = ""
             password = ""
-        status_path = DEFAULT_STATUS_PATH
-        base_url = build_base_url(host)
-        url = build_status_url(host, status_path)
+        return host, username, password, build_base_url(host)
+
+    async def _async_update_rest(self) -> dict[str, Any]:
+        """Poll the REST API only; every failure is surfaced, never bypassed."""
+        try:
+            return await self._async_update_rest_inner()
+        except _RestRateLimited as err:
+            raise UpdateFailed("Controller rate limited the REST API") from err
+        except _RestAuthRejected as err:
+            raise ConfigEntryAuthFailed("Invalid auth for Apex REST endpoints") from err
+        except _RestNotSupported as err:
+            raise UpdateFailed(
+                "Controller REST endpoints not found; re-detect the transport "
+                "from the reconfigure flow"
+            ) from err
+        except (ConfigEntryAuthFailed, UpdateFailed):
+            raise
+        except (
+            asyncio.TimeoutError,
+            aiohttp.ClientError,
+            json.JSONDecodeError,
+        ) as err:
+            raise UpdateFailed(f"REST update failed: {_safe_str(err)}") from err
+        except Exception as err:
+            raise UpdateFailed(f"Unexpected REST error: {err}") from err
+
+    async def _async_update_rest_inner(self) -> dict[str, Any]:
+        host, username, password, base_url = self._update_params()
+        session = async_get_clientsession(self.hass)
+        timeout_seconds = DEFAULT_TIMEOUT_SECONDS
 
         _LOGGER.debug(
-            "Coordinator update start host=%s user=%s has_password=%s",
+            "REST update start host=%s user=%s has_password=%s",
             host,
             (username or "admin"),
             bool(password),
         )
 
-        session = async_get_clientsession(self.hass)
-
-        auth: aiohttp.BasicAuth | None = None
-        if password:
-            auth = aiohttp.BasicAuth(username or "admin", password)
-
-        timeout_seconds = DEFAULT_TIMEOUT_SECONDS
-
-        # Read-only / no-credential mode: try unauthenticated REST status first
-        # for richer metadata than legacy endpoints, then fall back.
         if not password:
+            # Read-only mode: the status endpoint is read without a login.
             rest_status_url = f"{base_url}/rest/status"
 
-            def _no_login_headers(sid: str | None) -> dict[str, str]:
+            async def _fetch_no_login_rest_status(sid: str | None) -> dict[str, Any]:
                 headers = {"Accept": "*/*"}
                 if sid:
                     headers["Cookie"] = f"connect.sid={sid}"
-                return headers
-
-            async def _fetch_no_login_rest_status(
-                sid: str | None,
-            ) -> dict[str, Any] | None:
                 async with async_timeout.timeout(timeout_seconds):
-                    async with session.get(
-                        rest_status_url, headers=_no_login_headers(sid)
-                    ) as resp:
-                        if resp.status == 404:
-                            return None
+                    async with session.get(rest_status_url, headers=headers) as resp:
                         if resp.status in (401, 403):
-                            return None
-                        if resp.status == 429 or _is_transient_http_status(resp.status):
-                            return None
+                            raise _RestAuthRejected
+                        if resp.status == 404:
+                            raise _RestNotSupported
+                        if resp.status == 429:
+                            raise _RestRateLimited(
+                                retry_after_seconds=self._parse_retry_after_seconds(
+                                    resp.headers
+                                )
+                            )
                         resp.raise_for_status()
                         body = await resp.text()
 
                 parsed_any: Any = json.loads(body) if body else {}
-                return (
-                    cast(dict[str, Any], parsed_any)
-                    if isinstance(parsed_any, dict)
-                    else None
-                )
+                if not isinstance(parsed_any, dict):
+                    raise UpdateFailed("REST status payload was not a JSON object")
+                return cast(dict[str, Any], parsed_any)
 
             try:
                 status_obj = await _fetch_no_login_rest_status(self._rest_sid)
-                if status_obj is None and self._rest_sid:
-                    # Cached SID may be stale; clear and retry without cookie.
+            except _RestAuthRejected:
+                if not self._rest_sid:
+                    raise
+                # Cached SID may be stale; clear and retry without cookie.
+                self._rest_sid = None
+                status_obj = await _fetch_no_login_rest_status(None)
+
+            data = parse_status_rest(status_obj)
+            self._finalize_trident(data)
+            return self._apply_serial_cache(data)
+
+        now = time.monotonic()
+        if now < self._rest_disabled_until:
+            raise UpdateFailed(
+                "REST temporarily paused after the controller rate limited it "
+                f"(retry in ~{int(self._rest_disabled_until - now)}s)"
+            )
+
+        login_url = f"{base_url}/rest/login"
+        accept_headers = {
+            "Accept": "*/*",
+            "Content-Type": "application/json",
+            "User-Agent": "HomeAssistant-ApexFusion",
+        }
+
+        def _candidate_status_urls() -> list[str]:
+            if self._rest_status_path:
+                return [f"{base_url}{self._rest_status_path}"]
+            return [
+                f"{base_url}/rest/status",
+            ]
+
+        def _cookie_headers(sid: str | None) -> dict[str, str]:
+            headers = dict(accept_headers)
+            if sid:
+                headers["Cookie"] = f"connect.sid={sid}"
+            return headers
+
+        class _RestStatusUnauthorized(Exception):
+            """REST status endpoint rejected the session."""
+
+        def _parse_retry_after(headers: Any) -> float | None:
+            try:
+                value = headers.get("Retry-After")
+                if value is None:
+                    return None
+                t = str(value).strip()
+                if not t:
+                    return None
+                # Retry-After can be seconds or an HTTP date; handle seconds.
+                return float(int(t))
+            except Exception:
+                return None
+
+        async def _fetch_rest_status(
+            sid: str | None, *, status_url: str
+        ) -> dict[str, Any] | None:
+            """Fetch a REST status payload.
+
+            Args:
+                sid: Optional connect.sid session value.
+                status_url: Full URL for the status endpoint.
+
+            Returns:
+                Parsed JSON dict when available, otherwise None.
+            """
+            async with async_timeout.timeout(timeout_seconds):
+                async with session.get(
+                    status_url, headers=_cookie_headers(sid)
+                ) as resp:
+                    _LOGGER.debug(
+                        "REST status host=%s url=%s HTTP %s content_type=%s has_connect_sid=%s",
+                        host,
+                        URL(status_url).path,
+                        resp.status,
+                        resp.headers.get("Content-Type"),
+                        bool(sid) or _session_has_connect_sid(session, base_url),
+                    )
+
+                    if resp.status == 404:
+                        raise FileNotFoundError
+                    if resp.status in (401, 403):
+                        raise _RestStatusUnauthorized
+                    if resp.status == 429:
+                        raise _RestRateLimited(
+                            retry_after_seconds=_parse_retry_after(resp.headers)
+                        )
+                    if _is_transient_http_status(resp.status):
+                        raise aiohttp.ClientResponseError(
+                            request_info=resp.request_info,
+                            history=resp.history,
+                            status=resp.status,
+                            message="Transient REST status HTTP error",
+                            headers=resp.headers,
+                        )
+
+                    resp.raise_for_status()
+                    status_text = await resp.text()
+
+            status_any: Any = json.loads(status_text) if status_text else {}
+            return (
+                cast(dict[str, Any], status_any)
+                if isinstance(status_any, dict)
+                else None
+            )
+
+        async def _login_rest(*, login_user: str) -> str | None:
+            """Perform REST login.
+
+            Args:
+                login_user: Username to attempt.
+
+            Returns:
+                The connect.sid value if found, otherwise None.
+            """
+            login_cookie_sid = ""
+            async with async_timeout.timeout(timeout_seconds):
+                async with session.post(
+                    login_url,
+                    json={
+                        "login": login_user,
+                        "password": password,
+                        "remember_me": False,
+                    },
+                    headers=accept_headers,
+                ) as resp:
+                    _LOGGER.debug(
+                        "REST login host=%s user=%s HTTP %s content_type=%s",
+                        host,
+                        login_user,
+                        resp.status,
+                        resp.headers.get("Content-Type"),
+                    )
+
+                    if resp.status == 404:
+                        raise _RestNotSupported
+                    if resp.status in (401, 403):
+                        raise _RestAuthRejected
+                    if resp.status == 429:
+                        raise _RestRateLimited(
+                            retry_after_seconds=_parse_retry_after(resp.headers)
+                        )
+                    if _is_transient_http_status(resp.status):
+                        raise aiohttp.ClientResponseError(
+                            request_info=resp.request_info,
+                            history=resp.history,
+                            status=resp.status,
+                            message="Transient REST login HTTP error",
+                            headers=resp.headers,
+                        )
+
+                    resp.raise_for_status()
+                    login_body = await resp.text()
+
+                    morsel = resp.cookies.get("connect.sid")
+                    if morsel is not None and morsel.value:
+                        login_cookie_sid = morsel.value
+
+            # Prefer Set-Cookie if present.
+            if login_cookie_sid:
+                _set_connect_sid_cookie(
+                    session, base_url=base_url, sid=login_cookie_sid
+                )
+                return login_cookie_sid
+
+            # Try cookie jar.
+            sid_morsel = session.cookie_jar.filter_cookies(URL(base_url)).get(
+                "connect.sid"
+            )
+            if sid_morsel is not None and sid_morsel.value:
+                return sid_morsel.value
+
+            # Try connect.sid in JSON body.
+            if login_body:
+                try:
+                    login_any: Any = json.loads(login_body)
+                    if isinstance(login_any, dict):
+                        sid_any: Any = cast(dict[str, Any], login_any).get(
+                            "connect.sid"
+                        )
+                        if isinstance(sid_any, str) and sid_any:
+                            _set_connect_sid_cookie(
+                                session, base_url=base_url, sid=sid_any
+                            )
+                            return sid_any
+                except json.JSONDecodeError:
+                    pass
+
+            return None
+
+        async def _login_rest_with_retries(*, login_user: str) -> str | None:
+            """Perform REST login with a small retry budget.
+
+            Some controllers appear to intermittently reject the first
+            login attempt even when credentials are correct.
+
+            Args:
+                login_user: Username to attempt.
+
+            Returns:
+                The connect.sid value if found, otherwise None.
+            """
+
+            max_login_attempts = 4
+
+            for login_attempt in range(1, max_login_attempts + 1):
+                try:
+                    if login_attempt > 1:
+                        _LOGGER.debug(
+                            "REST login retry %s/%s host=%s user=%s",
+                            login_attempt,
+                            max_login_attempts,
+                            host,
+                            login_user,
+                        )
+                        # Clear cookies between attempts to avoid stale/invalid
+                        # session state causing an immediate 401 loop.
+                        try:
+                            cookies = session.cookie_jar.filter_cookies(URL(base_url))
+                            if cookies.get("connect.sid") is not None:
+                                session.cookie_jar.clear()
+                        except Exception:
+                            pass
+
+                    return await _login_rest(login_user=login_user)
+                except _RestAuthRejected:
+                    # Ensure we don't keep a cached SID around after an auth failure.
                     self._rest_sid = None
-                    status_obj = await _fetch_no_login_rest_status(None)
+                    if login_attempt < max_login_attempts:
+                        await asyncio.sleep(0.25 * login_attempt)
+                        continue
+                    raise
+
+        # First try using cached SID (avoids re-login flakiness).
+        if self._rest_sid:
+            try:
+                status_obj: dict[str, Any] | None = None
+                for candidate in _candidate_status_urls():
+                    try:
+                        status_obj = await _fetch_rest_status(
+                            self._rest_sid, status_url=candidate
+                        )
+                        if status_obj is not None:
+                            self._rest_status_path = URL(candidate).path
+                            break
+                    except FileNotFoundError:
+                        continue
 
                 if status_obj is not None:
                     data = parse_status_rest(status_obj)
                     _LOGGER.debug(
-                        "REST parsed (no-login) host=%s probes=%s outlets=%s has_network=%s",
+                        "REST parsed host=%s probes=%s outlets=%s has_network=%s",
                         host,
                         len(cast(dict[str, Any], data.get("probes") or {})),
                         len(cast(list[Any], data.get("outlets") or [])),
                         bool(data.get("network")),
                     )
+                    await self._async_try_refresh_rest_config(
+                        data=data,
+                        session=session,
+                        base_url=base_url,
+                        sid=self._rest_sid,
+                        timeout_seconds=timeout_seconds,
+                        host=host,
+                    )
                     self._finalize_trident(data)
                     return self._apply_serial_cache(data)
-            except Exception as err:
-                _LOGGER.debug("No-login REST status failed; falling back: %s", err)
 
-        # Prefer REST when credentials exist; fall back to alternate endpoints.
-        if password:
-            now = time.monotonic()
-            if now < self._rest_disabled_until:
-                _LOGGER.debug(
-                    "Skipping REST update (disabled) host=%s remaining_seconds=%s",
-                    host,
-                    int(self._rest_disabled_until - now),
-                )
-            else:
+                raise _RestNotSupported
+            except _RestStatusUnauthorized:
+                # Session expired/invalid; try to re-login.
+                self._rest_sid = None
+
+        # Some controllers allow reading status without a login cookie.
+        # Probe once before attempting /rest/login to reduce session churn
+        # and improve startup behavior when login is temporarily flaky.
+        #
+        # IMPORTANT: if credentials are configured, do not treat this
+        # as success (it can mask bad credentials); proceed to login.
+        try:
+            status_obj: dict[str, Any] | None = None
+            for candidate in _candidate_status_urls():
                 try:
-                    login_url = f"{base_url}/rest/login"
-                    accept_headers = {
-                        "Accept": "*/*",
-                        "Content-Type": "application/json",
-                        "User-Agent": "HomeAssistant-ApexFusion",
-                    }
+                    status_obj = await _fetch_rest_status(None, status_url=candidate)
+                    if status_obj is not None:
+                        self._rest_status_path = URL(candidate).path
+                        break
+                except FileNotFoundError:
+                    continue
+        except _RestStatusUnauthorized:
+            # Expected on controllers that require auth.
+            pass
 
-                    def _candidate_status_urls() -> list[str]:
-                        if self._rest_status_path:
-                            return [f"{base_url}{self._rest_status_path}"]
-                        return [
-                            f"{base_url}/rest/status",
-                        ]
+        max_attempts = 3
+        saw_auth_rejection = False
+        for attempt in range(1, max_attempts + 1):
+            _LOGGER.debug(
+                "REST update attempt %s/%s host=%s user=%s",
+                attempt,
+                max_attempts,
+                host,
+                (username or "admin"),
+            )
 
-                    def _cookie_headers(sid: str | None) -> dict[str, str]:
-                        headers = dict(accept_headers)
-                        if sid:
-                            headers["Cookie"] = f"connect.sid={sid}"
-                        return headers
+            try:
+                # Respect the configured username. If one is provided, do not
+                # automatically fall back to "admin" on the first 401; some
+                # controllers are flaky and require a second login attempt.
+                login_candidates: list[str] = [username] if username else ["admin"]
 
-                    class _RestStatusUnauthorized(Exception):
-                        """REST status endpoint rejected the session."""
-
-                    def _parse_retry_after(headers: Any) -> float | None:
-                        try:
-                            value = headers.get("Retry-After")
-                            if value is None:
-                                return None
-                            t = str(value).strip()
-                            if not t:
-                                return None
-                            # Retry-After can be seconds or an HTTP date; handle seconds.
-                            return float(int(t))
-                        except Exception:
-                            return None
-
-                    async def _fetch_rest_status(
-                        sid: str | None, *, status_url: str
-                    ) -> dict[str, Any] | None:
-                        """Fetch a REST status payload.
-
-                        Args:
-                            sid: Optional connect.sid session value.
-                            status_url: Full URL for the status endpoint.
-
-                        Returns:
-                            Parsed JSON dict when available, otherwise None.
-                        """
-                        async with async_timeout.timeout(timeout_seconds):
-                            async with session.get(
-                                status_url, headers=_cookie_headers(sid)
-                            ) as resp:
-                                _LOGGER.debug(
-                                    "REST status host=%s url=%s HTTP %s content_type=%s has_connect_sid=%s",
-                                    host,
-                                    URL(status_url).path,
-                                    resp.status,
-                                    resp.headers.get("Content-Type"),
-                                    bool(sid)
-                                    or _session_has_connect_sid(session, base_url),
-                                )
-
-                                if resp.status == 404:
-                                    raise FileNotFoundError
-                                if resp.status in (401, 403):
-                                    raise _RestStatusUnauthorized
-                                if resp.status == 429:
-                                    raise _RestRateLimited(
-                                        retry_after_seconds=_parse_retry_after(
-                                            resp.headers
-                                        )
-                                    )
-                                if _is_transient_http_status(resp.status):
-                                    raise aiohttp.ClientResponseError(
-                                        request_info=resp.request_info,
-                                        history=resp.history,
-                                        status=resp.status,
-                                        message="Transient REST status HTTP error",
-                                        headers=resp.headers,
-                                    )
-
-                                resp.raise_for_status()
-                                status_text = await resp.text()
-
-                        status_any: Any = json.loads(status_text) if status_text else {}
-                        return (
-                            cast(dict[str, Any], status_any)
-                            if isinstance(status_any, dict)
-                            else None
-                        )
-
-                    async def _login_rest(*, login_user: str) -> str | None:
-                        """Perform REST login.
-
-                        Args:
-                            login_user: Username to attempt.
-
-                        Returns:
-                            The connect.sid value if found, otherwise None.
-                        """
-                        login_cookie_sid = ""
-                        async with async_timeout.timeout(timeout_seconds):
-                            async with session.post(
-                                login_url,
-                                json={
-                                    "login": login_user,
-                                    "password": password,
-                                    "remember_me": False,
-                                },
-                                headers=accept_headers,
-                            ) as resp:
-                                _LOGGER.debug(
-                                    "REST login host=%s user=%s HTTP %s content_type=%s",
-                                    host,
-                                    login_user,
-                                    resp.status,
-                                    resp.headers.get("Content-Type"),
-                                )
-
-                                if resp.status == 404:
-                                    raise _RestNotSupported
-                                if resp.status in (401, 403):
-                                    raise _RestAuthRejected
-                                if resp.status == 429:
-                                    raise _RestRateLimited(
-                                        retry_after_seconds=_parse_retry_after(
-                                            resp.headers
-                                        )
-                                    )
-                                if _is_transient_http_status(resp.status):
-                                    raise aiohttp.ClientResponseError(
-                                        request_info=resp.request_info,
-                                        history=resp.history,
-                                        status=resp.status,
-                                        message="Transient REST login HTTP error",
-                                        headers=resp.headers,
-                                    )
-
-                                resp.raise_for_status()
-                                login_body = await resp.text()
-
-                                morsel = resp.cookies.get("connect.sid")
-                                if morsel is not None and morsel.value:
-                                    login_cookie_sid = morsel.value
-
-                        # Prefer Set-Cookie if present.
-                        if login_cookie_sid:
-                            _set_connect_sid_cookie(
-                                session, base_url=base_url, sid=login_cookie_sid
-                            )
-                            return login_cookie_sid
-
-                        # Try cookie jar.
-                        sid_morsel = session.cookie_jar.filter_cookies(
-                            URL(base_url)
-                        ).get("connect.sid")
-                        if sid_morsel is not None and sid_morsel.value:
-                            return sid_morsel.value
-
-                        # Try connect.sid in JSON body.
-                        if login_body:
-                            try:
-                                login_any: Any = json.loads(login_body)
-                                if isinstance(login_any, dict):
-                                    sid_any: Any = cast(dict[str, Any], login_any).get(
-                                        "connect.sid"
-                                    )
-                                    if isinstance(sid_any, str) and sid_any:
-                                        _set_connect_sid_cookie(
-                                            session, base_url=base_url, sid=sid_any
-                                        )
-                                        return sid_any
-                            except json.JSONDecodeError:
-                                pass
-
-                        return None
-
-                    async def _login_rest_with_retries(
-                        *, login_user: str
-                    ) -> str | None:
-                        """Perform REST login with a small retry budget.
-
-                        Some controllers appear to intermittently reject the first
-                        login attempt even when credentials are correct.
-
-                        Args:
-                            login_user: Username to attempt.
-
-                        Returns:
-                            The connect.sid value if found, otherwise None.
-                        """
-
-                        max_login_attempts = 4
-
-                        for login_attempt in range(1, max_login_attempts + 1):
-                            try:
-                                if login_attempt > 1:
-                                    _LOGGER.debug(
-                                        "REST login retry %s/%s host=%s user=%s",
-                                        login_attempt,
-                                        max_login_attempts,
-                                        host,
-                                        login_user,
-                                    )
-                                    # Clear cookies between attempts to avoid stale/invalid
-                                    # session state causing an immediate 401 loop.
-                                    try:
-                                        cookies = session.cookie_jar.filter_cookies(
-                                            URL(base_url)
-                                        )
-                                        if cookies.get("connect.sid") is not None:
-                                            session.cookie_jar.clear()
-                                    except Exception:
-                                        pass
-
-                                return await _login_rest(login_user=login_user)
-                            except _RestAuthRejected:
-                                # Ensure we don't keep a cached SID around after an auth failure.
-                                self._rest_sid = None
-                                if login_attempt < max_login_attempts:
-                                    await asyncio.sleep(0.25 * login_attempt)
-                                    continue
-                                raise
-
-                    # First try using cached SID (avoids re-login flakiness).
-                    if self._rest_sid:
-                        try:
-                            status_obj: dict[str, Any] | None = None
-                            for candidate in _candidate_status_urls():
-                                try:
-                                    status_obj = await _fetch_rest_status(
-                                        self._rest_sid, status_url=candidate
-                                    )
-                                    if status_obj is not None:
-                                        self._rest_status_path = URL(candidate).path
-                                        break
-                                except FileNotFoundError:
-                                    continue
-
-                            if status_obj is not None:
-                                data = parse_status_rest(status_obj)
-                                _LOGGER.debug(
-                                    "REST parsed host=%s probes=%s outlets=%s has_network=%s",
-                                    host,
-                                    len(cast(dict[str, Any], data.get("probes") or {})),
-                                    len(cast(list[Any], data.get("outlets") or [])),
-                                    bool(data.get("network")),
-                                )
-                                await self._async_try_refresh_rest_config(
-                                    data=data,
-                                    session=session,
-                                    base_url=base_url,
-                                    sid=self._rest_sid,
-                                    timeout_seconds=timeout_seconds,
-                                    host=host,
-                                )
-                                self._finalize_trident(data)
-                                return self._apply_serial_cache(data)
-
-                            raise _RestNotSupported
-                        except _RestStatusUnauthorized:
-                            # Session expired/invalid; try to re-login.
-                            self._rest_sid = None
-
-                    # Some controllers allow reading status without a login cookie.
-                    # Probe once before attempting /rest/login to reduce session churn
-                    # and improve startup behavior when login is temporarily flaky.
-                    #
-                    # IMPORTANT: if credentials are configured, do not treat this
-                    # as success (it can mask bad credentials); proceed to login.
+                sid_value: str | None = None
+                for login_user in login_candidates:
                     try:
-                        status_obj: dict[str, Any] | None = None
-                        for candidate in _candidate_status_urls():
-                            try:
-                                status_obj = await _fetch_rest_status(
-                                    None, status_url=candidate
-                                )
-                                if status_obj is not None:
-                                    self._rest_status_path = URL(candidate).path
-                                    break
-                            except FileNotFoundError:
-                                continue
-                    except _RestStatusUnauthorized:
-                        # Expected on controllers that require auth.
-                        pass
-
-                    max_attempts = 3
-                    saw_auth_rejection = False
-                    for attempt in range(1, max_attempts + 1):
-                        _LOGGER.debug(
-                            "REST update attempt %s/%s host=%s user=%s",
-                            attempt,
-                            max_attempts,
-                            host,
-                            (username or "admin"),
+                        sid_value = await _login_rest_with_retries(
+                            login_user=login_user
                         )
+                        break
+                    except _RestAuthRejected:
+                        saw_auth_rejection = True
+                        _LOGGER.debug(
+                            "REST login rejected for host=%s user=%s; trying next candidate",
+                            host,
+                            login_user,
+                        )
+                        continue
 
-                        try:
-                            # Respect the configured username. If one is provided, do not
-                            # automatically fall back to "admin" on the first 401; some
-                            # controllers are flaky and require a second login attempt.
-                            login_candidates: list[str] = (
-                                [username] if username else ["admin"]
-                            )
+                if sid_value is None:
+                    raise _RestAuthRejected
 
-                            sid_value: str | None = None
-                            for login_user in login_candidates:
-                                try:
-                                    sid_value = await _login_rest_with_retries(
-                                        login_user=login_user
-                                    )
-                                    break
-                                except _RestAuthRejected:
-                                    saw_auth_rejection = True
-                                    _LOGGER.debug(
-                                        "REST login rejected for host=%s user=%s; trying next candidate",
-                                        host,
-                                        login_user,
-                                    )
-                                    continue
+                self._rest_sid = sid_value
 
-                            if sid_value is None:
-                                raise _RestAuthRejected
+                _LOGGER.debug(
+                    "REST login session for host=%s established=%s (will_send_cookie_header=%s)",
+                    host,
+                    bool(sid_value) or _session_has_connect_sid(session, base_url),
+                    bool(sid_value),
+                )
 
-                            self._rest_sid = sid_value
-
-                            _LOGGER.debug(
-                                "REST login session for host=%s established=%s (will_send_cookie_header=%s)",
-                                host,
-                                bool(sid_value)
-                                or _session_has_connect_sid(session, base_url),
-                                bool(sid_value),
-                            )
-
-                            status_obj: dict[str, Any] | None = None
-                            for candidate in _candidate_status_urls():
-                                try:
-                                    status_obj = await _fetch_rest_status(
-                                        sid_value, status_url=candidate
-                                    )
-                                    if status_obj is not None:
-                                        self._rest_status_path = URL(candidate).path
-                                        break
-                                except FileNotFoundError:
-                                    continue
-                                except _RestStatusUnauthorized:
-                                    # If REST status rejects a fresh session, treat REST as unusable
-                                    # for this poll and fall back to alternate endpoints.
-                                    self._rest_sid = None
-                                    raise _RestAuthRejected
-
-                            if status_obj is not None:
-                                data = parse_status_rest(status_obj)
-
-                                _LOGGER.debug(
-                                    "REST parsed host=%s probes=%s outlets=%s has_network=%s",
-                                    host,
-                                    len(cast(dict[str, Any], data.get("probes") or {})),
-                                    len(cast(list[Any], data.get("outlets") or [])),
-                                    bool(data.get("network")),
-                                )
-
-                                await self._async_try_refresh_rest_config(
-                                    data=data,
-                                    session=session,
-                                    base_url=base_url,
-                                    sid=self._rest_sid,
-                                    timeout_seconds=timeout_seconds,
-                                    host=host,
-                                )
-
-                                self._finalize_trident(data)
-
-                                return self._apply_serial_cache(data)
-
-                            raise UpdateFailed(
-                                "REST status payload was not a JSON object"
-                            )
-
-                        except _RestNotSupported:
-                            raise
-                        except _RestAuthRejected:
-                            # REST rejected (credentials/user not accepted). Some controllers can
-                            # intermittently reject the first login attempt; allow the retry loop
-                            # to run before treating auth as fatal.
-                            saw_auth_rejection = True
-                            self._rest_sid = None
-                            if attempt < max_attempts:
-                                continue
-                            raise
-                        except _RestRateLimited as err:
-                            self._rest_sid = None
-                            retry_after = err.retry_after_seconds
-                            # Be conservative; if no header is provided, back off for 5 minutes.
-                            self._disable_rest(
-                                seconds=float(retry_after)
-                                if retry_after is not None
-                                else 300.0,
-                                reason="rate_limited",
-                            )
-                            raise
-                        except aiohttp.ClientResponseError as err:
-                            if err.status and _is_transient_http_status(err.status):
-                                try:
-                                    err_text = str(err)
-                                except Exception:  # noqa: BLE001
-                                    err_text = err.__class__.__name__
-                                _LOGGER.debug(
-                                    "Transient REST HTTP error (status=%s): %s",
-                                    err.status,
-                                    err_text,
-                                )
-                            else:
-                                raise
-                        except (
-                            asyncio.TimeoutError,
-                            aiohttp.ClientError,
-                        ) as err:
-                            _LOGGER.debug("Transient REST error: %s", err)
-
-                        if attempt < max_attempts:
-                            await asyncio.sleep(0.5 * attempt)
-
-                    if saw_auth_rejection:
+                status_obj: dict[str, Any] | None = None
+                for candidate in _candidate_status_urls():
+                    try:
+                        status_obj = await _fetch_rest_status(
+                            sid_value, status_url=candidate
+                        )
+                        if status_obj is not None:
+                            self._rest_status_path = URL(candidate).path
+                            break
+                    except FileNotFoundError:
+                        continue
+                    except _RestStatusUnauthorized:
+                        # If REST status rejects a fresh session, treat REST as unusable
+                        # for this poll and fall back to alternate endpoints.
+                        self._rest_sid = None
                         raise _RestAuthRejected
 
-                    raise UpdateFailed("REST update failed after retries")
+                if status_obj is not None:
+                    data = parse_status_rest(status_obj)
 
-                except _RestRateLimited:
                     _LOGGER.debug(
-                        "REST rate limited; falling back to alternate endpoints"
-                    )
-                    pass
-                except _RestAuthRejected:
-                    raise ConfigEntryAuthFailed("Invalid auth for Apex REST endpoints")
-                except _RestNotSupported:
-                    _LOGGER.debug(
-                        "REST not supported; falling back to alternate endpoints"
-                    )
-                    pass
-                except UpdateFailed:
-                    raise
-                except (
-                    asyncio.TimeoutError,
-                    aiohttp.ClientError,
-                    json.JSONDecodeError,
-                ) as err:
-                    _LOGGER.debug(
-                        "REST update failed; falling back to status.xml: %s", err
-                    )
-                except Exception as err:
-                    _LOGGER.debug(
-                        "Unexpected REST error; falling back to status.xml: %s", err
+                        "REST parsed host=%s probes=%s outlets=%s has_network=%s",
+                        host,
+                        len(cast(dict[str, Any], data.get("probes") or {})),
+                        len(cast(list[Any], data.get("outlets") or [])),
+                        bool(data.get("network")),
                     )
 
-            # End of REST block
+                    await self._async_try_refresh_rest_config(
+                        data=data,
+                        session=session,
+                        base_url=base_url,
+                        sid=self._rest_sid,
+                        timeout_seconds=timeout_seconds,
+                        host=host,
+                    )
 
-        # Try CGI JSON first (richer metadata than status.xml).
-        if True:
-            json_url = f"{base_url}/cgi-bin/status.json"
-            try:
-                _LOGGER.debug("Trying CGI JSON update: %s", json_url)
-                async with async_timeout.timeout(timeout_seconds):
-                    async with session.get(json_url, auth=auth) as resp:
-                        if resp.status in (401, 403):
-                            raise ConfigEntryAuthFailed(
-                                "Invalid auth for Apex status.json"
-                            )
-                        if resp.status == 404:
-                            raise FileNotFoundError
-                        resp.raise_for_status()
-                        body = await resp.text()
-
-                parsed_any: Any = json.loads(body) if body else {}
-                if isinstance(parsed_any, dict):
-                    data = parse_status_cgi_json(cast(dict[str, Any], parsed_any))
-                    meta = data.get("meta")
-                    if isinstance(meta, dict):
-                        cast(dict[str, Any], meta).setdefault("source", "cgi_json")
                     self._finalize_trident(data)
+
                     return self._apply_serial_cache(data)
 
-            except FileNotFoundError:
-                _LOGGER.debug("CGI status.json not found; trying status.xml")
-            except ConfigEntryAuthFailed:
-                _LOGGER.warning(
-                    "CGI JSON authentication failed for host=%s user=%s",
-                    host,
-                    (username or "admin"),
+                raise UpdateFailed("REST status payload was not a JSON object")
+
+            except _RestNotSupported:
+                raise
+            except _RestAuthRejected:
+                # REST rejected (credentials/user not accepted). Some controllers can
+                # intermittently reject the first login attempt; allow the retry loop
+                # to run before treating auth as fatal.
+                saw_auth_rejection = True
+                self._rest_sid = None
+                if attempt < max_attempts:
+                    continue
+                raise
+            except _RestRateLimited as err:
+                self._rest_sid = None
+                retry_after = err.retry_after_seconds
+                # Be conservative; if no header is provided, back off for 5 minutes.
+                self._disable_rest(
+                    seconds=float(retry_after) if retry_after is not None else 300.0,
+                    reason="rate_limited",
                 )
                 raise
+            except aiohttp.ClientResponseError as err:
+                if err.status and _is_transient_http_status(err.status):
+                    try:
+                        err_text = str(err)
+                    except Exception:  # noqa: BLE001
+                        err_text = err.__class__.__name__
+                    _LOGGER.debug(
+                        "Transient REST HTTP error (status=%s): %s",
+                        err.status,
+                        err_text,
+                    )
+                else:
+                    raise
             except (
                 asyncio.TimeoutError,
                 aiohttp.ClientError,
-                json.JSONDecodeError,
             ) as err:
-                _LOGGER.debug("CGI JSON update failed; trying status.xml: %s", err)
-            except Exception as err:
-                _LOGGER.debug("Unexpected CGI JSON error; trying status.xml: %s", err)
+                _LOGGER.debug("Transient REST error: %s", err)
+
+            if attempt < max_attempts:
+                await asyncio.sleep(0.5 * attempt)
+
+        if saw_auth_rejection:
+            raise _RestAuthRejected
+
+        raise UpdateFailed("REST update failed after retries")
+
+    async def _async_update_legacy(self) -> dict[str, Any]:
+        """Poll the legacy endpoints (status.json, then status.xml)."""
+        host, username, password, base_url = self._update_params()
+        url = build_status_url(host, DEFAULT_STATUS_PATH)
+        session = async_get_clientsession(self.hass)
+        timeout_seconds = DEFAULT_TIMEOUT_SECONDS
+
+        auth: aiohttp.BasicAuth | None = None
+        if password:
+            auth = aiohttp.BasicAuth(username or "admin", password)
+
+        # Try CGI JSON first (richer metadata than status.xml).
+        json_url = f"{base_url}/cgi-bin/status.json"
+        try:
+            _LOGGER.debug("Trying CGI JSON update: %s", json_url)
+            async with async_timeout.timeout(timeout_seconds):
+                async with session.get(json_url, auth=auth) as resp:
+                    if resp.status in (401, 403):
+                        raise ConfigEntryAuthFailed("Invalid auth for Apex status.json")
+                    if resp.status == 404:
+                        raise FileNotFoundError
+                    resp.raise_for_status()
+                    body = await resp.text()
+
+            parsed_any: Any = json.loads(body) if body else {}
+            if isinstance(parsed_any, dict):
+                data = parse_status_cgi_json(cast(dict[str, Any], parsed_any))
+                meta = data.get("meta")
+                if isinstance(meta, dict):
+                    cast(dict[str, Any], meta).setdefault("source", "cgi_json")
+                self._finalize_trident(data)
+                return self._apply_serial_cache(data)
+
+        except FileNotFoundError:
+            _LOGGER.debug("CGI status.json not found; trying status.xml")
+        except ConfigEntryAuthFailed:
+            _LOGGER.warning(
+                "CGI JSON authentication failed for host=%s user=%s",
+                host,
+                (username or "admin"),
+            )
+            raise
+        except (
+            asyncio.TimeoutError,
+            aiohttp.ClientError,
+            json.JSONDecodeError,
+        ) as err:
+            _LOGGER.debug("CGI JSON update failed; trying status.xml: %s", err)
+        except Exception as err:
+            _LOGGER.debug("Unexpected CGI JSON error; trying status.xml: %s", err)
 
         try:
             _LOGGER.debug("Trying XML update: %s", url)
@@ -3357,8 +3371,6 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             raise UpdateFailed(
                 f"Error fetching/parsing Apex status.xml: {err}"
             ) from err
-        except UpdateFailed:
-            raise
         except Exception as err:
             raise UpdateFailed(f"Unexpected error updating Apex data: {err}") from err
 

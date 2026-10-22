@@ -6,17 +6,23 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import Platform
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.update_coordinator import UpdateFailed
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.apex_fusion.config_flow import CannotConnect, InvalidAuth
 from custom_components.apex_fusion.const import (
     CONF_HOST,
-    CONF_LAST_CONTROL_ENABLED,
     CONF_LAST_SOURCE,
     CONF_NO_LOGIN,
     CONF_PASSWORD,
+    CONF_TRANSPORT,
     DOMAIN,
+    TRANSPORT_LEGACY,
+    TRANSPORT_REST,
 )
 
 
@@ -25,7 +31,7 @@ async def test_async_setup_entry_stores_coordinator_and_forwards_platforms(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "1.2.3.4"},
+        data={CONF_HOST: "1.2.3.4", CONF_TRANSPORT: TRANSPORT_REST},
         unique_id="1.2.3.4",
         title="Apex (1.2.3.4)",
     )
@@ -60,7 +66,7 @@ async def test_async_setup_entry_reuses_cached_rest_sid_when_available(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "1.2.3.4"},
+        data={CONF_HOST: "1.2.3.4", CONF_TRANSPORT: TRANSPORT_REST},
         unique_id="1.2.3.4",
         title="Apex (1.2.3.4)",
     )
@@ -97,7 +103,7 @@ async def test_async_setup_entry_handles_sid_cache_lookup_exception(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "1.2.3.4"},
+        data={CONF_HOST: "1.2.3.4", CONF_TRANSPORT: TRANSPORT_REST},
         unique_id="1.2.3.4",
         title="Apex (1.2.3.4)",
     )
@@ -141,7 +147,11 @@ async def test_async_setup_entry_forwards_rest_authenticated_platforms(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "1.2.3.4", CONF_PASSWORD: "pw"},
+        data={
+            CONF_HOST: "1.2.3.4",
+            CONF_PASSWORD: "pw",
+            CONF_TRANSPORT: TRANSPORT_REST,
+        },
         unique_id="1.2.3.4",
         title="Apex (1.2.3.4)",
     )
@@ -182,7 +192,11 @@ async def test_async_setup_entry_forwards_rest_read_only_platforms(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "1.2.3.4", CONF_NO_LOGIN: True},
+        data={
+            CONF_HOST: "1.2.3.4",
+            CONF_NO_LOGIN: True,
+            CONF_TRANSPORT: TRANSPORT_REST,
+        },
         unique_id="1.2.3.4",
         title="Apex (1.2.3.4)",
     )
@@ -217,7 +231,11 @@ async def test_async_setup_entry_forwards_legacy_platforms(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "1.2.3.4", CONF_PASSWORD: "pw"},
+        data={
+            CONF_HOST: "1.2.3.4",
+            CONF_PASSWORD: "pw",
+            CONF_TRANSPORT: TRANSPORT_LEGACY,
+        },
         unique_id="1.2.3.4",
         title="Apex (1.2.3.4)",
     )
@@ -247,79 +265,16 @@ async def test_async_setup_entry_forwards_legacy_platforms(
     assert platforms == ["sensor", "binary_sensor"]
 
 
-async def test_async_setup_entry_purges_registry_on_source_change(
+async def test_setup_never_purges_registry_when_source_changes(
     hass, enable_custom_integrations
 ):
-    entry = MockConfigEntry(
-        domain=DOMAIN,
-        data={CONF_HOST: "1.2.3.4", CONF_LAST_SOURCE: "legacy"},
-        unique_id="1.2.3.4",
-        title="Apex (1.2.3.4)",
-    )
-    entry.add_to_hass(hass)
-
-    ent_reg = er.async_get(hass)
-    created_entity = ent_reg.async_get_or_create(
-        "sensor",
-        DOMAIN,
-        "uniq_purge",
-        config_entry=cast(Any, entry),
-        suggested_object_id="probe_t1",
-    )
-    assert ent_reg.async_get(created_entity.entity_id) is not None
-
-    from homeassistant.helpers import device_registry as dr
-
-    dev_reg = dr.async_get(hass)
-    created_device = dev_reg.async_get_or_create(
-        config_entry_id=entry.entry_id,
-        identifiers={(DOMAIN, "dev_purge")},
-        name="Apex Purge",
-    )
-    assert dev_reg.async_get(created_device.id) is not None
-
-    coordinator = AsyncMock()
-    coordinator.async_config_entry_first_refresh = AsyncMock(return_value=None)
-    coordinator.data = {"meta": {"serial": "SER123", "source": "rest"}}
-    coordinator.device_identifier = "SER123"
-
-    with (
-        patch(
-            "custom_components.apex_fusion.ApexNeptuneDataUpdateCoordinator",
-            return_value=coordinator,
-        ),
-        patch.object(
-            hass.config_entries,
-            "async_forward_entry_setups",
-            new=AsyncMock(return_value=None),
-        ),
-        patch.object(hass.config_entries, "async_update_entry") as update_entry,
-    ):
-        from custom_components.apex_fusion import async_setup_entry
-
-        assert await async_setup_entry(hass, cast(Any, entry)) is True
-
-    # Purge removed stale entries.
-    assert ent_reg.async_get(created_entity.entity_id) is None
-    assert dev_reg.async_get(created_device.id) is None
-
-    # Entry data updated with the new source.
-    assert any(
-        call.kwargs.get("data", {}).get(CONF_LAST_SOURCE) == "rest"
-        for call in update_entry.mock_calls
-    )
-
-
-async def test_async_setup_entry_purges_registry_on_control_change(
-    hass, enable_custom_integrations
-):
+    """A changed data source must not delete devices or entities."""
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={
             CONF_HOST: "1.2.3.4",
-            CONF_PASSWORD: "pw",
-            CONF_LAST_SOURCE: "rest",
-            CONF_LAST_CONTROL_ENABLED: False,
+            CONF_TRANSPORT: TRANSPORT_REST,
+            CONF_LAST_SOURCE: "cgi_json",
         },
         unique_id="1.2.3.4",
         title="Apex (1.2.3.4)",
@@ -330,24 +285,22 @@ async def test_async_setup_entry_purges_registry_on_control_change(
     created_entity = ent_reg.async_get_or_create(
         "sensor",
         DOMAIN,
-        "uniq_purge_control",
+        "uniq_keep",
         config_entry=cast(Any, entry),
         suggested_object_id="probe_t1",
     )
-
     from homeassistant.helpers import device_registry as dr
 
     dev_reg = dr.async_get(hass)
     created_device = dev_reg.async_get_or_create(
         config_entry_id=entry.entry_id,
-        identifiers={(DOMAIN, "dev_purge_control")},
-        name="Apex Purge Control",
+        identifiers={(DOMAIN, "dev_keep")},
+        name="Apex Keep",
     )
 
     coordinator = AsyncMock()
     coordinator.async_config_entry_first_refresh = AsyncMock(return_value=None)
     coordinator.data = {"meta": {"serial": "SER123", "source": "rest"}}
-    coordinator.device_identifier = "SER123"
 
     with (
         patch(
@@ -359,66 +312,149 @@ async def test_async_setup_entry_purges_registry_on_control_change(
             "async_forward_entry_setups",
             new=AsyncMock(return_value=None),
         ),
-        patch.object(hass.config_entries, "async_update_entry") as update_entry,
     ):
         from custom_components.apex_fusion import async_setup_entry
 
         assert await async_setup_entry(hass, cast(Any, entry)) is True
 
-    assert ent_reg.async_get(created_entity.entity_id) is None
-    assert dev_reg.async_get(created_device.id) is None
-    assert any(
-        call.kwargs.get("data", {}).get(CONF_LAST_CONTROL_ENABLED) is True
-        for call in update_entry.mock_calls
-    )
+    assert ent_reg.async_get(created_entity.entity_id) is not None
+    assert dev_reg.async_get(created_device.id) is not None
+    # The stored transport is not rewritten from what the data happened to say.
+    assert entry.data[CONF_TRANSPORT] == TRANSPORT_REST
 
 
-async def test_async_setup_entry_purge_swallows_exceptions(
-    hass, enable_custom_integrations, caplog
+async def _setup_with_stub_coordinator(hass, entry):
+    coordinator = AsyncMock()
+    coordinator.async_config_entry_first_refresh = AsyncMock(return_value=None)
+    coordinator.data = {"meta": {"serial": "SER123"}}
+    with (
+        patch(
+            "custom_components.apex_fusion.ApexNeptuneDataUpdateCoordinator",
+            return_value=coordinator,
+        ),
+        patch.object(
+            hass.config_entries,
+            "async_forward_entry_setups",
+            new=AsyncMock(return_value=None),
+        ) as forward,
+    ):
+        from custom_components.apex_fusion import async_setup_entry
+
+        assert await async_setup_entry(hass, cast(Any, entry)) is True
+    return list(forward.call_args.args[1])
+
+
+@pytest.mark.parametrize(
+    ("last_source", "expected"),
+    [
+        ("rest", TRANSPORT_REST),
+        ("cgi_json", TRANSPORT_LEGACY),
+        ("xml", TRANSPORT_LEGACY),
+    ],
+)
+async def test_setup_infers_transport_from_last_source(
+    hass, enable_custom_integrations, last_source, expected
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "1.2.3.4", CONF_LAST_SOURCE: "legacy"},
+        data={CONF_HOST: "1.2.3.4", CONF_PASSWORD: "pw", CONF_LAST_SOURCE: last_source},
         unique_id="1.2.3.4",
         title="Apex (1.2.3.4)",
     )
     entry.add_to_hass(hass)
 
-    # Ensure there is something to purge so the remover is exercised.
-    ent_reg = er.async_get(hass)
-    ent_reg.async_get_or_create(
-        "sensor",
-        DOMAIN,
-        "uniq_purge_boom",
-        config_entry=cast(Any, entry),
-        suggested_object_id="probe_t1",
-    )
+    with patch("custom_components.apex_fusion.async_validate_input") as validate:
+        platforms = await _setup_with_stub_coordinator(hass, entry)
 
-    coordinator = AsyncMock()
-    coordinator.async_config_entry_first_refresh = AsyncMock(return_value=None)
-    coordinator.data = {"meta": {"serial": "SER123", "source": "rest"}}
-    coordinator.device_identifier = "SER123"
+    validate.assert_not_called()
+    assert entry.data[CONF_TRANSPORT] == expected
+    assert ("update" in platforms) is (expected == TRANSPORT_REST)
+
+
+async def test_setup_detects_transport_once_when_nothing_is_stored(
+    hass, enable_custom_integrations
+):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "1.2.3.4", CONF_PASSWORD: "pw"},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
+    )
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.apex_fusion.async_validate_input",
+        new=AsyncMock(
+            return_value={"title": "t", "unique_id": "u", "transport": TRANSPORT_REST}
+        ),
+    ) as validate:
+        platforms = await _setup_with_stub_coordinator(hass, entry)
+
+    validate.assert_awaited_once()
+    assert entry.data[CONF_TRANSPORT] == TRANSPORT_REST
+    assert "select" in platforms
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [(CannotConnect(), ConfigEntryNotReady), (InvalidAuth(), ConfigEntryAuthFailed)],
+)
+async def test_setup_detection_failure_is_retry_or_reauth(
+    hass, enable_custom_integrations, error, expected
+):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "1.2.3.4", CONF_PASSWORD: "pw"},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
+    )
+    entry.add_to_hass(hass)
+
+    from custom_components.apex_fusion import async_setup_entry
+
+    with patch(
+        "custom_components.apex_fusion.async_validate_input",
+        new=AsyncMock(side_effect=error),
+    ):
+        with pytest.raises(expected):
+            await async_setup_entry(hass, cast(Any, entry))
+    assert CONF_TRANSPORT not in entry.data
+
+
+async def test_first_refresh_failure_leaves_entry_in_setup_retry(
+    hass, enable_custom_integrations
+):
+    """An unreachable pinned transport retries later; it never switches."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_HOST: "1.2.3.4",
+            CONF_PASSWORD: "pw",
+            CONF_TRANSPORT: TRANSPORT_REST,
+        },
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
+    )
+    entry.add_to_hass(hass)
 
     with (
         patch(
-            "custom_components.apex_fusion.ApexNeptuneDataUpdateCoordinator",
-            return_value=coordinator,
-        ),
-        patch.object(
-            hass.config_entries,
-            "async_forward_entry_setups",
-            new=AsyncMock(return_value=None),
-        ),
+            "custom_components.apex_fusion.coordinator."
+            "ApexNeptuneDataUpdateCoordinator._async_update_rest",
+            new=AsyncMock(side_effect=UpdateFailed("down")),
+        ) as rest,
         patch(
-            "homeassistant.helpers.entity_registry.EntityRegistry.async_remove",
-            side_effect=ValueError("boom"),
-        ),
+            "custom_components.apex_fusion.coordinator."
+            "ApexNeptuneDataUpdateCoordinator._async_update_legacy",
+            new=AsyncMock(),
+        ) as legacy,
     ):
-        from custom_components.apex_fusion import async_setup_entry
+        assert not await hass.config_entries.async_setup(entry.entry_id)
 
-        assert await async_setup_entry(hass, cast(Any, entry)) is True
-
-    assert "Failed to purge entity/device registry" in caplog.text
+    assert cast(Any, entry).state is ConfigEntryState.SETUP_RETRY
+    rest.assert_awaited_once()
+    legacy.assert_not_awaited()
+    assert entry.data[CONF_TRANSPORT] == TRANSPORT_REST
 
 
 async def test_async_setup_entry_updates_title_from_controller_hostname(
@@ -426,7 +462,7 @@ async def test_async_setup_entry_updates_title_from_controller_hostname(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "1.2.3.4"},
+        data={CONF_HOST: "1.2.3.4", CONF_TRANSPORT: TRANSPORT_REST},
         unique_id="1.2.3.4",
         title="Apex (1.2.3.4)",
     )
@@ -464,7 +500,7 @@ async def test_async_setup_entry_title_cleans_underscores_in_hostname(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "1.2.3.4"},
+        data={CONF_HOST: "1.2.3.4", CONF_TRANSPORT: TRANSPORT_REST},
         unique_id="1.2.3.4",
         title="Apex (1.2.3.4)",
     )
@@ -502,7 +538,7 @@ async def test_async_unload_entry_pops_data_when_unloaded(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "1.2.3.4"},
+        data={CONF_HOST: "1.2.3.4", CONF_TRANSPORT: TRANSPORT_REST},
         unique_id="1.2.3.4",
         title="Apex (1.2.3.4)",
     )
@@ -527,7 +563,7 @@ async def test_async_unload_entry_uses_entry_platforms_when_present(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "1.2.3.4"},
+        data={CONF_HOST: "1.2.3.4", CONF_TRANSPORT: TRANSPORT_REST},
         unique_id="1.2.3.4",
         title="Apex (1.2.3.4)",
     )
@@ -556,7 +592,7 @@ async def test_async_unload_entry_accepts_platform_enum_items(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "1.2.3.4"},
+        data={CONF_HOST: "1.2.3.4", CONF_TRANSPORT: TRANSPORT_REST},
         unique_id="1.2.3.4",
         title="Apex (1.2.3.4)",
     )
@@ -583,7 +619,7 @@ async def test_async_unload_entry_falls_back_to_stored_platforms(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "1.2.3.4"},
+        data={CONF_HOST: "1.2.3.4", CONF_TRANSPORT: TRANSPORT_REST},
         unique_id="1.2.3.4",
         title="Apex (1.2.3.4)",
     )
@@ -614,7 +650,7 @@ async def test_async_unload_entry_last_resort_unloads_all_platforms(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "1.2.3.4"},
+        data={CONF_HOST: "1.2.3.4", CONF_TRANSPORT: TRANSPORT_REST},
         unique_id="1.2.3.4",
         title="Apex (1.2.3.4)",
     )
@@ -643,7 +679,7 @@ async def test_async_unload_entry_retries_on_value_error_with_fallback(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "1.2.3.4"},
+        data={CONF_HOST: "1.2.3.4", CONF_TRANSPORT: TRANSPORT_REST},
         unique_id="1.2.3.4",
         title="Apex (1.2.3.4)",
     )
@@ -666,7 +702,7 @@ async def test_async_unload_entry_platforms_not_iterable_uses_stored_map(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "1.2.3.4"},
+        data={CONF_HOST: "1.2.3.4", CONF_TRANSPORT: TRANSPORT_REST},
         unique_id="1.2.3.4",
         title="Apex (1.2.3.4)",
     )
@@ -698,7 +734,7 @@ async def test_async_unload_entry_ignores_invalid_platform_names(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "1.2.3.4"},
+        data={CONF_HOST: "1.2.3.4", CONF_TRANSPORT: TRANSPORT_REST},
         unique_id="1.2.3.4",
         title="Apex (1.2.3.4)",
     )
@@ -727,7 +763,7 @@ async def test_async_unload_entry_value_error_with_no_fallback_reraises(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "1.2.3.4"},
+        data={CONF_HOST: "1.2.3.4", CONF_TRANSPORT: TRANSPORT_REST},
         unique_id="1.2.3.4",
         title="Apex (1.2.3.4)",
     )
@@ -750,7 +786,7 @@ async def test_async_unload_entry_keeps_data_when_not_unloaded(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "1.2.3.4"},
+        data={CONF_HOST: "1.2.3.4", CONF_TRANSPORT: TRANSPORT_REST},
         unique_id="1.2.3.4",
         title="Apex (1.2.3.4)",
     )
@@ -776,7 +812,7 @@ async def test_async_setup_entry_updates_unique_id_to_serial(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "1.2.3.4"},
+        data={CONF_HOST: "1.2.3.4", CONF_TRANSPORT: TRANSPORT_REST},
         unique_id="1.2.3.4",
         title="Apex (1.2.3.4)",
     )
@@ -813,7 +849,7 @@ async def test_async_setup_entry_duplicate_serial_logs_warning(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "1.2.3.4"},
+        data={CONF_HOST: "1.2.3.4", CONF_TRANSPORT: TRANSPORT_REST},
         unique_id="1.2.3.4",
         title="Apex (1.2.3.4)",
     )
@@ -821,7 +857,7 @@ async def test_async_setup_entry_duplicate_serial_logs_warning(
 
     other = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "1.2.3.5"},
+        data={CONF_HOST: "1.2.3.5", CONF_TRANSPORT: TRANSPORT_REST},
         unique_id="SER123",
         title="Apex (1.2.3.5)",
     )
@@ -858,7 +894,7 @@ async def test_async_setup_entry_does_not_rename_existing_entity_ids(
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "1.2.3.4"},
+        data={CONF_HOST: "1.2.3.4", CONF_TRANSPORT: TRANSPORT_REST},
         unique_id="1.2.3.4",
         title="Apex (1.2.3.4)",
     )

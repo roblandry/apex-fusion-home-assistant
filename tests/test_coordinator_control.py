@@ -15,8 +15,10 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.apex_fusion.const import (
     CONF_HOST,
     CONF_PASSWORD,
+    CONF_TRANSPORT,
     CONF_USERNAME,
     DOMAIN,
+    TRANSPORT_REST,
 )
 from custom_components.apex_fusion.coordinator import ApexNeptuneDataUpdateCoordinator
 
@@ -127,7 +129,12 @@ async def _make_coord(
 ) -> ApexNeptuneDataUpdateCoordinator:
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "1.2.3.4", CONF_USERNAME: "user", CONF_PASSWORD: password},
+        data={
+            CONF_HOST: "1.2.3.4",
+            CONF_USERNAME: "user",
+            CONF_PASSWORD: password,
+            CONF_TRANSPORT: TRANSPORT_REST,
+        },
         unique_id="1.2.3.4",
         title="Apex (1.2.3.4)",
     )
@@ -260,7 +267,12 @@ async def test_update_data_rest_login_rejected_sets_saw_auth_rejection_and_raise
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "1.2.3.4", CONF_USERNAME: "user", CONF_PASSWORD: "pw"},
+        data={
+            CONF_HOST: "1.2.3.4",
+            CONF_USERNAME: "user",
+            CONF_PASSWORD: "pw",
+            CONF_TRANSPORT: TRANSPORT_REST,
+        },
         unique_id="1.2.3.4",
         title="Apex (1.2.3.4)",
     )
@@ -304,7 +316,12 @@ async def test_update_data_rest_transient_errors_after_auth_rejection_raise_auth
 
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: "1.2.3.4", CONF_USERNAME: "user", CONF_PASSWORD: "pw"},
+        data={
+            CONF_HOST: "1.2.3.4",
+            CONF_USERNAME: "user",
+            CONF_PASSWORD: "pw",
+            CONF_TRANSPORT: TRANSPORT_REST,
+        },
         unique_id="1.2.3.4",
         title="Apex (1.2.3.4)",
     )

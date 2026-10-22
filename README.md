@@ -30,13 +30,14 @@ Contributors are welcome (issues, testing feedback, and PRs).
 > This integration validates REST logins: if you provide credentials and they’re wrong, setup/update
 > fails (no silent fallback).
 >
-> If the integration switches between REST and legacy parsing, or between read-only and authenticated
-> control, it will purge stale entities/devices from the previous mode on the next reload to avoid
-> confusing duplicates.
+> The connection type (REST or legacy) is detected once when you add the controller and then kept. If
+> the controller goes offline, its entities become unavailable; the integration never switches to the
+> other API, so no duplicate devices appear. If a controller was upgraded (or was set up while it was
+> misbehaving), use **Reconfigure** and tick **Re-detect connection type**.
 
 ## Features
 
-- REST-first polling with legacy (CGI) fallback
+- REST polling, or legacy (CGI) polling for older controllers (chosen once per controller)
 - Config flow (UI setup)
 - Input/probe sensors (Temp, pH, Cond, Trident results, etc)
 - Digital inputs as binary sensors (leak/float switches, etc)
@@ -64,7 +65,7 @@ As of 2026-01-31, I actively run this integration against:
 
 - **Controller type:** AC6J (A3 Apex Jr)
 - **Firmware:** 5.12J_CA25
-- **APIs available:** REST (`/rest/*`) is expected; legacy CGI endpoints (`/cgi-bin/status.*`) may also be present and are used only as fallback
+- **APIs available:** REST (`/rest/*`) is expected; legacy CGI endpoints (`/cgi-bin/status.*`) may also be present but are not used when REST is available
 - **Modules observed via REST:**
   - FMM (Software Version: **24**)
   - EB832 (Software Version: **8**)
