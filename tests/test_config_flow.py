@@ -18,6 +18,7 @@ from custom_components.apex_fusion.config_flow import (
 )
 from custom_components.apex_fusion.const import (
     CONF_HOST,
+    CONF_LEGACY_FORMAT,
     CONF_NO_LOGIN,
     CONF_REDETECT_TRANSPORT,
     CONF_TRANSPORT,
@@ -1458,3 +1459,67 @@ async def test_no_login_rest_connection_error_raises_cannot_connect(
         await async_validate_input(
             hass, {CONF_HOST: host, CONF_NO_LOGIN: True, CONF_USERNAME: "admin"}
         )
+
+
+async def test_reconfigure_redetect_updates_legacy_format(
+    hass, enable_custom_integrations
+):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Apex",
+        data={
+            CONF_HOST: "1.2.3.4",
+            CONF_USERNAME: "admin",
+            CONF_PASSWORD: "pw",
+            CONF_TRANSPORT: TRANSPORT_REST,
+        },
+        unique_id="1.2.3.4",
+    )
+    entry.add_to_hass(hass)
+
+    flow = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": "reconfigure", "entry_id": entry.entry_id},
+        data=None,
+    )
+    info = {
+        "title": "Apex (1.2.3.4)",
+        "unique_id": "1.2.3.4",
+        "transport": TRANSPORT_LEGACY,
+        "legacy_format": "cgi_json",
+    }
+    with patch(
+        "custom_components.apex_fusion.config_flow.async_validate_input",
+        new=AsyncMock(return_value=info),
+    ):
+        await hass.config_entries.flow.async_configure(
+            flow["flow_id"],
+            user_input={
+                CONF_HOST: "1.2.3.4",
+                CONF_USERNAME: "admin",
+                CONF_REDETECT_TRANSPORT: True,
+            },
+        )
+    assert entry.data[CONF_TRANSPORT] == TRANSPORT_LEGACY
+    assert entry.data[CONF_LEGACY_FORMAT] == "cgi_json"
+
+    flow = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": "reconfigure", "entry_id": entry.entry_id},
+        data=None,
+    )
+    info = {"title": "Apex", "unique_id": "1.2.3.4", "transport": TRANSPORT_REST}
+    with patch(
+        "custom_components.apex_fusion.config_flow.async_validate_input",
+        new=AsyncMock(return_value=info),
+    ):
+        await hass.config_entries.flow.async_configure(
+            flow["flow_id"],
+            user_input={
+                CONF_HOST: "1.2.3.4",
+                CONF_USERNAME: "admin",
+                CONF_REDETECT_TRANSPORT: True,
+            },
+        )
+    assert entry.data[CONF_TRANSPORT] == TRANSPORT_REST
+    assert CONF_LEGACY_FORMAT not in entry.data

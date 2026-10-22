@@ -27,6 +27,7 @@ from yarl import URL
 
 from .const import (
     CONF_HOST,
+    CONF_LEGACY_FORMAT,
     CONF_NO_LOGIN,
     CONF_REDETECT_TRANSPORT,
     CONF_TRANSPORT,
@@ -34,6 +35,8 @@ from .const import (
     DEFAULT_STATUS_PATH,
     DEFAULT_USERNAME,
     DOMAIN,
+    LEGACY_FORMAT_CGI_JSON,
+    LEGACY_FORMAT_XML,
     LOGGER_NAME,
     TRANSPORT_LEGACY,
     TRANSPORT_REST,
@@ -279,6 +282,16 @@ def _extract_serial_from_status_obj(status_obj: dict[str, Any]) -> str | None:
                 return s
 
     return None
+
+
+def _apply_detected_transport(data: dict[str, Any], info: dict[str, str]) -> None:
+    """Store the detected transport (and legacy format) in config entry data."""
+    data[CONF_TRANSPORT] = info["transport"]
+    legacy_format = info.get("legacy_format")
+    if legacy_format:
+        data[CONF_LEGACY_FORMAT] = legacy_format
+    else:
+        data.pop(CONF_LEGACY_FORMAT, None)
 
 
 async def _async_probe_rest_without_login(
@@ -644,6 +657,7 @@ async def async_validate_input(
                 "title": title,
                 "unique_id": serial or host,
                 "transport": TRANSPORT_LEGACY,
+                "legacy_format": LEGACY_FORMAT_CGI_JSON,
             }
 
         except FileNotFoundError:
@@ -683,6 +697,7 @@ async def async_validate_input(
         "title": title,
         "unique_id": serial or host,
         "transport": TRANSPORT_LEGACY,
+        "legacy_format": LEGACY_FORMAT_XML,
     }
 
 
@@ -728,7 +743,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 _LOGGER.exception("Unexpected exception")
                 errors["base"] = "unknown"
             else:
-                normalized_input[CONF_TRANSPORT] = info["transport"]
+                _apply_detected_transport(normalized_input, info)
                 await self.async_set_unique_id(info["unique_id"])
 
                 # If this controller is already configured, treat running the flow
@@ -927,7 +942,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 # The transport is only replaced on request (or when none is
                 # stored yet), so a reconfigure never silently switches it.
                 if redetect or not entry.data.get(CONF_TRANSPORT):
-                    merged[CONF_TRANSPORT] = info["transport"]
+                    _apply_detected_transport(merged, info)
 
                 self.hass.config_entries.async_update_entry(
                     entry, data=merged, title=info["title"]

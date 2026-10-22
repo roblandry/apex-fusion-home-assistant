@@ -15,6 +15,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.apex_fusion.const import (
     CONF_HOST,
+    CONF_LEGACY_FORMAT,
     CONF_NO_LOGIN,
     CONF_PASSWORD,
     CONF_TRANSPORT,
@@ -2189,3 +2190,64 @@ def test_transport_from_entry_data(data, expected):
     from custom_components.apex_fusion.coordinator import transport_from_entry_data
 
     assert transport_from_entry_data(data) == expected
+
+
+async def _legacy_coord(hass, fmt):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_HOST: "1.2.3.4",
+            CONF_PASSWORD: "",
+            CONF_TRANSPORT: TRANSPORT_LEGACY,
+            CONF_LEGACY_FORMAT: fmt,
+        },
+        unique_id="1.2.3.4",
+    )
+    entry.add_to_hass(hass)
+    return ApexNeptuneDataUpdateCoordinator(hass, entry=cast(Any, entry))
+
+
+async def test_legacy_pinned_to_status_json_never_switches_to_xml(
+    hass, enable_custom_integrations
+):
+    session = _Session()
+    session.queue_get(_Resp(404, "{}"))
+    session.queue_get(_Resp(200, _XML_OK))  # must stay unused
+    coord = await _legacy_coord(hass, "cgi_json")
+
+    p1, p2 = _patched(session)
+    with p1, p2, pytest.raises(UpdateFailed):
+        await coord._async_update_data()
+
+    assert len(session._get_queue) == 1
+
+
+async def test_legacy_pinned_to_xml_skips_status_json(hass, enable_custom_integrations):
+    session = _Session()
+    session.queue_get(_Resp(200, _XML_OK))
+    session.queue_get(_Resp(200, _CGI_OK))  # must stay unused
+    coord = await _legacy_coord(hass, "xml")
+
+    p1, p2 = _patched(session)
+    with p1, p2:
+        data = await coord._async_update_data()
+
+    assert data["meta"]["source"] == "xml"
+    assert len(session._get_queue) == 1
+
+
+@pytest.mark.parametrize(
+    ("data", "expected"),
+    [
+        ({"legacy_format": "xml"}, "xml"),
+        ({"legacy_format": " CGI_JSON "}, "cgi_json"),
+        ({"legacy_format": "bogus", "last_source": "xml"}, "xml"),
+        ({"last_source": "cgi_json"}, "cgi_json"),
+        ({"last_source": "rest"}, None),
+        ({}, None),
+    ],
+)
+def test_legacy_format_from_entry_data(data, expected):
+    from custom_components.apex_fusion.coordinator import legacy_format_from_entry_data
+
+    assert legacy_format_from_entry_data(data) == expected

@@ -32,6 +32,13 @@ CONF_TRANSPORT: Final = "transport"
 TRANSPORT_REST: Final = "rest"
 TRANSPORT_LEGACY: Final = "legacy"
 
+# Legacy controllers expose status.json and status.xml. status.xml keys probes by
+# name (no ``did``), so the working format is pinned too: flipping between the two
+# would create a second set of entities.
+CONF_LEGACY_FORMAT: Final = "legacy_format"
+LEGACY_FORMAT_CGI_JSON: Final = "cgi_json"
+LEGACY_FORMAT_XML: Final = "xml"
+
 # Optional reconfigure-flow checkbox: probe the controller again and replace the
 # stored transport.
 CONF_REDETECT_TRANSPORT: Final = "redetect_transport"

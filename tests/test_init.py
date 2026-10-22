@@ -17,6 +17,7 @@ from custom_components.apex_fusion.config_flow import CannotConnect, InvalidAuth
 from custom_components.apex_fusion.const import (
     CONF_HOST,
     CONF_LAST_SOURCE,
+    CONF_LEGACY_FORMAT,
     CONF_NO_LOGIN,
     CONF_PASSWORD,
     CONF_TRANSPORT,
@@ -932,3 +933,63 @@ async def test_async_setup_entry_does_not_rename_existing_entity_ids(
 
     assert ent_reg.async_get("sensor.probe_t1") is not None
     assert ent_reg.async_get("sensor.my_tank_probe_t1") is None
+
+
+@pytest.mark.parametrize("source", ["cgi_json", "xml"])
+async def test_setup_pins_legacy_format_from_first_refresh(
+    hass, enable_custom_integrations, source
+):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "1.2.3.4", CONF_TRANSPORT: TRANSPORT_LEGACY},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
+    )
+    entry.add_to_hass(hass)
+
+    coordinator = AsyncMock()
+    coordinator.async_config_entry_first_refresh = AsyncMock(return_value=None)
+    coordinator.data = {"meta": {"serial": "SER123", "source": source}}
+    with (
+        patch(
+            "custom_components.apex_fusion.ApexNeptuneDataUpdateCoordinator",
+            return_value=coordinator,
+        ),
+        patch.object(
+            hass.config_entries,
+            "async_forward_entry_setups",
+            new=AsyncMock(return_value=None),
+        ),
+    ):
+        from custom_components.apex_fusion import async_setup_entry
+
+        assert await async_setup_entry(hass, cast(Any, entry)) is True
+
+    assert entry.data[CONF_LEGACY_FORMAT] == source
+
+
+async def test_setup_detection_records_legacy_format(hass, enable_custom_integrations):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "1.2.3.4", CONF_PASSWORD: ""},
+        unique_id="1.2.3.4",
+        title="Apex (1.2.3.4)",
+    )
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.apex_fusion.async_validate_input",
+        new=AsyncMock(
+            return_value={
+                "title": "t",
+                "unique_id": "u",
+                "transport": TRANSPORT_LEGACY,
+                "legacy_format": "xml",
+            }
+        ),
+    ):
+        platforms = await _setup_with_stub_coordinator(hass, entry)
+
+    assert entry.data[CONF_TRANSPORT] == TRANSPORT_LEGACY
+    assert entry.data[CONF_LEGACY_FORMAT] == "xml"
+    assert "update" not in platforms

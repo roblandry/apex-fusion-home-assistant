@@ -31,6 +31,7 @@ from yarl import URL
 from .const import (
     CONF_HOST,
     CONF_LAST_SOURCE,
+    CONF_LEGACY_FORMAT,
     CONF_NO_LOGIN,
     CONF_PASSWORD,
     CONF_TRANSPORT,
@@ -39,6 +40,8 @@ from .const import (
     DEFAULT_STATUS_PATH,
     DEFAULT_TIMEOUT_SECONDS,
     DOMAIN,
+    LEGACY_FORMAT_CGI_JSON,
+    LEGACY_FORMAT_XML,
     LOGGER_NAME,
     MODULE_HWTYPE_FRIENDLY_NAMES,
     TRANSPORT_LEGACY,
@@ -73,8 +76,27 @@ def transport_from_entry_data(data: Mapping[str, Any]) -> str | None:
     last = str(data.get(CONF_LAST_SOURCE) or "").strip().lower()
     if last == TRANSPORT_REST:
         return TRANSPORT_REST
-    if last in ("cgi_json", "xml"):
+    if last in (LEGACY_FORMAT_CGI_JSON, LEGACY_FORMAT_XML):
         return TRANSPORT_LEGACY
+    return None
+
+
+def legacy_format_from_entry_data(data: Mapping[str, Any]) -> str | None:
+    """Return the legacy status format stored on a config entry, if known.
+
+    Args:
+        data: Config entry data.
+
+    Returns:
+        ``"cgi_json"`` or ``"xml"``; ``None`` when not yet known (the first
+        refresh then tries status.json before status.xml and records the result).
+    """
+    stored = str(data.get(CONF_LEGACY_FORMAT) or "").strip().lower()
+    if stored in (LEGACY_FORMAT_CGI_JSON, LEGACY_FORMAT_XML):
+        return stored
+    last = str(data.get(CONF_LAST_SOURCE) or "").strip().lower()
+    if last in (LEGACY_FORMAT_CGI_JSON, LEGACY_FORMAT_XML):
+        return last
     return None
 
 
@@ -2763,6 +2785,11 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
     @property
+    def legacy_format(self) -> str | None:
+        """Return the legacy format this entry is pinned to, if known."""
+        return legacy_format_from_entry_data(self.entry.data)
+
+    @property
     def transport(self) -> str | None:
         """Return the transport this entry is pinned to (``rest``/``legacy``)."""
         return transport_from_entry_data(self.entry.data)
@@ -3304,45 +3331,56 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if password:
             auth = aiohttp.BasicAuth(username or "admin", password)
 
-        # Try CGI JSON first (richer metadata than status.xml).
-        json_url = f"{base_url}/cgi-bin/status.json"
-        try:
-            _LOGGER.debug("Trying CGI JSON update: %s", json_url)
-            async with async_timeout.timeout(timeout_seconds):
-                async with session.get(json_url, auth=auth) as resp:
-                    if resp.status in (401, 403):
-                        raise ConfigEntryAuthFailed("Invalid auth for Apex status.json")
-                    if resp.status == 404:
-                        raise FileNotFoundError
-                    resp.raise_for_status()
-                    body = await resp.text()
+        fmt = self.legacy_format
 
-            parsed_any: Any = json.loads(body) if body else {}
-            if isinstance(parsed_any, dict):
-                data = parse_status_cgi_json(cast(dict[str, Any], parsed_any))
-                meta = data.get("meta")
-                if isinstance(meta, dict):
-                    cast(dict[str, Any], meta).setdefault("source", "cgi_json")
-                self._finalize_trident(data)
-                return self._apply_serial_cache(data)
+        # Try CGI JSON first (richer metadata than status.xml), unless this entry
+        # is pinned to status.xml.
+        if fmt != LEGACY_FORMAT_XML:
+            json_url = f"{base_url}/cgi-bin/status.json"
+            try:
+                _LOGGER.debug("Trying CGI JSON update: %s", json_url)
+                async with async_timeout.timeout(timeout_seconds):
+                    async with session.get(json_url, auth=auth) as resp:
+                        if resp.status in (401, 403):
+                            raise ConfigEntryAuthFailed(
+                                "Invalid auth for Apex status.json"
+                            )
+                        if resp.status == 404:
+                            raise FileNotFoundError
+                        resp.raise_for_status()
+                        body = await resp.text()
 
-        except FileNotFoundError:
-            _LOGGER.debug("CGI status.json not found; trying status.xml")
-        except ConfigEntryAuthFailed:
-            _LOGGER.warning(
-                "CGI JSON authentication failed for host=%s user=%s",
-                host,
-                (username or "admin"),
-            )
-            raise
-        except (
-            asyncio.TimeoutError,
-            aiohttp.ClientError,
-            json.JSONDecodeError,
-        ) as err:
-            _LOGGER.debug("CGI JSON update failed; trying status.xml: %s", err)
-        except Exception as err:
-            _LOGGER.debug("Unexpected CGI JSON error; trying status.xml: %s", err)
+                parsed_any: Any = json.loads(body) if body else {}
+                if isinstance(parsed_any, dict):
+                    data = parse_status_cgi_json(cast(dict[str, Any], parsed_any))
+                    meta = data.get("meta")
+                    if isinstance(meta, dict):
+                        cast(dict[str, Any], meta).setdefault("source", "cgi_json")
+                    self._finalize_trident(data)
+                    return self._apply_serial_cache(data)
+
+            except FileNotFoundError:
+                _LOGGER.debug("CGI status.json not found; trying status.xml")
+            except ConfigEntryAuthFailed:
+                _LOGGER.warning(
+                    "CGI JSON authentication failed for host=%s user=%s",
+                    host,
+                    (username or "admin"),
+                )
+                raise
+            except (
+                asyncio.TimeoutError,
+                aiohttp.ClientError,
+                json.JSONDecodeError,
+            ) as err:
+                _LOGGER.debug("CGI JSON update failed; trying status.xml: %s", err)
+            except Exception as err:
+                _LOGGER.debug("Unexpected CGI JSON error; trying status.xml: %s", err)
+
+            if fmt == LEGACY_FORMAT_CGI_JSON:
+                # Pinned to status.json: do not switch to status.xml (it keys
+                # probes by name, which would create a second set of entities).
+                raise UpdateFailed("Apex status.json is unavailable")
 
         try:
             _LOGGER.debug("Trying XML update: %s", url)

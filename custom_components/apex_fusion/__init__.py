@@ -17,17 +17,22 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from .config_flow import CannotConnect, InvalidAuth, async_validate_input
 from .const import (
     CONF_HOST,
+    CONF_LEGACY_FORMAT,
     CONF_NO_LOGIN,
     CONF_PASSWORD,
     CONF_TRANSPORT,
     DOMAIN,
+    LEGACY_FORMAT_CGI_JSON,
+    LEGACY_FORMAT_XML,
     LOGGER_NAME,
     PLATFORMS,
+    TRANSPORT_LEGACY,
     TRANSPORT_REST,
 )
 from .coordinator import (
     ApexNeptuneDataUpdateCoordinator,
     clean_hostname_display,
+    legacy_format_from_entry_data,
     transport_from_entry_data,
 )
 
@@ -63,11 +68,27 @@ async def _async_resolve_transport(hass: HomeAssistant, entry: ConfigEntry) -> s
         except CannotConnect as err:
             raise ConfigEntryNotReady("Cannot detect the Apex transport yet") from err
         transport = info["transport"]
+        detected_format = info.get("legacy_format")
+        if detected_format:
+            _async_pin_legacy_format(hass, entry, detected_format)
     if entry.data.get(CONF_TRANSPORT) != transport:
         hass.config_entries.async_update_entry(
             entry, data={**entry.data, CONF_TRANSPORT: transport}
         )
     return transport
+
+
+def _async_pin_legacy_format(
+    hass: HomeAssistant, entry: ConfigEntry, source: str | None
+) -> None:
+    """Record which legacy status format works, once, so it is never switched."""
+    if legacy_format_from_entry_data(entry.data) is None and source in (
+        LEGACY_FORMAT_CGI_JSON,
+        LEGACY_FORMAT_XML,
+    ):
+        hass.config_entries.async_update_entry(
+            entry, data={**entry.data, CONF_LEGACY_FORMAT: source}
+        )
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -122,6 +143,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         bool(entry.data.get(CONF_NO_LOGIN, False))
         or not str(entry.data.get(CONF_PASSWORD, "") or "").strip()
     )
+
+    if transport == TRANSPORT_LEGACY:
+        _async_pin_legacy_format(hass, entry, str(meta.get("source") or "") or None)
 
     rest_active = transport == TRANSPORT_REST
     control_enabled = rest_active and not read_only
