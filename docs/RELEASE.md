@@ -86,37 +86,53 @@ this repository in HACS. Everyone else stays on the latest stable release.
 There is no manual release workflow. The automatic release only happens when a
 push to `main` raises the version, so re-running it or pushing an unrelated
 change will not release anything. If the automatic release was missed or
-failed, check the run under **Actions**, then finish it by hand. `<commit>` is
-the merge commit on `main` that raised the version.
+failed, check the run under **Actions**, then finish it by hand.
 
 The workflow can fail after pushing the tag but before creating the GitHub
-release, so check whether the tag exists first:
+release, so the snippet below checks the tag on the **remote** and only then
+decides what to do. Fill in the three variables, then paste the whole block. It
+runs in a subshell and stops at the first failure, so nothing after a failed
+check can run. `COMMIT` is the merge commit on `main` that raised the version,
+and the notes come from the version's `CHANGELOG.md` section.
 
 ```sh
-git fetch --tags origin
-git rev-list -n1 v2026.10.25   # prints a commit if the tag exists, errors if not
+(
+  set -euo pipefail
+  TAG=v2026.10.25
+  COMMIT=<release merge commit sha>
+  NOTES=notes.md
+  PRERELEASE=false   # true for suffixed versions such as 2026.10.22-beta.1
+
+  release() {
+    if [ "$PRERELEASE" = true ]; then
+      gh release create "$TAG" --verify-tag --title "$TAG" \
+        --notes-file "$NOTES" --prerelease
+    else
+      gh release create "$TAG" --verify-tag --title "$TAG" --notes-file "$NOTES"
+    fi
+  }
+
+  git fetch origin main
+  want=$(git rev-parse "$COMMIT^{commit}")
+  # Where the tag points on the remote: the peeled commit of an annotated tag,
+  # or the tag itself if it is lightweight.
+  remote=$(git ls-remote origin "refs/tags/$TAG^{}" | cut -f1)
+  if [ -z "$remote" ]; then
+    remote=$(git ls-remote origin "refs/tags/$TAG" | cut -f1)
+  fi
+
+  if [ -z "$remote" ]; then
+    git tag -a "$TAG" -m "$TAG" "$want"
+    git push origin "refs/tags/$TAG"
+    release
+  elif [ "$remote" = "$want" ]; then
+    release
+  else
+    echo "error: $TAG on the remote points at $remote, not $want; not touching it" >&2
+    exit 1
+  fi
+)
 ```
 
-- **No tag yet:** create and push it, then publish the release:
-
-  ```sh
-  git tag -a v2026.10.25 -m v2026.10.25 <commit>
-  git push origin v2026.10.25
-  gh release create v2026.10.25 --verify-tag --title v2026.10.25 \
-    --notes-file notes.md
-  ```
-
-- **Tag already exists:** make sure it points at the release commit, skip the
-  tag steps, and publish the release only:
-
-  ```sh
-  test "$(git rev-list -n1 v2026.10.25)" = "$(git rev-parse <commit>)"
-  gh release create v2026.10.25 --verify-tag --title v2026.10.25 \
-    --notes-file notes.md
-  ```
-
-  If the tag points somewhere else, stop and ask before changing it.
-
-Add `--prerelease` to `gh release create` for suffixed versions such as
-`2026.10.22-beta.1`. Take the notes from the version's `CHANGELOG.md` section.
-Never push a release commit to `main` to do this.
+If it reports a mismatch, stop and ask before changing the tag. Never push a
+release commit to `main` to do this.
