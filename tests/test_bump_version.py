@@ -161,27 +161,27 @@ _ORDERED = [
 
 
 def test_ordering() -> None:
-    assert sorted(reversed(_ORDERED), key=bv.sort_key) == _ORDERED
+    # Strictly increasing under PEP 440, via packaging.
+    for low, high in zip(_ORDERED, _ORDERED[1:], strict=False):
+        assert bv.pep440(low) < bv.pep440(high), (low, high)
+    assert bv.pep440("2026.10.22-beta.1") == bv.pep440("2026.10.22b1")
+
+
+def test_beta_numbers_compare_numerically() -> None:
+    assert bv.pep440("2026.10.22-beta.9") > bv.pep440("2026.10.22-beta.2")
+    assert bv.pep440("2026.10.22-rc.1") > bv.pep440("2026.10.22-beta.9")
+    assert bv.pep440("2026.10.22") > bv.pep440("2026.10.22-rc.9")
+    assert bv.pep440("2026.10.22-beta.1") > bv.pep440("0.1.6")
 
 
 def test_old_and_new_styles_order_together() -> None:
-    assert bv.sort_key("2026.10.22b2") < bv.sort_key("2026.10.22-beta.3")
-    assert bv.sort_key("2026.10.22-beta.1") < bv.sort_key("2026.10.22rc1")
+    assert bv.pep440("2026.10.22b2") < bv.pep440("2026.10.22-beta.3")
+    assert bv.pep440("2026.10.22-beta.1") < bv.pep440("2026.10.22rc1")
 
 
-def test_ordering_matches_packaging() -> None:
-    # packaging normalizes -beta.1 to b1, so it is the PEP 440 reference.
-    packaging_version = pytest.importorskip("packaging.version")
-    for low in _ORDERED:
-        for high in _ORDERED:
-            assert (bv.sort_key(low) < bv.sort_key(high)) == (
-                packaging_version.Version(low) < packaging_version.Version(high)
-            )
-
-
-def test_sort_key_rejects_invalid() -> None:
-    with pytest.raises(bv.VersionError):
-        bv.sort_key("nope")
+def test_pep440_rejects_invalid() -> None:
+    with pytest.raises(bv.VersionError, match="not a valid"):
+        bv.pep440("nope")
 
 
 def test_get_and_check(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -375,7 +375,6 @@ def test_transition_from_old_style_previous_version(tmp_path: Path) -> None:
 
 
 def test_awesomeversion_gate(tmp_path: Path) -> None:
-    pytest.importorskip("awesomeversion")
     # A later beta on the same two-digit day ranks correctly.
     same_day = _make_root(tmp_path / "a", "2026.10.22-beta.2")
     assert _run(same_day, "--check-increase", "2026.10.22-beta.1") == 0
@@ -404,7 +403,6 @@ def test_awesomeversion_disagreement_fails(
 
 
 def test_awesome_greater_values() -> None:
-    pytest.importorskip("awesomeversion")
     assert bv.awesome_greater("2026.10.22-beta.1", "0.1.6") is True
     assert bv.awesome_greater("2026.10.22-beta.2", "2026.10.22-beta.1") is True
     assert bv.awesome_greater("2026.10.22", "2026.10.22-beta.2") is True
@@ -412,16 +410,35 @@ def test_awesome_greater_values() -> None:
     assert bv.awesome_greater("2026.10.22-beta.1", "2026.10.22-beta.2") is False
 
 
-def test_awesomeversion_missing_is_skipped(
+@pytest.mark.parametrize(
+    ("module", "pin"),
+    [("awesomeversion", "25.8.0"), ("packaging", "26.3")],
+)
+def test_missing_dependency_fails_closed(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
+    module: str,
+    pin: str,
 ) -> None:
-    monkeypatch.setitem(sys.modules, "awesomeversion", None)
-    assert bv.awesome_greater("2026.10.25", "0.1.6") is None
+    monkeypatch.setitem(sys.modules, module, None)
+    if module == "packaging":
+        monkeypatch.setitem(sys.modules, "packaging.version", None)
     root = _make_root(tmp_path, "2026.10.25")
-    assert _run(root, "--check-increase", "0.1.6") == 0
-    assert "skipped" in capsys.readouterr().err
+    assert _run(root, "--check-increase", "0.1.6") == 1
+    err = capsys.readouterr().err
+    assert f"pip install {module}=={pin}" in err
+    # Commands that do not order versions still work without the packages.
+    assert _run(root, "--get") == 0
+    assert _run(root, "--check") == 0
+
+
+def test_pins_match_the_workflows() -> None:
+    workflows = Path(__file__).resolve().parents[1] / ".github" / "workflows"
+    for name in ("release-on-version-bump.yml", "version-check.yml"):
+        text = (workflows / name).read_text(encoding="utf-8")
+        assert f"awesomeversion=={bv.AWESOMEVERSION_PIN}" in text
+        assert f"packaging=={bv.PACKAGING_PIN}" in text
 
 
 _CHANGELOG = """# Changelog

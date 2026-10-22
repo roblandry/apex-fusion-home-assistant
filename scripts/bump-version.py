@@ -28,9 +28,10 @@ Usage (paths resolve relative to the repo root):
 
 The script never commits, tags or releases. CI does that after the bump merges.
 
-Ordering is checked two ways: PEP 440 precedence (alpha < beta < rc < stable)
-and AwesomeVersion, which Home Assistant and HACS use to decide "update
-available". ``--check-increase`` requires both to agree. The dash form is used
+Ordering is checked two ways: PEP 440 precedence via ``packaging`` (alpha <
+beta < rc < stable) and AwesomeVersion, which Home Assistant and HACS use to
+decide "update available". ``--check-increase`` requires both to agree, and
+fails if either package is not installed. The dash form is used
 because AwesomeVersion ranks it correctly on every day of the month, which it
 does not for ``bN`` suffixes on days 10 to 31.
 """
@@ -39,12 +40,13 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import importlib
 import re
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -53,9 +55,13 @@ _VERSION_RE = re.compile(
     r"^(\d+)\.(\d+)\.(\d+)"
     r"(?:-(alpha|beta|rc)\.(\d+)|(a|b|rc)(\d+)|\.dev(\d+))?$",
 )
-_STAGE_RANK = {"dev": 0, "alpha": 1, "beta": 2, "rc": 3, "": 4}
 _OLD_STAGE = {"a": "alpha", "b": "beta", "rc": "rc"}
 _PRERELEASE_CAP = 9
+
+# The ordering checks need these. CI installs them with these pins (the
+# awesomeversion pin matches Home Assistant's own).
+AWESOMEVERSION_PIN = "25.8.0"
+PACKAGING_PIN = "26.3"
 
 
 class Parsed(NamedTuple):
@@ -168,30 +174,30 @@ def is_prerelease(version: str) -> bool:
     return parsed is not None and parsed.stage != ""
 
 
-def sort_key(version: str) -> tuple[int, int, int, int, int]:
-    """Return a key that orders valid versions (PEP 440 pre-release order)."""
-    parsed = parse(version)
-    if parsed is None:
-        raise VersionError(f"{version!r} is not a valid version")
-    return (
-        parsed.major,
-        parsed.minor,
-        parsed.patch,
-        _STAGE_RANK[parsed.stage],
-        parsed.num,
-    )
-
-
-def awesome_greater(new: str, base: str) -> bool | None:
-    """Return whether AwesomeVersion ranks *new* above *base*.
-
-    Returns None when the ``awesomeversion`` package is not installed.
-    """
+def _import(module: str, package: str, pin: str) -> Any:
+    """Import *module*, or fail with the exact install command for *package*."""
     try:
-        from awesomeversion import AwesomeVersion
+        return importlib.import_module(module)
     except ImportError:
-        return None
-    return bool(AwesomeVersion(new) > AwesomeVersion(base))
+        raise VersionError(
+            f"{package} is required for version ordering; "
+            f"run: python3 -m pip install {package}=={pin}"
+        ) from None
+
+
+def pep440(version: str) -> Any:
+    """Return *version* as a ``packaging.version.Version`` (PEP 440 ordering)."""
+    if parse(version) is None:
+        raise VersionError(f"{version!r} is not a valid version")
+    return _import("packaging.version", "packaging", PACKAGING_PIN).Version(version)
+
+
+def awesome_greater(new: str, base: str) -> bool:
+    """Return whether AwesomeVersion (used by HA and HACS) ranks *new* above *base*."""
+    awesome = _import(
+        "awesomeversion", "awesomeversion", AWESOMEVERSION_PIN
+    ).AwesomeVersion
+    return bool(awesome(new) > awesome(base))
 
 
 def _stamp(today: dt.date) -> str:
@@ -232,7 +238,7 @@ def stable(current: str, today: dt.date) -> str:
     if parse(current) is None:
         raise VersionError(f"current version {current!r} is not valid")
     new = _stamp(today)
-    if sort_key(new) <= sort_key(current):
+    if pep440(new) <= pep440(current):
         raise VersionError(f"{new} is not greater than the current version {current}")
     return new
 
@@ -350,20 +356,16 @@ def _check_increase(base: str, root: Path) -> int:
         return _fail(f"new version: {problem}")
     if not is_valid(base):
         return _fail(f"base version {base!r} is not valid")
-    if sort_key(current) <= sort_key(base):
-        return _fail(f"version {current} is not greater than base version {base}")
-    ranked = awesome_greater(current, base)
-    if ranked is None:
-        print(
-            "warning: awesomeversion is not installed; skipped the HA/HACS "
-            "ordering check",
-            file=sys.stderr,
-        )
-    elif not ranked:
-        return _fail(
-            f"AwesomeVersion (used by HA and HACS) does not rank {current} above "
-            f"{base}, so an update would not be offered"
-        )
+    try:
+        if pep440(current) <= pep440(base):
+            return _fail(f"version {current} is not greater than base version {base}")
+        if not awesome_greater(current, base):
+            return _fail(
+                f"AwesomeVersion (used by HA and HACS) does not rank {current} "
+                f"above {base}, so an update would not be offered"
+            )
+    except VersionError as exc:
+        return _fail(str(exc))
     print(f"ok: {base} -> {current}")
     return 0
 
