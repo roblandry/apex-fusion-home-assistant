@@ -1468,6 +1468,7 @@ class _SpecSession:
     def __init__(self, routes: dict[str, list[Any]]) -> None:
         self.routes = routes
         self.calls: list[str] = []
+        self.get_kwargs: list[dict[str, Any]] = []
 
         class _Jar:
             def filter_cookies(self, *_a, **_k):
@@ -1489,7 +1490,8 @@ class _SpecSession:
             raise item
         return _SpecResp(*item)
 
-    def get(self, url, **_kwargs):
+    def get(self, url, **kwargs):
+        self.get_kwargs.append(kwargs)
         return self._serve("GET", url)
 
     def post(self, url, **_kwargs):
@@ -1823,6 +1825,36 @@ _SPEC_ROWS = [
         CannotConnect,
     ),
     (
+        "probe 301 x3 -> cannot_connect",
+        False,
+        _routes((301, ""), cgi=(200, _CGI_OK)),
+        CannotConnect,
+    ),
+    (
+        "probe 307 x3 -> cannot_connect",
+        False,
+        _routes((307, ""), cgi=(200, _CGI_OK)),
+        CannotConnect,
+    ),
+    (
+        "probe 308 x3 -> cannot_connect",
+        False,
+        _routes((308, ""), cgi=(200, _CGI_OK)),
+        CannotConnect,
+    ),
+    (
+        "probe 408 x3 -> cannot_connect",
+        False,
+        _routes((408, ""), cgi=(200, _CGI_OK)),
+        CannotConnect,
+    ),
+    (
+        "probe 429 x3 -> cannot_connect",
+        False,
+        _routes((429, ""), cgi=(200, _CGI_OK)),
+        CannotConnect,
+    ),
+    (
         "probe 404 x3 -> legacy",
         False,
         _routes([(404, ""), (404, ""), (404, "")], cgi=(200, _CGI_OK)),
@@ -1908,7 +1940,7 @@ async def test_transport_detection_spec_table(hass, has_password, routes, expect
             return True
         if code == 200:
             return body == "{}"
-        return None if code >= 500 and code != 501 else False
+        return False if code in (404, 400, 405, 501, 302) else None
 
     # Replay the probe attempts the way the session serves them (the last queued
     # answer repeats), stopping at the first positive signal.
@@ -2039,3 +2071,100 @@ async def test_gate_probe_attempt_counts(hass, probe, expected_gets, outcome):
     assert session.calls.count("GET /rest/status") == expected_gets
     # Backoff between attempts only (0.25 s x attempt), never after the last one.
     assert sleeps == [0.25 * n for n in range(1, expected_gets)]
+
+
+class _BodyResp:
+    def __init__(self, status: int, text_exc: BaseException | None, body: str = ""):
+        self.status = status
+        self._exc = text_exc
+        self._body = body
+
+    async def text(self) -> str:
+        if self._exc is not None:
+            raise self._exc
+        return self._body
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return False
+
+
+class _BodySession:
+    def __init__(self, resp: _BodyResp) -> None:
+        self._resp = resp
+
+    def get(self, *_a, **_k):
+        return self._resp
+
+
+@pytest.mark.parametrize(
+    ("resp", "expected"),
+    [
+        # An unreadable body is indeterminate, not legacy.
+        (_BodyResp(200, UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad")), None),
+        (_BodyResp(200, ValueError("boom")), None),
+        # Malformed or absurdly nested JSON is "not a JSON object".
+        (_BodyResp(200, None, "{no"), False),
+        (_BodyResp(200, None, "[" * 100000), False),
+        (_BodyResp(200, None, "[]"), False),
+        (_BodyResp(200, None, '{"a": 1}'), True),
+        # Unspecified statuses are indeterminate.
+        (_BodyResp(429, None), None),
+        (_BodyResp(408, None), None),
+        (_BodyResp(307, None), None),
+        (_BodyResp(418, None), None),
+        (_BodyResp(500, None), None),
+        (_BodyResp(404, None), False),
+        (_BodyResp(302, None), False),
+    ],
+)
+async def test_gate_probe_once_classification(resp, expected):
+    from custom_components.apex_fusion.config_flow import (
+        _async_probe_rest_gate_once,
+    )
+
+    result = await _async_probe_rest_gate_once(
+        cast(Any, _BodySession(resp)), base_url="http://x"
+    )
+    assert result is expected
+
+
+async def test_gate_probe_does_not_swallow_cancellation():
+    from custom_components.apex_fusion.config_flow import (
+        _async_probe_rest_gate_once,
+    )
+
+    resp = _BodyResp(200, asyncio.CancelledError())
+    with pytest.raises(asyncio.CancelledError):
+        await _async_probe_rest_gate_once(
+            cast(Any, _BodySession(resp)), base_url="http://x"
+        )
+
+
+async def test_gate_probe_interleaves_requests_and_sleeps_and_never_follows_redirects():
+    events: list[str] = []
+    session = _SpecSession(_routes((404, ""), cgi=(200, _CGI_OK)))
+    original_get = session.get
+
+    def _get(url, **kwargs):
+        events.append("probe")
+        return original_get(url, **kwargs)
+
+    session.get = _get  # type: ignore[method-assign]
+
+    async def _sleep(secs: float):
+        events.append("sleep")
+
+    with patch("custom_components.apex_fusion.config_flow.asyncio.sleep", new=_sleep):
+        from custom_components.apex_fusion.config_flow import _async_probe_rest_gate
+
+        assert (
+            await _async_probe_rest_gate(cast(Any, session), base_url="http://x")
+            is False
+        )
+
+    assert events == ["probe", "sleep", "probe", "sleep", "probe"]
+    assert session.get_kwargs
+    assert all(k.get("allow_redirects") is False for k in session.get_kwargs)

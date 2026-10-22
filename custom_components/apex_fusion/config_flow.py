@@ -300,6 +300,17 @@ def _apply_detected_transport(data: dict[str, Any], info: dict[str, str]) -> Non
 
 _GATE_PROBE_ATTEMPTS = 3
 
+# Definite "this path is not the REST gate" answers.
+_GATE_ABSENT_STATUSES = frozenset(
+    {
+        HTTPStatus.NOT_FOUND,
+        HTTPStatus.BAD_REQUEST,
+        HTTPStatus.METHOD_NOT_ALLOWED,
+        HTTPStatus.NOT_IMPLEMENTED,
+        HTTPStatus.FOUND,
+    }
+)
+
 
 async def _async_probe_rest_gate_once(
     session: aiohttp.ClientSession, *, base_url: str
@@ -307,10 +318,12 @@ async def _async_probe_rest_gate_once(
     """Make one unauthenticated ``GET /rest/status`` and classify the answer.
 
     Returns:
-        True for the positive REST signal (401/403, or a 200 JSON object); False
-        for any other definite HTTP answer (404, 400, 405, 501, a 200 that is not
-        a JSON object, ...); `None` when the signal cannot be read (timeout,
-        connection error, HTTP 5xx other than 501).
+        True for the positive REST signal (401/403, or a 200 JSON object). False
+        only for the definite non-REST answers: 404, 400, 405, 501, 302 (a plain
+        redirect away from the path, which the REST gate never does) and a 200
+        whose body is not a JSON object. `None` (indeterminate, treated as
+        transient) for everything else: a timeout, a connection error, an
+        unreadable body, any other 3xx, 408, 429 and any other 4xx/5xx.
     """
     try:
         async with async_timeout.timeout(10):
@@ -321,21 +334,22 @@ async def _async_probe_rest_gate_once(
             ) as resp:
                 status = resp.status
                 _LOGGER.debug("REST gate probe HTTP %s", status)
-                if (
-                    status >= HTTPStatus.INTERNAL_SERVER_ERROR
-                    and status != HTTPStatus.NOT_IMPLEMENTED
-                ):
-                    return None
                 if status in (HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN):
                     return True
                 if status == HTTPStatus.OK:
-                    body = await resp.text()
+                    try:
+                        body = await resp.text()
+                    except (UnicodeDecodeError, ValueError):
+                        return None
                     try:
                         parsed: Any = json.loads(body) if body else None
-                    except json.JSONDecodeError:
+                    except (ValueError, RecursionError):
+                        # Malformed or absurdly nested JSON: not a JSON object.
                         parsed = None
                     return isinstance(parsed, dict)
-                return False
+                if status in _GATE_ABSENT_STATUSES:
+                    return False
+                return None
     except (asyncio.TimeoutError, aiohttp.ClientError) as err:
         _LOGGER.debug("REST gate probe failed: %s", err)
         return None
@@ -353,8 +367,9 @@ async def _async_probe_rest_gate(
 
     - REST as soon as any attempt returns the positive signal;
     - legacy only if every attempt returned a definite non-REST answer;
-    - otherwise (a timeout, connection error or 5xx in the mix) the signal cannot
-      be trusted and no transport is chosen.
+    - otherwise (any indeterminate answer in the mix: a timeout, connection error,
+      5xx, 408, 429, an unexpected 3xx, an unreadable body) the signal cannot be
+      trusted and no transport is chosen.
 
     Args:
         session: Shared HTTP session.
