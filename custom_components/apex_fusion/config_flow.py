@@ -298,32 +298,19 @@ def _apply_detected_transport(data: dict[str, Any], info: dict[str, str]) -> Non
         data.pop(CONF_LEGACY_FORMAT, None)
 
 
-async def _async_probe_rest_gate(
+_GATE_PROBE_ATTEMPTS = 3
+
+
+async def _async_probe_rest_gate_once(
     session: aiohttp.ClientSession, *, base_url: str
-) -> bool:
-    """Return whether the controller has the ``/rest/`` API.
-
-    Controllers with the REST API gate the whole ``/rest/`` prefix behind a login
-    (401/403 without credentials); anything outside it is a plain 404. The signal
-    must positively identify REST, so one unauthenticated ``GET /rest/status``
-    decides:
-
-    - 401/403, or a 200 with a JSON object: REST is present.
-    - any other definite HTTP answer (404, 400, 405, 501, a 200 that is not a JSON
-      object, ...): REST is absent, so the controller is legacy.
-    - the signal cannot be read (timeout, connection error, HTTP 5xx other than
-      501 Not Implemented): unknown.
-      A 5xx is a transient controller error and must never pin legacy.
-
-    Args:
-        session: Shared HTTP session.
-        base_url: Controller base URL.
+) -> bool | None:
+    """Make one unauthenticated ``GET /rest/status`` and classify the answer.
 
     Returns:
-        True when REST is present, False when it is absent.
-
-    Raises:
-        CannotConnect: If the signal cannot be read.
+        True for the positive REST signal (401/403, or a 200 JSON object); False
+        for any other definite HTTP answer (404, 400, 405, 501, a 200 that is not
+        a JSON object, ...); `None` when the signal cannot be read (timeout,
+        connection error, HTTP 5xx other than 501).
     """
     try:
         async with async_timeout.timeout(10):
@@ -338,7 +325,7 @@ async def _async_probe_rest_gate(
                     status >= HTTPStatus.INTERNAL_SERVER_ERROR
                     and status != HTTPStatus.NOT_IMPLEMENTED
                 ):
-                    raise CannotConnect
+                    return None
                 if status in (HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN):
                     return True
                 if status == HTTPStatus.OK:
@@ -350,7 +337,47 @@ async def _async_probe_rest_gate(
                     return isinstance(parsed, dict)
                 return False
     except (asyncio.TimeoutError, aiohttp.ClientError) as err:
-        raise CannotConnect from err
+        _LOGGER.debug("REST gate probe failed: %s", err)
+        return None
+
+
+async def _async_probe_rest_gate(
+    session: aiohttp.ClientSession, *, base_url: str
+) -> bool:
+    """Return whether the controller has the ``/rest/`` API.
+
+    Controllers with the REST API gate the whole ``/rest/`` prefix behind a login
+    (401/403 without credentials); anything outside it is a plain 404. The signal
+    must positively identify REST. Controllers are flaky on the first attempts, so
+    the probe is tried up to three times with a short backoff:
+
+    - REST as soon as any attempt returns the positive signal;
+    - legacy only if every attempt returned a definite non-REST answer;
+    - otherwise (a timeout, connection error or 5xx in the mix) the signal cannot
+      be trusted and no transport is chosen.
+
+    Args:
+        session: Shared HTTP session.
+        base_url: Controller base URL.
+
+    Returns:
+        True when REST is present, False when it is absent.
+
+    Raises:
+        CannotConnect: If the signal cannot be read reliably.
+    """
+    definite_absent = 0
+    for attempt in range(1, _GATE_PROBE_ATTEMPTS + 1):
+        result = await _async_probe_rest_gate_once(session, base_url=base_url)
+        if result:
+            return True
+        if result is False:
+            definite_absent += 1
+        if attempt < _GATE_PROBE_ATTEMPTS:
+            await asyncio.sleep(0.25 * attempt)
+    if definite_absent == _GATE_PROBE_ATTEMPTS:
+        return False
+    raise CannotConnect
 
 
 async def _async_validate_legacy(

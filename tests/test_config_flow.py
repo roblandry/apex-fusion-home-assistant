@@ -1495,11 +1495,13 @@ class _SpecSession:
 
 
 def _routes(probe, *, login=None, status=None, cgi=None, xml=None):
-    routes: dict[str, list[Any]] = {"GET /rest/status": [probe]}
-    if status is not None:
-        routes["GET /rest/status"] = [probe, status]
+    """Build replay queues; `probe`/`login` may be a list of successive answers."""
+    probes = list(probe) if isinstance(probe, list) else [probe]
+    routes: dict[str, list[Any]] = {
+        "GET /rest/status": probes + ([status] if status is not None else [])
+    }
     if login is not None:
-        routes["POST /rest/login"] = [login]
+        routes["POST /rest/login"] = list(login) if isinstance(login, list) else [login]
     if cgi is not None:
         routes["GET /cgi-bin/status.json"] = [cgi]
     if xml is not None:
@@ -1783,6 +1785,68 @@ _SPEC_ROWS = [
         _routes(aiohttp.ClientError("down"), cgi=(200, _CGI_OK)),
         CannotConnect,
     ),
+    # --- flaky first attempts: the probe is tried up to three times ----------
+    (
+        "probe timeout then 401 -> rest",
+        True,
+        _routes(
+            [asyncio.TimeoutError(), (401, "")], login=_LOGIN_OK, status=_REST_OK_STATUS
+        ),
+        ("rest", None, "SER1"),
+    ),
+    (
+        "probe 404 then 401 -> rest",
+        True,
+        _routes([(404, ""), (401, "")], login=_LOGIN_OK, status=_REST_OK_STATUS),
+        ("rest", None, "SER1"),
+    ),
+    (
+        "probe 503, 404, 403 -> rest",
+        True,
+        _routes(
+            [(503, ""), (404, ""), (403, "")], login=_LOGIN_OK, status=_REST_OK_STATUS
+        ),
+        ("rest", None, "SER1"),
+    ),
+    (
+        "probe 404 x3 -> legacy",
+        False,
+        _routes([(404, ""), (404, ""), (404, "")], cgi=(200, _CGI_OK)),
+        ("legacy", "cgi_json", "SER9"),
+    ),
+    (
+        "probe 404, 404, timeout -> cannot_connect",
+        False,
+        _routes([(404, ""), (404, ""), asyncio.TimeoutError()], cgi=(200, _CGI_OK)),
+        CannotConnect,
+    ),
+    (
+        "probe 500, 404, 404 -> cannot_connect",
+        False,
+        _routes([(500, ""), (404, ""), (404, "")], cgi=(200, _CGI_OK)),
+        CannotConnect,
+    ),
+    (
+        "probe timeout x3 -> cannot_connect",
+        False,
+        _routes([asyncio.TimeoutError()] * 3, cgi=(200, _CGI_OK)),
+        CannotConnect,
+    ),
+    # --- flaky login: a single rejection is never invalid_auth ----------------
+    (
+        "login 401, 401, 200 -> rest",
+        True,
+        _routes(
+            (401, ""), login=[(401, ""), (401, ""), (200, "{}")], status=_REST_OK_STATUS
+        ),
+        ("rest", None, "SER1"),
+    ),
+    (
+        "login 403, 200 -> rest",
+        True,
+        _routes((401, ""), login=[(403, ""), (200, "{}")], status=_REST_OK_STATUS),
+        ("rest", None, "SER1"),
+    ),
 ]
 
 
@@ -1791,7 +1855,7 @@ _SPEC_ROWS = [
     [pytest.param(pw, r, e, id=i) for i, pw, r, e in _SPEC_ROWS],
 )
 async def test_transport_detection_spec_table(hass, has_password, routes, expected):
-    probe = routes["GET /rest/status"][0]
+    probes = list(routes["GET /rest/status"])
     session = _SpecSession(routes)
     data = {CONF_HOST: "1.2.3.4", CONF_USERNAME: "admin"}
     data[CONF_PASSWORD] = "pw" if has_password else ""
@@ -1821,17 +1885,29 @@ async def test_transport_detection_spec_table(hass, has_password, routes, expect
     assert session.calls[0] == "GET /rest/status"
     legacy_calls = [c for c in session.calls if "cgi-bin" in c]
     login_calls = [c for c in session.calls if c == "POST /rest/login"]
-    gate_present = isinstance(probe, tuple) and (
-        probe[0] in (401, 403) or (probe[0] == 200 and probe[1] == "{}")
-    )
-    gate_absent = (
-        isinstance(probe, tuple)
-        and probe[0] not in range(502, 600)
-        and probe[0] != 500
-        and not gate_present
-    )
+
+    def _classify(item: Any) -> bool | None:
+        if not isinstance(item, tuple):
+            return None
+        code, body = item
+        if code in (401, 403):
+            return True
+        if code == 200:
+            return body == "{}"
+        return None if code >= 500 and code != 501 else False
+
+    # Replay the probe attempts the way the session serves them (the last queued
+    # answer repeats), stopping at the first positive signal.
+    attempts: list[bool | None] = []
+    for n in range(3):
+        outcome = _classify(probes[min(n, len(probes) - 1)])
+        attempts.append(outcome)
+        if outcome:
+            break
+    gate_present = True in attempts
+    gate_absent = attempts == [False, False, False]
     if not (gate_present or gate_absent):
-        # Unusable probe: never guess a transport, never probe further.
+        # Unreliable signal: never guess a transport, never probe further.
         assert not legacy_calls
         assert not login_calls
     if gate_absent:
@@ -1840,3 +1916,74 @@ async def test_transport_detection_spec_table(hass, has_password, routes, expect
         assert not legacy_calls  # a REST controller with a password never falls back
     if gate_present and not has_password:
         assert not login_calls  # read-only legacy never logs in
+
+
+async def test_gate_probe_makes_up_to_three_attempts_and_login_up_to_four(hass):
+    # Three definite 404s are needed before the controller is called legacy.
+    legacy = _SpecSession(_routes((404, ""), cgi=(200, _CGI_OK)))
+    # A rejected login is retried 4 times before invalid_auth.
+    rest = _SpecSession(_routes((401, ""), login=(401, "")))
+
+    async def _no_sleep(_secs: float):
+        return None
+
+    data = {CONF_HOST: "1.2.3.4", CONF_USERNAME: "admin", CONF_PASSWORD: "pw"}
+    for session, expect in ((legacy, None), (rest, InvalidAuth)):
+        with (
+            patch(
+                "custom_components.apex_fusion.config_flow.async_get_clientsession",
+                return_value=session,
+            ),
+            patch(
+                "custom_components.apex_fusion.config_flow.asyncio.sleep",
+                new=_no_sleep,
+            ),
+        ):
+            if expect is None:
+                info = await async_validate_input(hass, data)
+                assert info["transport"] == "legacy"
+            else:
+                with pytest.raises(expect):
+                    await async_validate_input(hass, data)
+
+    assert legacy.calls.count("GET /rest/status") == 3
+    assert rest.calls.count("GET /rest/status") == 1  # first attempt was positive
+    assert rest.calls.count("POST /rest/login") >= 4
+
+
+async def test_login_falls_back_to_admin_after_the_supplied_username(hass):
+    posted: list[str] = []
+    session = _SpecSession(_routes((401, ""), status=_REST_OK_STATUS))
+    original = session.post
+
+    def _post(url, **kwargs):
+        posted.append(kwargs["json"]["login"])
+        return original(url, **kwargs)
+
+    session.routes["POST /rest/login"] = [
+        (401, ""),
+        (401, ""),
+        (401, ""),
+        (401, ""),
+        (200, "{}"),
+    ]
+    session.post = _post  # type: ignore[method-assign]
+
+    async def _no_sleep(_secs: float):
+        return None
+
+    with (
+        patch(
+            "custom_components.apex_fusion.config_flow.async_get_clientsession",
+            return_value=session,
+        ),
+        patch("custom_components.apex_fusion.config_flow.asyncio.sleep", new=_no_sleep),
+    ):
+        info = await async_validate_input(
+            hass,
+            {CONF_HOST: "1.2.3.4", CONF_USERNAME: "rob", CONF_PASSWORD: "pw"},
+        )
+
+    assert info["transport"] == "rest"
+    assert posted[:4] == ["rob"] * 4
+    assert posted[4] == "admin"
