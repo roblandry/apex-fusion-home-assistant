@@ -1,39 +1,69 @@
 #!/usr/bin/env python3
-"""Read, bump and validate the project version.
+"""Read, set and validate the project version.
 
 The version lives in ``custom_components/apex_fusion/manifest.json``. To track
 another file, add a ``VersionFile`` entry to ``SOURCES``.
 
-Usage (run from anywhere; paths resolve relative to the repo root):
+Versions are CalVer, ``YYYY.M.D`` with an optional PEP 440 pre-release suffix:
+
+    2026.10.22b1    beta 1 (also aN, rcN, .devN)
+    2026.10.25      stable
+
+Month and day have no leading zeros. Pre-release numbers run 1 to 9: there is
+no ``b10``. When a day's betas run out, roll the date forward and start at
+``b1``. The legacy ``0.x.y`` versions stay readable as the *previous* version,
+so the first move from ``0.1.6`` to CalVer is allowed, but no new ``0.x`` can be
+set.
+
+Usage (paths resolve relative to the repo root):
 
     scripts/bump-version.py --get
     scripts/bump-version.py --check
-    scripts/bump-version.py --set 0.2.0
-    scripts/bump-version.py --bump patch
+    scripts/bump-version.py --set 2026.10.22b1
+    scripts/bump-version.py --next-beta
     scripts/bump-version.py --check-increase 0.1.6
     scripts/bump-version.py --check-changelog
     scripts/bump-version.py --changelog-notes
 
-Versions are ``X.Y.Z``, optionally with a PEP 440 pre-release suffix ``aN``,
-``bN`` or ``rcN`` (``0.2.0b1``, ``0.2.0rc1``). Ordering is
-``0.1.6 < 0.2.0a1 < 0.2.0b1 < 0.2.0b2 < 0.2.0rc1 < 0.2.0``.
 The script never commits, tags or releases. CI does that after the bump merges.
+
+Ordering is also checked with AwesomeVersion (what Home Assistant and HACS use
+to decide "update available"). It does not understand ``bN`` or ``rcN`` on days
+10 to 31, so two releases on the same two-digit day compare as equal there.
+``--check-increase`` therefore requires both orderings to agree.
 """
 
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-_SEMVER_RE = re.compile(
-    r"^(\d+)\.(\d+)\.(\d+)(?:(a|b|rc)(\d+))?$",
+_VERSION_RE = re.compile(
+    r"^(\d+)\.(\d+)\.(\d+)(?:(a|b|rc)(\d+)|\.dev(\d+))?$",
 )
-_PRERELEASE_RANK = {"a": 0, "b": 1, "rc": 2}
+_STAGE_RANK = {"dev": 0, "a": 1, "b": 2, "rc": 3, "": 4}
+_PRERELEASE_CAP = 9
+
+
+class Parsed(NamedTuple):
+    """A version split into its parts."""
+
+    major: int
+    minor: int
+    patch: int
+    stage: str  # "", "a", "b", "rc" or "dev"
+    num: int  # pre-release number, 0 for a final release
+
+
+class VersionError(Exception):
+    """A version is malformed or a transition is not allowed."""
 
 
 @dataclass(frozen=True)
@@ -54,26 +84,126 @@ SOURCES: list[VersionFile] = [
 ]
 
 
+def parse(version: str) -> Parsed | None:
+    """Split *version* into parts, or return None if it has the wrong shape."""
+    match = _VERSION_RE.fullmatch(version)
+    if match is None:
+        return None
+    major, minor, patch, stage, num, dev = match.groups()
+    return Parsed(
+        int(major),
+        int(minor),
+        int(patch),
+        stage or ("dev" if dev is not None else ""),
+        int(num if num is not None else dev if dev is not None else 0),
+    )
+
+
+def _plain(number: str) -> bool:
+    """Return True if *number* is written without leading zeros."""
+    return str(int(number)) == number
+
+
+def calver_problem(version: str) -> str | None:
+    """Return why *version* is not an acceptable new CalVer version, or None."""
+    parsed = parse(version)
+    if parsed is None:
+        return (
+            f"{version!r} is not YYYY.M.D with an optional aN, bN, rcN or .devN "
+            "suffix (for example 2026.10.22b1 or 2026.10.25)"
+        )
+    if any(not _plain(n) for n in re.findall(r"\d+", version)):
+        return f"{version!r} has a leading zero; write 2026.3.5, not 2026.03.05"
+    if parsed.major == 0:
+        return f"{version!r} looks like the old 0.x scheme; new versions are CalVer"
+    try:
+        dt.date(parsed.major, parsed.minor, parsed.patch)
+    except ValueError:
+        return f"{version!r} is not a real calendar date"
+    if parsed.stage in ("a", "b", "rc"):
+        if parsed.num < 1:
+            return f"{version!r}: pre-release numbers start at 1"
+        if parsed.num > _PRERELEASE_CAP:
+            marker = parsed.stage
+            return (
+                f"{version!r} exceeds the {marker}{_PRERELEASE_CAP} cap. Roll the "
+                f"date forward to today and reset to {marker}1 instead"
+            )
+    return None
+
+
+def is_legacy(version: str) -> bool:
+    """Return True for the old plain ``0.x.y`` versions."""
+    parsed = parse(version)
+    return parsed is not None and parsed.major == 0 and parsed.stage == ""
+
+
 def is_valid(version: str) -> bool:
-    """Return True if *version* is plain semver or has a supported suffix."""
-    return _SEMVER_RE.fullmatch(version) is not None
+    """Return True if *version* is CalVer or the legacy ``0.x.y`` form."""
+    return is_legacy(version) or calver_problem(version) is None
 
 
 def is_prerelease(version: str) -> bool:
-    """Return True if *version* carries an a/b/rc suffix."""
-    match = _SEMVER_RE.fullmatch(version)
-    return match is not None and match.group(4) is not None
+    """Return True if *version* carries an a/b/rc/dev suffix."""
+    parsed = parse(version)
+    return parsed is not None and parsed.stage != ""
 
 
-def sort_key(version: str) -> tuple[int, int, int, int, int, int]:
+def sort_key(version: str) -> tuple[int, int, int, int, int]:
     """Return a key that orders valid versions (PEP 440 pre-release order)."""
-    match = _SEMVER_RE.fullmatch(version)
-    if match is None:
-        raise SystemExit(f"error: {version!r} is not a valid version")
-    major, minor, patch, tag, num = match.groups()
-    if tag is None:
-        return (int(major), int(minor), int(patch), 1, 0, 0)
-    return (int(major), int(minor), int(patch), 0, _PRERELEASE_RANK[tag], int(num))
+    parsed = parse(version)
+    if parsed is None:
+        raise VersionError(f"{version!r} is not a valid version")
+    return (*parsed[:3], _STAGE_RANK[parsed.stage], parsed.num)
+
+
+def awesome_greater(new: str, base: str) -> bool | None:
+    """Return whether AwesomeVersion ranks *new* above *base*.
+
+    Returns None when the ``awesomeversion`` package is not installed.
+    """
+    try:
+        from awesomeversion import AwesomeVersion
+    except ImportError:
+        return None
+    return bool(AwesomeVersion(new) > AwesomeVersion(base))
+
+
+def next_beta(current: str, today: dt.date) -> tuple[str, list[str]]:
+    """Return the next beta after *current* for *today*, plus any warnings."""
+    parsed = parse(current)
+    if parsed is None:
+        raise VersionError(f"current version {current!r} is not valid")
+    stamp = f"{today.year}.{today.month}.{today.day}"
+    date = (parsed.major, parsed.minor, parsed.patch)
+    if date < (today.year, today.month, today.day):
+        return f"{stamp}b1", []
+    if date > (today.year, today.month, today.day):
+        raise VersionError(
+            f"current version {current} is dated after today ({stamp}); use --set"
+        )
+    if parsed.stage != "b":
+        raise VersionError(
+            f"{current} already has today's date and is not a beta; "
+            "wait until tomorrow or use --set"
+        )
+    if parsed.num >= _PRERELEASE_CAP:
+        raise VersionError(
+            f"{current} is already b{_PRERELEASE_CAP}, the cap. Roll the date "
+            f"forward (a later day) and start at b1 with --set"
+        )
+    warnings: list[str] = []
+    if today.day >= 10:
+        warnings.append(
+            f"warning: AwesomeVersion cannot rank two releases on the same "
+            f"two-digit day ({stamp}), so HACS may not offer this update and "
+            "CI will reject it. Cut it on a later day."
+        )
+    return f"{stamp}b{parsed.num + 1}", warnings
+
+
+def _today() -> dt.date:
+    return dt.datetime.now(dt.timezone.utc).date()
 
 
 def _read_current(source: VersionFile, root: Path) -> str:
@@ -111,7 +241,8 @@ def synchronized_version(root: Path = REPO_ROOT) -> str | None:
 def changelog_section(version: str, root: Path = REPO_ROOT) -> str | None:
     """Return the CHANGELOG.md body for *version*, or None if there is none.
 
-    Matches ``## 0.2.0`` and ``## v0.2.0`` (optionally followed by more text).
+    Matches ``## 2026.10.22b1`` and ``## v2026.10.22b1`` (optionally followed by
+    more text).
     """
     path = root / "CHANGELOG.md"
     if not path.exists():
@@ -131,13 +262,12 @@ def changelog_section(version: str, root: Path = REPO_ROOT) -> str | None:
     return "\n".join(body).strip() or None
 
 
-def _set_version(version: str, root: Path) -> int:
-    if not is_valid(version):
-        print(
-            f"error: {version!r} is not valid; expected X.Y.Z or X.Y.Z(a|b|rc)N",
-            file=sys.stderr,
-        )
-        return 1
+def _fail(message: str) -> int:
+    print(f"error: {message}", file=sys.stderr)
+    return 1
+
+
+def _apply(version: str, root: Path) -> int:
     changed = [s.path for s in SOURCES if _write_new(s, root, version)]
     if not changed:
         print(f"ok: all sources already on {version}")
@@ -148,24 +278,24 @@ def _set_version(version: str, root: Path) -> int:
     return 0
 
 
-def _bump(part: str, root: Path) -> int:
+def _set_version(version: str, root: Path) -> int:
+    problem = calver_problem(version)
+    if problem is not None:
+        return _fail(problem)
+    return _apply(version, root)
+
+
+def _next_beta(root: Path) -> int:
     current = synchronized_version(root)
     if current is None:
         return 1
-    if is_prerelease(current):
-        print(
-            f"error: current version {current} is a pre-release; use --set",
-            file=sys.stderr,
-        )
-        return 1
-    major, minor, patch = (int(n) for n in current.split("."))
-    if part == "major":
-        new = f"{major + 1}.0.0"
-    elif part == "minor":
-        new = f"{major}.{minor + 1}.0"
-    else:
-        new = f"{major}.{minor}.{patch + 1}"
-    return _set_version(new, root)
+    try:
+        new, warnings = next_beta(current, _today())
+    except VersionError as exc:
+        return _fail(str(exc))
+    for warning in warnings:
+        print(warning, file=sys.stderr)
+    return _apply(new, root)
 
 
 def _check(root: Path) -> int:
@@ -173,8 +303,7 @@ def _check(root: Path) -> int:
     if current is None:
         return 1
     if not is_valid(current):
-        print(f"error: {current!r} is not a valid version", file=sys.stderr)
-        return 1
+        return _fail(calver_problem(current) or f"{current!r} is not valid")
     print(f"ok: {len(SOURCES)} source(s) on {current}")
     return 0
 
@@ -183,16 +312,27 @@ def _check_increase(base: str, root: Path) -> int:
     current = synchronized_version(root)
     if current is None:
         return 1
-    for label, value in (("current", current), ("base", base)):
-        if not is_valid(value):
-            print(f"error: {label} version {value!r} is not valid", file=sys.stderr)
-            return 1
+    problem = calver_problem(current)
+    if problem is not None:
+        return _fail(f"new version: {problem}")
+    if not is_valid(base):
+        return _fail(f"base version {base!r} is not valid")
     if sort_key(current) <= sort_key(base):
+        return _fail(f"version {current} is not greater than base version {base}")
+    ranked = awesome_greater(current, base)
+    if ranked is None:
         print(
-            f"error: version {current} is not greater than base version {base}",
+            "warning: awesomeversion is not installed; skipped the HA/HACS "
+            "ordering check",
             file=sys.stderr,
         )
-        return 1
+    elif not ranked:
+        return _fail(
+            f"AwesomeVersion (used by HA and HACS) does not rank {current} above "
+            f"{base}, so an update would not be offered. Releases on a two-digit "
+            "day (10-31) must not share a date with the previous release; cut "
+            "this one on a later day."
+        )
     print(f"ok: {base} -> {current}")
     return 0
 
@@ -202,12 +342,10 @@ def _check_changelog(root: Path) -> int:
     if current is None:
         return 1
     if changelog_section(current, root) is None:
-        print(
-            f"error: CHANGELOG.md has no section (or an empty one) for {current}; "
-            f"add a '## v{current}' heading with notes",
-            file=sys.stderr,
+        return _fail(
+            f"CHANGELOG.md has no section (or an empty one) for {current}; "
+            f"add a '## v{current}' heading with notes"
         )
-        return 1
     print(f"ok: CHANGELOG.md has a section for {current}")
     return 0
 
@@ -234,14 +372,16 @@ def main(argv: list[str] | None = None) -> int:
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--get", action="store_true", help="Print the version.")
     action.add_argument("--check", action="store_true", help="Fail on drift.")
-    action.add_argument("--set", metavar="X.Y.Z", help="Write a version.")
+    action.add_argument("--set", metavar="VERSION", help="Write a CalVer version.")
     action.add_argument(
-        "--bump", choices=("major", "minor", "patch"), help="Increment the version."
+        "--next-beta",
+        action="store_true",
+        help="Write today's next beta (bN+1 on the same date, else b1).",
     )
     action.add_argument(
         "--check-increase",
         metavar="BASE",
-        help="Fail unless the version is greater than BASE.",
+        help="Fail unless the version is greater than BASE (PEP 440 and AwesomeVersion).",
     )
     action.add_argument(
         "--check-changelog",
@@ -266,8 +406,8 @@ def main(argv: list[str] | None = None) -> int:
         return _check(root)
     if args.set is not None:
         return _set_version(args.set, root)
-    if args.bump is not None:
-        return _bump(args.bump, root)
+    if args.next_beta:
+        return _next_beta(root)
     if args.check_increase is not None:
         return _check_increase(args.check_increase, root)
     if args.check_changelog:
