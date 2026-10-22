@@ -22,16 +22,30 @@ CONF_PASSWORD: Final = "password"
 CONF_NO_LOGIN: Final = "no_login"
 CONF_STATUS_PATH: Final = "status_path"
 
-# Internal bookkeeping persisted on the config entry.
+# Transport used to talk to the controller, detected once by the config flow and
+# stored on the entry. The coordinator only ever polls this transport; an outage
+# makes entities unavailable, it never switches transport.
 #
-# Used to detect when the integration has switched between REST and legacy
-# endpoints so stale entities/devices can be cleaned up.
-CONF_LAST_SOURCE: Final = "last_source"
+# - "rest":   the newer /rest/* API (Apex Jr / full Apex on current firmware).
+# - "legacy": /cgi-bin/status.json and /cgi-bin/status.xml (older controllers).
+CONF_TRANSPORT: Final = "transport"
+TRANSPORT_REST: Final = "rest"
+TRANSPORT_LEGACY: Final = "legacy"
 
-# Tracks whether control entities were enabled during the last setup.
-# Used to purge stale entities when toggling between read-only and authenticated
-# modes (both can be REST).
-CONF_LAST_CONTROL_ENABLED: Final = "last_control_enabled"
+# Legacy controllers expose status.json and status.xml. status.xml keys probes by
+# name (no ``did``), so the working format is pinned too: flipping between the two
+# would create a second set of entities.
+CONF_LEGACY_FORMAT: Final = "legacy_format"
+LEGACY_FORMAT_CGI_JSON: Final = "cgi_json"
+LEGACY_FORMAT_XML: Final = "xml"
+
+# Optional reconfigure-flow checkbox: probe the controller again and replace the
+# stored transport.
+CONF_REDETECT_TRANSPORT: Final = "redetect_transport"
+
+# Written by releases that picked the transport on every poll. Only read to
+# infer the transport of entries created by those releases.
+CONF_LAST_SOURCE: Final = "last_source"
 
 DEFAULT_USERNAME: Final = "admin"
 DEFAULT_PASSWORD: Final = ""

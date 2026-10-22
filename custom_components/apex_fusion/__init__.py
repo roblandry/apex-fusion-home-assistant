@@ -12,22 +12,83 @@ from typing import Any, cast
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 
+from .config_flow import CannotConnect, InvalidAuth, async_validate_input
 from .const import (
     CONF_HOST,
-    CONF_LAST_CONTROL_ENABLED,
-    CONF_LAST_SOURCE,
+    CONF_LEGACY_FORMAT,
     CONF_NO_LOGIN,
     CONF_PASSWORD,
+    CONF_TRANSPORT,
     DOMAIN,
+    LEGACY_FORMAT_CGI_JSON,
+    LEGACY_FORMAT_XML,
     LOGGER_NAME,
     PLATFORMS,
+    TRANSPORT_LEGACY,
+    TRANSPORT_REST,
 )
-from .coordinator import ApexNeptuneDataUpdateCoordinator, clean_hostname_display
+from .coordinator import (
+    ApexNeptuneDataUpdateCoordinator,
+    clean_hostname_display,
+    legacy_format_from_entry_data,
+    transport_from_entry_data,
+)
 
 _LOGGER = logging.getLogger(LOGGER_NAME)
 
 _DOMAIN_LOADED_PLATFORMS_KEY = "_loaded_platforms"
+
+
+async def _async_resolve_transport(hass: HomeAssistant, entry: ConfigEntry) -> str:
+    """Return the entry's pinned transport, detecting and storing it once.
+
+    Entries created before the transport was stored are resolved from the
+    legacy ``last_source`` bookkeeping; if that is missing too, the controller
+    is probed a single time.
+
+    Args:
+        hass: Home Assistant instance.
+        entry: The config entry.
+
+    Returns:
+        ``"rest"`` or ``"legacy"``.
+
+    Raises:
+        ConfigEntryNotReady: If the controller cannot be reached to detect.
+        ConfigEntryAuthFailed: If the credentials are rejected during detection.
+    """
+    transport = transport_from_entry_data(entry.data)
+    if transport is None:
+        try:
+            info = await async_validate_input(hass, dict(entry.data))
+        except InvalidAuth as err:
+            raise ConfigEntryAuthFailed("Invalid auth for Apex controller") from err
+        except CannotConnect as err:
+            raise ConfigEntryNotReady("Cannot detect the Apex transport yet") from err
+        transport = info["transport"]
+        detected_format = info.get("legacy_format")
+        if detected_format:
+            _async_pin_legacy_format(hass, entry, detected_format)
+    if entry.data.get(CONF_TRANSPORT) != transport:
+        hass.config_entries.async_update_entry(
+            entry, data={**entry.data, CONF_TRANSPORT: transport}
+        )
+    return transport
+
+
+def _async_pin_legacy_format(
+    hass: HomeAssistant, entry: ConfigEntry, source: str | None
+) -> None:
+    """Record which legacy status format works, once, so it is never switched."""
+    if legacy_format_from_entry_data(entry.data) is None and source in (
+        LEGACY_FORMAT_CGI_JSON,
+        LEGACY_FORMAT_XML,
+    ):
+        hass.config_entries.async_update_entry(
+            entry, data={**entry.data, CONF_LEGACY_FORMAT: source}
+        )
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -63,83 +124,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception:  # noqa: BLE001
         rest_sid = None
 
+    transport = await _async_resolve_transport(hass, entry)
+
     coordinator = ApexNeptuneDataUpdateCoordinator(
         hass,
         entry=entry,
         rest_sid_seed=rest_sid,
     )
+    # Raises ConfigEntryNotReady when the pinned transport cannot be read, so
+    # Home Assistant retries later instead of switching transport.
     await coordinator.async_config_entry_first_refresh()
 
-    # Detect REST-vs-legacy mode based on the first successful refresh.
     data: dict[str, Any] = coordinator.data or {}
     meta_any: Any = data.get("meta")
     meta = cast(dict[str, Any], meta_any) if isinstance(meta_any, dict) else {}
-    source = str(meta.get("source") or "").strip().lower() or None
-
-    prev_source = (
-        str(entry.data.get(CONF_LAST_SOURCE, "") or "").strip().lower() or None
-    )
 
     read_only = (
         bool(entry.data.get(CONF_NO_LOGIN, False))
         or not str(entry.data.get(CONF_PASSWORD, "") or "").strip()
     )
 
-    rest_active = source == "rest"
+    if transport == TRANSPORT_LEGACY:
+        _async_pin_legacy_format(hass, entry, str(meta.get("source") or "") or None)
+
+    rest_active = transport == TRANSPORT_REST
     control_enabled = rest_active and not read_only
-    prev_control_any: Any = entry.data.get(CONF_LAST_CONTROL_ENABLED)
-    prev_control_enabled = (
-        prev_control_any if isinstance(prev_control_any, bool) else None
-    )
-
-    async def _async_purge_registry_entries() -> None:
-        """Remove stale entities/devices for this config entry.
-
-        This is intentionally blunt: when swapping between REST and legacy data
-        sources, entity unique_ids (and device grouping) can change significantly.
-        Removing registry entries avoids confusing duplicates.
-        """
-
-        try:
-            from homeassistant.helpers import (
-                device_registry as dr,
-                entity_registry as er,
-            )
-
-            ent_reg = er.async_get(hass)
-            reg_entries = er.async_entries_for_config_entry(ent_reg, entry.entry_id)
-            for reg_entry in reg_entries:
-                ent_reg.async_remove(reg_entry.entity_id)
-
-            dev_reg = dr.async_get(hass)
-            dev_entries = dr.async_entries_for_config_entry(dev_reg, entry.entry_id)
-            for dev_entry in dev_entries:
-                dev_reg.async_remove_device(dev_entry.id)
-        except Exception:  # noqa: BLE001
-            _LOGGER.exception(
-                "Failed to purge entity/device registry for entry_id=%s", entry.entry_id
-            )
-
-    purge_reason: str | None = None
-    if prev_source and source and prev_source != source:
-        purge_reason = f"source {prev_source} -> {source}"
-    elif prev_control_enabled is not None and prev_control_enabled != control_enabled:
-        purge_reason = f"control {prev_control_enabled} -> {control_enabled}"
-
-    if purge_reason:
-        _LOGGER.info(
-            "Apex setup mode changed for entry_id=%s (%s); purging stale registry entries",
-            entry.entry_id,
-            purge_reason,
-        )
-        await _async_purge_registry_entries()
-
-    if source and (source != prev_source or prev_control_enabled != control_enabled):
-        new_data = dict(entry.data)
-        if source != prev_source:
-            new_data[CONF_LAST_SOURCE] = source
-        new_data[CONF_LAST_CONTROL_ENABLED] = control_enabled
-        hass.config_entries.async_update_entry(entry, data=new_data)
 
     # Prefer the controller-reported hostname as the tank name.
     host = str(entry.data.get(CONF_HOST, ""))
@@ -190,7 +199,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         Platform.BINARY_SENSOR,
     ]
 
-    # Firmware + network metadata are only available when REST parsing is active.
+    # Firmware + network metadata are only available on the REST transport.
     if rest_active:
         platforms.append(Platform.UPDATE)
 

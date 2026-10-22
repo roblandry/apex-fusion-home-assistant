@@ -22,12 +22,13 @@
       },
       "reconfigure_confirm": {
         "title": "Reconfigure Apex",
-        "description": "Update host and/or credentials for {host}.",
+        "description": "Update host and/or credentials for {host}. The connection type is detected once and then kept; tick the re-detect box only if the controller was upgraded or was set up while it was misbehaving.",
         "data": {
           "host": "Host (IP)",
           "no_login": "No login (read-only)",
           "username": "Username",
-          "password": "Password"
+          "password": "Password",
+          "redetect_transport": "Re-detect connection type (REST or legacy)"
         }
       }
     },
@@ -39,6 +40,7 @@
     },
     "error": {
       "cannot_connect": "Failed to connect",
+      "rate_limited": "The controller is rate limiting logins. Try again in a few minutes.",
       "invalid_auth": "Invalid authentication",
       "unknown": "Unexpected error"
     }

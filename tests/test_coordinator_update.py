@@ -15,10 +15,14 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.apex_fusion.const import (
     CONF_HOST,
+    CONF_LEGACY_FORMAT,
     CONF_NO_LOGIN,
     CONF_PASSWORD,
+    CONF_TRANSPORT,
     CONF_USERNAME,
     DOMAIN,
+    TRANSPORT_LEGACY,
+    TRANSPORT_REST,
 )
 from custom_components.apex_fusion.coordinator import ApexNeptuneDataUpdateCoordinator
 
@@ -112,11 +116,21 @@ class _Session:
 
 
 async def _make_coordinator(
-    hass, *, host: str, username: str = "admin", password: str = "pw"
+    hass,
+    *,
+    host: str,
+    username: str = "admin",
+    password: str = "pw",
+    transport: str = TRANSPORT_REST,
 ):
     entry = MockConfigEntry(
         domain=DOMAIN,
-        data={CONF_HOST: host, CONF_USERNAME: username, CONF_PASSWORD: password},
+        data={
+            CONF_HOST: host,
+            CONF_USERNAME: username,
+            CONF_PASSWORD: password,
+            CONF_TRANSPORT: transport,
+        },
         unique_id=host,
         title=f"Apex ({host})",
     )
@@ -807,12 +821,16 @@ async def test_rest_login_unauthorized_raises_auth_failed(
     session = _Session()
     # no-login status probe first
     session.queue_get(_Resp(401, "{}"))
-    # Login rejected.
-    session.queue_post(_Resp(401, "{}"))
-    # REST rejected -> coordinator falls back to the CGI JSON endpoint, which rejects auth.
-    session.queue_get(_Resp(401, "{}"))
+    # Login rejected on every retry (3 attempts x 4 logins).
+    for _ in range(12):
+        session.queue_post(_Resp(401, "{}"))
+    # Legacy endpoint: must never be polled after a REST auth failure.
+    session.queue_get(_Resp(200, "{}"))
 
     coord = await _make_coordinator(hass, host="1.2.3.4")
+
+    async def _no_sleep(_secs: float):
+        return None
 
     with (
         patch(
@@ -823,9 +841,12 @@ async def test_rest_login_unauthorized_raises_auth_failed(
             "custom_components.apex_fusion.coordinator.async_timeout.timeout",
             return_value=_NullTimeout(),
         ),
+        patch("custom_components.apex_fusion.coordinator.asyncio.sleep", new=_no_sleep),
     ):
         with pytest.raises(ConfigEntryAuthFailed):
             await coord._async_update_data()
+
+    assert len(session._get_queue) == 1
 
 
 async def test_rest_status_unauthorized_falls_back_to_cgi_json(
@@ -857,7 +878,7 @@ async def test_rest_status_unauthorized_falls_back_to_cgi_json(
             await coord._async_update_data()
 
 
-async def test_rest_transient_error_retries_then_falls_back_to_cgi_json(
+async def test_rest_transient_error_retries_then_not_supported_fails_update(
     hass, enable_custom_integrations
 ):
     session = _Session()
@@ -870,13 +891,8 @@ async def test_rest_transient_error_retries_then_falls_back_to_cgi_json(
     # Second REST login attempt: REST not supported -> fallback.
     session.queue_post(_Resp(404, "{}"))
 
-    # CGI JSON endpoint success.
-    session.queue_get(
-        _Resp(
-            200,
-            '{"istat": {"hostname": "apex", "hardware": "Apex", "date": "now", "inputs": [], "outputs": []}}',
-        )
-    )
+    # Legacy endpoint: must never be polled (REST failure is final).
+    session.queue_get(_Resp(200, "{}"))
 
     coord = await _make_coordinator(hass, host="1.2.3.4")
 
@@ -894,19 +910,14 @@ async def test_rest_transient_error_retries_then_falls_back_to_cgi_json(
         ),
         patch("custom_components.apex_fusion.coordinator.asyncio.sleep", new=_no_sleep),
     ):
-        data = await coord._async_update_data()
+        with pytest.raises(UpdateFailed):
+            await coord._async_update_data()
 
-    assert data["meta"]["source"] == "cgi_json"
+    assert len(session._get_queue) == 1
 
 
 async def test_cgi_json_404_falls_back_to_xml(hass, enable_custom_integrations):
     session = _Session()
-
-    # no-login status probe first
-    session.queue_get(_Resp(404, "{}"))
-
-    # REST not supported.
-    session.queue_post(_Resp(404, "{}"))
 
     # CGI JSON endpoint 404
     session.queue_get(_Resp(404, "{}"))
@@ -920,7 +931,7 @@ async def test_cgi_json_404_falls_back_to_xml(hass, enable_custom_integrations):
         )
     )
 
-    coord = await _make_coordinator(hass, host="1.2.3.4")
+    coord = await _make_coordinator(hass, host="192.0.2.4", transport=TRANSPORT_LEGACY)
 
     with (
         patch(
@@ -942,16 +953,10 @@ async def test_cgi_json_unauthorized_raises_auth_failed(
 ):
     session = _Session()
 
-    # no-login status probe first
-    session.queue_get(_Resp(404, "{}"))
-
-    # REST not supported.
-    session.queue_post(_Resp(404, "{}"))
-
     # CGI JSON endpoint 401
     session.queue_get(_Resp(401, "{}"))
 
-    coord = await _make_coordinator(hass, host="1.2.3.4")
+    coord = await _make_coordinator(hass, host="192.0.2.4", transport=TRANSPORT_LEGACY)
 
     with (
         patch(
@@ -1097,18 +1102,14 @@ async def test_rest_exhausts_retries_and_raises_update_failed(
             await coord._async_update_data()
 
 
-async def test_rest_disabled_until_skips_rest_and_falls_back_to_cgi_json(
+async def test_rest_backoff_window_fails_update_without_polling(
     hass, enable_custom_integrations
 ):
     session = _Session()
 
     # REST is disabled; coordinator should skip REST entirely.
-    session.queue_get(
-        _Resp(
-            200,
-            '{"istat": {"hostname": "apex", "hardware": "Apex", "date": "now", "inputs": [], "outputs": []}}',
-        )
-    )
+    # Legacy endpoint: must never be polled (REST failure is final).
+    session.queue_get(_Resp(200, "{}"))
 
     coord = await _make_coordinator(hass, host="1.2.3.4")
     coord._rest_disabled_until = time.monotonic() + 60
@@ -1123,9 +1124,10 @@ async def test_rest_disabled_until_skips_rest_and_falls_back_to_cgi_json(
             return_value=_NullTimeout(),
         ),
     ):
-        data = await coord._async_update_data()
+        with pytest.raises(UpdateFailed):
+            await coord._async_update_data()
 
-    assert data["meta"]["source"] == "cgi_json"
+    assert len(session._get_queue) == 1
 
 
 async def test_rest_cached_sid_skips_login_and_succeeds(
@@ -1189,7 +1191,7 @@ async def test_rest_login_uses_sid_from_json_body(hass, enable_custom_integratio
     assert data["meta"]["source"] == "rest"
 
 
-async def test_rest_rate_limited_on_no_login_probe_falls_back_to_legacy_json(
+async def test_rest_rate_limited_on_no_login_probe_fails_update(
     hass, enable_custom_integrations
 ):
     session = _Session()
@@ -1197,13 +1199,8 @@ async def test_rest_rate_limited_on_no_login_probe_falls_back_to_legacy_json(
     # no-login REST status probe returns 429 with Retry-After
     session.queue_get(_Resp(429, "{}", headers={"Retry-After": "3"}))
 
-    # CGI JSON endpoint success.
-    session.queue_get(
-        _Resp(
-            200,
-            '{"istat": {"hostname": "apex", "hardware": "Apex", "date": "now", "inputs": [], "outputs": []}}',
-        )
-    )
+    # Legacy endpoint: must never be polled (REST failure is final).
+    session.queue_get(_Resp(200, "{}"))
 
     coord = await _make_coordinator(hass, host="1.2.3.4")
 
@@ -1217,12 +1214,13 @@ async def test_rest_rate_limited_on_no_login_probe_falls_back_to_legacy_json(
             return_value=_NullTimeout(),
         ),
     ):
-        data = await coord._async_update_data()
+        with pytest.raises(UpdateFailed):
+            await coord._async_update_data()
 
-    assert data["meta"]["source"] == "cgi_json"
+    assert len(session._get_queue) == 1
 
 
-async def test_rest_rate_limited_on_login_sets_backoff_and_falls_back(
+async def test_rest_rate_limited_on_login_sets_backoff_and_fails_update(
     hass, enable_custom_integrations
 ):
     session = _Session()
@@ -1233,13 +1231,8 @@ async def test_rest_rate_limited_on_login_sets_backoff_and_falls_back(
     # login 429 with invalid Retry-After -> default backoff
     session.queue_post(_Resp(429, "{}", headers={"Retry-After": "bogus"}))
 
-    # CGI JSON endpoint success.
-    session.queue_get(
-        _Resp(
-            200,
-            '{"istat": {"hostname": "apex", "hardware": "Apex", "date": "now", "inputs": [], "outputs": []}}',
-        )
-    )
+    # Legacy endpoint: must never be polled (REST failure is final).
+    session.queue_get(_Resp(200, "{}"))
 
     coord = await _make_coordinator(hass, host="1.2.3.4")
 
@@ -1253,9 +1246,10 @@ async def test_rest_rate_limited_on_login_sets_backoff_and_falls_back(
             return_value=_NullTimeout(),
         ),
     ):
-        data = await coord._async_update_data()
+        with pytest.raises(UpdateFailed):
+            await coord._async_update_data()
 
-    assert data["meta"]["source"] == "cgi_json"
+    assert len(session._get_queue) == 1
     assert coord._rest_disabled_until > time.monotonic()
 
 
@@ -1305,7 +1299,7 @@ async def test_rest_cached_status_path_is_used(hass, enable_custom_integrations)
     assert data["meta"]["source"] == "rest"
 
 
-async def test_rest_rate_limited_without_retry_after_uses_default_backoff(
+async def test_rest_rate_limited_without_retry_after_fails_update(
     hass, enable_custom_integrations
 ):
     session = _Session()
@@ -1313,13 +1307,8 @@ async def test_rest_rate_limited_without_retry_after_uses_default_backoff(
     # no-login REST status probe returns 429 with no Retry-After header
     session.queue_get(_Resp(429, "{}", headers={"Content-Type": "application/json"}))
 
-    # CGI JSON endpoint success.
-    session.queue_get(
-        _Resp(
-            200,
-            '{"istat": {"hostname": "apex", "hardware": "Apex", "date": "now", "inputs": [], "outputs": []}}',
-        )
-    )
+    # Legacy endpoint: must never be polled (REST failure is final).
+    session.queue_get(_Resp(200, "{}"))
 
     coord = await _make_coordinator(hass, host="1.2.3.4")
 
@@ -1333,14 +1322,15 @@ async def test_rest_rate_limited_without_retry_after_uses_default_backoff(
             return_value=_NullTimeout(),
         ),
     ):
-        data = await coord._async_update_data()
+        with pytest.raises(UpdateFailed):
+            await coord._async_update_data()
 
-    assert data["meta"]["source"] == "cgi_json"
+    assert len(session._get_queue) == 1
     # No-login rate limiting currently falls back to CGI JSON without disabling REST.
     assert coord._rest_disabled_until == 0.0
 
 
-async def test_rest_rate_limited_with_blank_retry_after(
+async def test_rest_rate_limited_with_blank_retry_after_fails_update(
     hass, enable_custom_integrations
 ):
     session = _Session()
@@ -1354,13 +1344,8 @@ async def test_rest_rate_limited_with_blank_retry_after(
         )
     )
 
-    # CGI JSON endpoint success.
-    session.queue_get(
-        _Resp(
-            200,
-            '{"istat": {"hostname": "apex", "hardware": "Apex", "date": "now", "inputs": [], "outputs": []}}',
-        )
-    )
+    # Legacy endpoint: must never be polled (REST failure is final).
+    session.queue_get(_Resp(200, "{}"))
 
     coord = await _make_coordinator(hass, host="1.2.3.4")
 
@@ -1374,12 +1359,13 @@ async def test_rest_rate_limited_with_blank_retry_after(
             return_value=_NullTimeout(),
         ),
     ):
-        data = await coord._async_update_data()
+        with pytest.raises(UpdateFailed):
+            await coord._async_update_data()
 
-    assert data["meta"]["source"] == "cgi_json"
+    assert len(session._get_queue) == 1
 
 
-async def test_rest_status_transient_error_falls_back_to_cgi_json(
+async def test_rest_status_transient_error_fails_update(
     hass, enable_custom_integrations
 ):
     session = _Session()
@@ -1387,13 +1373,8 @@ async def test_rest_status_transient_error_falls_back_to_cgi_json(
     # no-login status probe returns transient HTTP error (e.g. 503)
     session.queue_get(_Resp(503, "{}"))
 
-    # CGI JSON endpoint success.
-    session.queue_get(
-        _Resp(
-            200,
-            '{"istat": {"hostname": "apex", "hardware": "Apex", "date": "now", "inputs": [], "outputs": []}}',
-        )
-    )
+    # Legacy endpoint: must never be polled (REST failure is final).
+    session.queue_get(_Resp(200, "{}"))
 
     coord = await _make_coordinator(hass, host="1.2.3.4")
 
@@ -1407,9 +1388,10 @@ async def test_rest_status_transient_error_falls_back_to_cgi_json(
             return_value=_NullTimeout(),
         ),
     ):
-        data = await coord._async_update_data()
+        with pytest.raises(UpdateFailed):
+            await coord._async_update_data()
 
-    assert data["meta"]["source"] == "cgi_json"
+    assert len(session._get_queue) == 1
 
 
 async def test_rest_login_cookie_jar_sid_is_used(hass, enable_custom_integrations):
@@ -1480,7 +1462,7 @@ async def test_rest_login_body_invalid_json_falls_back_to_cgi_json(
             await coord._async_update_data()
 
 
-async def test_rest_cached_sid_status_404_triggers_not_supported_and_fallback(
+async def test_rest_cached_sid_status_404_fails_update(
     hass, enable_custom_integrations
 ):
     session = _Session()
@@ -1488,13 +1470,8 @@ async def test_rest_cached_sid_status_404_triggers_not_supported_and_fallback(
     # Cached SID attempt: status 404 => not supported.
     session.queue_get(_Resp(404, "{}"))
 
-    # CGI JSON endpoint success.
-    session.queue_get(
-        _Resp(
-            200,
-            '{"istat": {"hostname": "apex", "hardware": "Apex", "date": "now", "inputs": [], "outputs": []}}',
-        )
-    )
+    # Legacy endpoint: must never be polled (REST failure is final).
+    session.queue_get(_Resp(200, "{}"))
 
     coord = await _make_coordinator(hass, host="1.2.3.4")
     coord._rest_sid = "abc"
@@ -1509,9 +1486,10 @@ async def test_rest_cached_sid_status_404_triggers_not_supported_and_fallback(
             return_value=_NullTimeout(),
         ),
     ):
-        data = await coord._async_update_data()
+        with pytest.raises(UpdateFailed):
+            await coord._async_update_data()
 
-    assert data["meta"]["source"] == "cgi_json"
+    assert len(session._get_queue) == 1
 
 
 async def test_rest_no_login_success_returns_without_login(
@@ -1579,7 +1557,7 @@ async def test_rest_cached_sid_unauthorized_clears_sid_then_no_login_succeeds(
     assert coord._rest_sid is None
 
 
-async def test_rest_non_transient_http_error_falls_back(
+async def test_rest_non_transient_http_error_fails_update(
     hass, enable_custom_integrations
 ):
     session = _Session()
@@ -1590,13 +1568,8 @@ async def test_rest_non_transient_http_error_falls_back(
     # Login returns non-transient error (400)
     session.queue_post(_Resp(400, "{}"))
 
-    # CGI JSON endpoint success.
-    session.queue_get(
-        _Resp(
-            200,
-            '{"istat": {"hostname": "apex", "hardware": "Apex", "date": "now", "inputs": [], "outputs": []}}',
-        )
-    )
+    # Legacy endpoint: must never be polled (REST failure is final).
+    session.queue_get(_Resp(200, "{}"))
 
     coord = await _make_coordinator(hass, host="1.2.3.4")
 
@@ -1610,9 +1583,10 @@ async def test_rest_non_transient_http_error_falls_back(
             return_value=_NullTimeout(),
         ),
     ):
-        data = await coord._async_update_data()
+        with pytest.raises(UpdateFailed):
+            await coord._async_update_data()
 
-    assert data["meta"]["source"] == "cgi_json"
+    assert len(session._get_queue) == 1
 
 
 async def test_rest_username_candidate_then_admin_is_tried(
@@ -1726,8 +1700,6 @@ async def test_cgi_json_invalid_body_logs_and_falls_back_to_xml(
     session = _Session()
 
     # no password: skip REST
-    # no-login REST status probe: 404 => not supported
-    session.queue_get(_Resp(404, "{}"))
     # CGI JSON endpoint 200 but invalid JSON
     session.queue_get(_Resp(200, "{no"))
 
@@ -1740,7 +1712,9 @@ async def test_cgi_json_invalid_body_logs_and_falls_back_to_xml(
         )
     )
 
-    coord = await _make_coordinator(hass, host="1.2.3.4", password="")
+    coord = await _make_coordinator(
+        hass, host="192.0.2.4", password="", transport=TRANSPORT_LEGACY
+    )
 
     with (
         patch(
@@ -1762,8 +1736,6 @@ async def test_no_login_flag_clears_credentials_and_falls_back(
 ):
     session = _Session()
 
-    # no-login REST status probe: 404 => not supported
-    session.queue_get(_Resp(404, "{}"))
     # CGI JSON endpoint success.
     session.queue_get(
         _Resp(
@@ -1779,6 +1751,7 @@ async def test_no_login_flag_clears_credentials_and_falls_back(
             CONF_USERNAME: "admin",
             CONF_PASSWORD: "pw",
             CONF_NO_LOGIN: True,
+            CONF_TRANSPORT: TRANSPORT_LEGACY,
         },
         unique_id="1.2.3.4",
         title="Apex (1.2.3.4)",
@@ -1801,20 +1774,15 @@ async def test_no_login_flag_clears_credentials_and_falls_back(
     assert data["meta"]["source"] == "cgi_json"
 
 
-async def test_passwordless_rest_status_rate_limited_falls_back_to_cgi_json(
+async def test_passwordless_rest_status_rate_limited_fails_update(
     hass, enable_custom_integrations
 ):
     session = _Session()
 
     # no-login REST status probe: 429 => treat as unavailable
     session.queue_get(_Resp(429, "{}"))
-    # CGI JSON endpoint success.
-    session.queue_get(
-        _Resp(
-            200,
-            '{"istat": {"hostname": "apex", "hardware": "Apex", "date": "now", "inputs": [], "outputs": []}}',
-        )
-    )
+    # Legacy endpoint: must never be polled (REST failure is final).
+    session.queue_get(_Resp(200, "{}"))
 
     coord = await _make_coordinator(hass, host="1.2.3.4", password="")
 
@@ -1828,25 +1796,21 @@ async def test_passwordless_rest_status_rate_limited_falls_back_to_cgi_json(
             return_value=_NullTimeout(),
         ),
     ):
-        data = await coord._async_update_data()
+        with pytest.raises(UpdateFailed):
+            await coord._async_update_data()
 
-    assert data["meta"]["source"] == "cgi_json"
+    assert len(session._get_queue) == 1
 
 
-async def test_passwordless_rest_status_invalid_json_falls_back_to_cgi_json(
+async def test_passwordless_rest_status_invalid_json_fails_update(
     hass, enable_custom_integrations
 ):
     session = _Session()
 
     # no-login REST status probe: 200 but invalid JSON
     session.queue_get(_Resp(200, "{no"))
-    # CGI JSON endpoint success.
-    session.queue_get(
-        _Resp(
-            200,
-            '{"istat": {"hostname": "apex", "hardware": "Apex", "date": "now", "inputs": [], "outputs": []}}',
-        )
-    )
+    # Legacy endpoint: must never be polled (REST failure is final).
+    session.queue_get(_Resp(200, "{}"))
 
     coord = await _make_coordinator(hass, host="1.2.3.4", password="")
 
@@ -1860,9 +1824,10 @@ async def test_passwordless_rest_status_invalid_json_falls_back_to_cgi_json(
             return_value=_NullTimeout(),
         ),
     ):
-        data = await coord._async_update_data()
+        with pytest.raises(UpdateFailed):
+            await coord._async_update_data()
 
-    assert data["meta"]["source"] == "cgi_json"
+    assert len(session._get_queue) == 1
 
 
 async def test_rest_cached_sid_unauthorized_clears_sid_then_login_succeeds(
@@ -1949,8 +1914,6 @@ async def test_rest_no_login_probe_success_does_not_short_circuit_login(
 async def test_xml_unauthorized_raises_auth_failed(hass, enable_custom_integrations):
     session = _Session()
 
-    # no-login REST status probe: 404 => not supported
-    session.queue_get(_Resp(404, "{}"))
     # CGI JSON endpoint: 404 => not supported
     session.queue_get(_Resp(404, "{}"))
     # XML endpoint unauthorized
@@ -1962,7 +1925,9 @@ async def test_xml_unauthorized_raises_auth_failed(hass, enable_custom_integrati
         )
     )
 
-    coord = await _make_coordinator(hass, host="1.2.3.4", password="")
+    coord = await _make_coordinator(
+        hass, host="192.0.2.4", password="", transport=TRANSPORT_LEGACY
+    )
 
     with (
         patch(
@@ -2029,7 +1994,9 @@ async def test_status_xml_unauthorized_logs_and_raises_auth_failed(
         _Resp(401, "<status></status>", headers={"Content-Type": "application/xml"})
     )
 
-    coord = await _make_coordinator(hass, host="1.2.3.4", password="")
+    coord = await _make_coordinator(
+        hass, host="192.0.2.4", password="", transport=TRANSPORT_LEGACY
+    )
 
     with (
         patch(
@@ -2077,3 +2044,210 @@ async def test_status_xml_update_failed_reraises(hass, enable_custom_integration
     ):
         with pytest.raises(UpdateFailed):
             await coord._async_update_data()
+
+
+_CGI_OK = '{"istat": {"hostname": "apex", "hardware": "Apex", "date": "now", "inputs": [], "outputs": []}}'
+_XML_OK = (
+    "<status software='1.0' hardware='Apex'><hostname>apex</hostname>"
+    "<serial>ABC</serial><timezone>UTC</timezone><date>now</date>"
+    "<probes></probes><outlets></outlets></status>"
+)
+
+
+def _patched(session):
+    return (
+        patch(
+            "custom_components.apex_fusion.coordinator.async_get_clientsession",
+            return_value=session,
+        ),
+        patch(
+            "custom_components.apex_fusion.coordinator.async_timeout.timeout",
+            return_value=_NullTimeout(),
+        ),
+    )
+
+
+async def test_update_without_stored_transport_fails(hass, enable_custom_integrations):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "192.0.2.4", CONF_PASSWORD: "pw"},
+        unique_id="192.0.2.4",
+    )
+    entry.add_to_hass(hass)
+    coord = ApexNeptuneDataUpdateCoordinator(hass, entry=cast(Any, entry))
+
+    with pytest.raises(UpdateFailed):
+        await coord._async_update_data()
+
+
+async def test_legacy_transport_never_touches_rest(hass, enable_custom_integrations):
+    session = _Session()
+    session.queue_get(_Resp(200, _CGI_OK))
+    coord = await _make_coordinator(hass, host="192.0.2.4", transport=TRANSPORT_LEGACY)
+
+    p1, p2 = _patched(session)
+    with p1, p2:
+        data = await coord._async_update_data()
+
+    assert data["meta"]["source"] == "cgi_json"
+    assert not session._get_queue
+    assert not session._post_queue  # no /rest/login was attempted
+
+
+async def test_rest_outage_makes_update_fail_then_recovers_on_rest(
+    hass, enable_custom_integrations
+):
+    """An outage fails the update (entities unavailable); recovery stays on REST."""
+    session = _Session()
+    # Poll 1: the controller is down.
+    session.queue_get(_Resp(503, "{}"))
+    # Poll 2: back up; unauthenticated status is readable.
+    session.queue_get(
+        _Resp(200, '{"system": {"serial": "ABC"}, "inputs": [], "outputs": []}')
+    )
+    # Legacy endpoints must stay untouched for the whole sequence.
+    session.queue_get(_Resp(200, _CGI_OK))
+    coord = await _make_coordinator(hass, host="192.0.2.4", password="")
+
+    p1, p2 = _patched(session)
+    with p1, p2:
+        with pytest.raises(UpdateFailed):
+            await coord._async_update_data()
+        data = await coord._async_update_data()
+
+    assert data["meta"]["source"] == "rest"
+    assert len(session._get_queue) == 1
+
+
+async def test_no_login_rest_non_object_payload_fails_update(
+    hass, enable_custom_integrations
+):
+    session = _Session()
+    session.queue_get(_Resp(200, "[]"))
+    coord = await _make_coordinator(hass, host="192.0.2.4", password="")
+
+    p1, p2 = _patched(session)
+    with p1, p2, pytest.raises(UpdateFailed):
+        await coord._async_update_data()
+
+
+async def test_no_login_rest_requiring_login_triggers_reauth(
+    hass, enable_custom_integrations
+):
+    session = _Session()
+    session.queue_get(_Resp(401, "{}"))
+    session.queue_get(_Resp(200, _CGI_OK))
+    coord = await _make_coordinator(hass, host="192.0.2.4", password="")
+
+    p1, p2 = _patched(session)
+    with p1, p2, pytest.raises(ConfigEntryAuthFailed):
+        await coord._async_update_data()
+
+    assert len(session._get_queue) == 1
+
+
+async def test_legacy_xml_parse_error_fails_update(hass, enable_custom_integrations):
+    session = _Session()
+    session.queue_get(_Resp(404, "{}"))
+    session.queue_get(_Resp(200, "<status"))
+    coord = await _make_coordinator(
+        hass, host="192.0.2.4", password="", transport=TRANSPORT_LEGACY
+    )
+
+    p1, p2 = _patched(session)
+    with p1, p2, pytest.raises(UpdateFailed):
+        await coord._async_update_data()
+
+
+async def test_legacy_xml_unexpected_error_fails_update(
+    hass, enable_custom_integrations
+):
+    session = _Session()
+    session.queue_get(_Resp(404, "{}"))
+    session.queue_get(RuntimeError("boom"))
+    coord = await _make_coordinator(
+        hass, host="192.0.2.4", password="", transport=TRANSPORT_LEGACY
+    )
+
+    p1, p2 = _patched(session)
+    with p1, p2, pytest.raises(UpdateFailed):
+        await coord._async_update_data()
+
+
+@pytest.mark.parametrize(
+    ("data", "expected"),
+    [
+        ({"transport": "rest"}, "rest"),
+        ({"transport": " Legacy "}, "legacy"),
+        ({"transport": "bogus", "last_source": "rest"}, "rest"),
+        ({"last_source": "cgi_json"}, "legacy"),
+        ({"last_source": "xml"}, "legacy"),
+        ({"last_source": "other"}, None),
+        ({}, None),
+    ],
+)
+def test_transport_from_entry_data(data, expected):
+    from custom_components.apex_fusion.coordinator import transport_from_entry_data
+
+    assert transport_from_entry_data(data) == expected
+
+
+async def _legacy_coord(hass, fmt):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_HOST: "192.0.2.4",
+            CONF_PASSWORD: "",
+            CONF_TRANSPORT: TRANSPORT_LEGACY,
+            CONF_LEGACY_FORMAT: fmt,
+        },
+        unique_id="192.0.2.4",
+    )
+    entry.add_to_hass(hass)
+    return ApexNeptuneDataUpdateCoordinator(hass, entry=cast(Any, entry))
+
+
+async def test_legacy_pinned_to_status_json_never_switches_to_xml(
+    hass, enable_custom_integrations
+):
+    session = _Session()
+    session.queue_get(_Resp(404, "{}"))
+    session.queue_get(_Resp(200, _XML_OK))  # must stay unused
+    coord = await _legacy_coord(hass, "cgi_json")
+
+    p1, p2 = _patched(session)
+    with p1, p2, pytest.raises(UpdateFailed):
+        await coord._async_update_data()
+
+    assert len(session._get_queue) == 1
+
+
+async def test_legacy_pinned_to_xml_skips_status_json(hass, enable_custom_integrations):
+    session = _Session()
+    session.queue_get(_Resp(200, _XML_OK))
+    session.queue_get(_Resp(200, _CGI_OK))  # must stay unused
+    coord = await _legacy_coord(hass, "xml")
+
+    p1, p2 = _patched(session)
+    with p1, p2:
+        data = await coord._async_update_data()
+
+    assert data["meta"]["source"] == "xml"
+    assert len(session._get_queue) == 1
+
+
+@pytest.mark.parametrize(
+    ("data", "expected"),
+    [
+        ({"legacy_format": "xml"}, "xml"),
+        ({"legacy_format": " CGI_JSON "}, "cgi_json"),
+        ({"legacy_format": "bogus", "last_source": "xml"}, "xml"),
+        ({"last_source": "cgi_json"}, "cgi_json"),
+        ({"last_source": "rest"}, None),
+        ({}, None),
+    ],
+)
+def test_legacy_format_from_entry_data(data, expected):
+    from custom_components.apex_fusion.coordinator import legacy_format_from_entry_data
+
+    assert legacy_format_from_entry_data(data) == expected

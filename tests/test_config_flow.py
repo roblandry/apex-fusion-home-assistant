@@ -2,16 +2,44 @@
 
 from __future__ import annotations
 
-from typing import cast
+import asyncio
+from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
+import aiohttp
+import pytest
 from aiohttp import ClientSession
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
+from yarl import URL
 
-from custom_components.apex_fusion.config_flow import InvalidAuth, _async_validate_input
-from custom_components.apex_fusion.const import CONF_HOST, CONF_NO_LOGIN, DOMAIN
+from custom_components.apex_fusion.config_flow import (
+    CannotConnect,
+    InvalidAuth,
+    RateLimited,
+    async_validate_input,
+)
+from custom_components.apex_fusion.const import (
+    CONF_HOST,
+    CONF_LEGACY_FORMAT,
+    CONF_NO_LOGIN,
+    CONF_REDETECT_TRANSPORT,
+    CONF_TRANSPORT,
+    DOMAIN,
+    TRANSPORT_LEGACY,
+    TRANSPORT_REST,
+)
+
+
+@pytest.fixture
+def rest_gate_present():
+    """Make the unauthenticated REST gate probe report that REST is present."""
+    with patch(
+        "custom_components.apex_fusion.config_flow._async_probe_rest_gate",
+        new=AsyncMock(return_value=True),
+    ):
+        yield
 
 
 def test_normalize_host_variants():
@@ -74,6 +102,7 @@ def test_extract_serial_helpers_cover_branches():
     assert _extract_hostname_from_status_obj({"data": "nope"}) is None
 
 
+@pytest.mark.usefixtures("rest_gate_present")
 async def test_rest_validation_uses_hostname_from_config_when_missing_in_status(
     hass, aioclient_mock
 ):
@@ -88,7 +117,7 @@ async def test_rest_validation_uses_hostname_from_config_when_missing_in_status(
     aioclient_mock.get(
         f"http://{host}/rest/status",
         status=200,
-        text="{}",
+        text='{"system": {"serial": "S"}}',
     )
     aioclient_mock.get(
         f"http://{host}/rest/config",
@@ -96,7 +125,7 @@ async def test_rest_validation_uses_hostname_from_config_when_missing_in_status(
         text='{"nconf": {"hostname": "200XL"}}',
     )
 
-    info = await _async_validate_input(
+    info = await async_validate_input(
         hass,
         {
             CONF_HOST: host,
@@ -119,22 +148,29 @@ async def test_user_flow_creates_entry(hass, enable_custom_integrations):
         None.
     """
     with patch(
-        "custom_components.apex_fusion.config_flow._async_validate_input",
-        new=AsyncMock(return_value={"title": "Apex (1.2.3.4)", "unique_id": "1.2.3.4"}),
+        "custom_components.apex_fusion.config_flow.async_validate_input",
+        new=AsyncMock(
+            return_value={
+                "title": "Apex (192.0.2.4)",
+                "unique_id": "192.0.2.4",
+                "transport": TRANSPORT_REST,
+            }
+        ),
     ):
         result = await hass.config_entries.flow.async_init(
             DOMAIN,
             context={"source": "user"},
             data={
-                CONF_HOST: "1.2.3.4",
+                CONF_HOST: "192.0.2.4",
                 CONF_USERNAME: "admin",
                 CONF_PASSWORD: "pw",
             },
         )
 
     assert result["type"] == FlowResultType.CREATE_ENTRY
-    assert result["title"] == "Apex (1.2.3.4)"
-    assert result["data"][CONF_HOST] == "1.2.3.4"
+    assert result["title"] == "Apex (192.0.2.4)"
+    assert result["data"][CONF_HOST] == "192.0.2.4"
+    assert result["data"][CONF_TRANSPORT] == TRANSPORT_REST
 
 
 async def test_reauth_flow_is_supported_and_updates_entry(
@@ -151,13 +187,14 @@ async def test_reauth_flow_is_supported_and_updates_entry(
     """
     entry = MockConfigEntry(
         domain=DOMAIN,
-        title="Apex (1.2.3.4)",
+        title="Apex (192.0.2.4)",
         data={
-            CONF_HOST: "1.2.3.4",
+            CONF_HOST: "192.0.2.4",
             CONF_USERNAME: "admin",
             CONF_PASSWORD: "old",
+            CONF_TRANSPORT: TRANSPORT_REST,
         },
-        unique_id="1.2.3.4",
+        unique_id="192.0.2.4",
     )
     entry.add_to_hass(hass)
 
@@ -172,8 +209,14 @@ async def test_reauth_flow_is_supported_and_updates_entry(
     assert result["step_id"] == "reauth_confirm"
 
     with patch(
-        "custom_components.apex_fusion.config_flow._async_validate_input",
-        new=AsyncMock(return_value={"title": "Apex (1.2.3.4)", "unique_id": "1.2.3.4"}),
+        "custom_components.apex_fusion.config_flow.async_validate_input",
+        new=AsyncMock(
+            return_value={
+                "title": "Apex (192.0.2.4)",
+                "unique_id": "192.0.2.4",
+                "transport": TRANSPORT_REST,
+            }
+        ),
     ):
         result2 = await hass.config_entries.flow.async_configure(
             result["flow_id"],
@@ -205,13 +248,14 @@ async def test_reconfigure_flow_is_supported_and_updates_entry(
     """
     entry = MockConfigEntry(
         domain=DOMAIN,
-        title="Apex (1.2.3.4)",
+        title="Apex (192.0.2.4)",
         data={
-            CONF_HOST: "1.2.3.4",
+            CONF_HOST: "192.0.2.4",
             CONF_USERNAME: "admin",
             CONF_PASSWORD: "old",
+            CONF_TRANSPORT: TRANSPORT_LEGACY,
         },
-        unique_id="1.2.3.4",
+        unique_id="192.0.2.4",
     )
     entry.add_to_hass(hass)
 
@@ -225,9 +269,13 @@ async def test_reconfigure_flow_is_supported_and_updates_entry(
     assert result["step_id"] == "reconfigure_confirm"
 
     with patch(
-        "custom_components.apex_fusion.config_flow._async_validate_input",
+        "custom_components.apex_fusion.config_flow.async_validate_input",
         new=AsyncMock(
-            return_value={"title": "Apex (apex.local)", "unique_id": "1.2.3.4"}
+            return_value={
+                "title": "Apex (apex.local)",
+                "unique_id": "192.0.2.4",
+                "transport": TRANSPORT_REST,
+            }
         ),
     ):
         result2 = await hass.config_entries.flow.async_configure(
@@ -246,8 +294,12 @@ async def test_reconfigure_flow_is_supported_and_updates_entry(
     assert updated is not None
     assert updated.data[CONF_HOST] == "apex.local"
     assert updated.data[CONF_PASSWORD] == "new"
+    # A plain reconfigure never switches the stored transport.
+    assert updated.data[CONF_TRANSPORT] == TRANSPORT_LEGACY
+    assert CONF_REDETECT_TRANSPORT not in updated.data
 
 
+@pytest.mark.usefixtures("rest_gate_present")
 async def test_rest_validation_accepts_cookie_from_set_cookie(hass, aioclient_mock):
     """REST validation sends connect.sid from Set-Cookie.
 
@@ -269,10 +321,10 @@ async def test_rest_validation_accepts_cookie_from_set_cookie(hass, aioclient_mo
     aioclient_mock.get(
         f"http://{host}/rest/status",
         status=200,
-        text="{}",
+        text='{"system": {"serial": "S"}}',
     )
 
-    await _async_validate_input(
+    await async_validate_input(
         hass,
         {
             CONF_HOST: host,
@@ -292,6 +344,7 @@ async def test_rest_validation_accepts_cookie_from_set_cookie(hass, aioclient_mo
     assert (headers or {}).get("Cookie") == "connect.sid=abc"
 
 
+@pytest.mark.usefixtures("rest_gate_present")
 async def test_rest_validation_accepts_cookie_from_json_body(hass, aioclient_mock):
     """REST validation sends connect.sid from JSON body.
 
@@ -312,10 +365,10 @@ async def test_rest_validation_accepts_cookie_from_json_body(hass, aioclient_moc
     aioclient_mock.get(
         f"http://{host}/rest/status",
         status=200,
-        text="{}",
+        text='{"system": {"serial": "S"}}',
     )
 
-    await _async_validate_input(
+    await async_validate_input(
         hass,
         {
             CONF_HOST: host,
@@ -335,6 +388,7 @@ async def test_rest_validation_accepts_cookie_from_json_body(hass, aioclient_moc
     assert (headers or {}).get("Cookie") == "connect.sid=abc"
 
 
+@pytest.mark.usefixtures("rest_gate_present")
 async def test_rest_validation_401_raises_invalid_auth(hass, aioclient_mock):
     """REST validation raises InvalidAuth when login is unauthorized.
 
@@ -357,7 +411,7 @@ async def test_rest_validation_401_raises_invalid_auth(hass, aioclient_mock):
     )
 
     try:
-        await _async_validate_input(
+        await async_validate_input(
             hass,
             {
                 CONF_HOST: host,
@@ -371,6 +425,7 @@ async def test_rest_validation_401_raises_invalid_auth(hass, aioclient_mock):
         raise AssertionError("Expected InvalidAuth")
 
 
+@pytest.mark.usefixtures("rest_gate_present")
 async def test_rest_validation_includes_admin_candidate_when_username_not_admin(
     hass, aioclient_mock
 ):
@@ -389,7 +444,7 @@ async def test_rest_validation_includes_admin_candidate_when_username_not_admin(
     )
 
     try:
-        await _async_validate_input(
+        await async_validate_input(
             hass,
             {
                 CONF_HOST: host,
@@ -430,7 +485,7 @@ async def test_rest_validation_reraises_invalid_auth_from_rest_block(
     aioclient_mock.get(
         f"http://{host}/rest/status",
         status=200,
-        text="{}",
+        text='{"system": {"serial": "S"}}',
     )
 
     def _boom(*_args, **_kwargs):
@@ -441,7 +496,7 @@ async def test_rest_validation_reraises_invalid_auth_from_rest_block(
         new=_boom,
     ):
         try:
-            await _async_validate_input(
+            await async_validate_input(
                 hass,
                 {
                     CONF_HOST: host,
@@ -457,6 +512,7 @@ async def test_rest_validation_reraises_invalid_auth_from_rest_block(
 
 async def test_xml_validation_success_when_no_password(hass, aioclient_mock):
     host = "1.2.3.4"
+    aioclient_mock.get(f"http://{host}/rest/status", status=404, text="")
     aioclient_mock.get(
         f"http://{host}/cgi-bin/status.json",
         status=404,
@@ -465,10 +521,10 @@ async def test_xml_validation_success_when_no_password(hass, aioclient_mock):
     aioclient_mock.get(
         f"http://{host}/cgi-bin/status.xml",
         status=200,
-        text="<status></status>",
+        text="<status><serial>S</serial></status>",
     )
 
-    info = await _async_validate_input(
+    info = await async_validate_input(
         hass,
         {
             CONF_HOST: host,
@@ -477,102 +533,25 @@ async def test_xml_validation_success_when_no_password(hass, aioclient_mock):
         },
     )
 
-    assert info["unique_id"] == host
+    assert info["unique_id"] == "S"
+    assert info["transport"] == "legacy"
 
 
-async def test_cgi_json_unauthorized_raises_invalid_auth(hass, aioclient_mock):
+async def test_cgi_json_unauthorized_after_rest_404_is_cannot_connect(
+    hass, aioclient_mock
+):
     host = "1.2.3.4"
+    aioclient_mock.get(f"http://{host}/rest/status", status=404, text="")
     aioclient_mock.get(
         f"http://{host}/cgi-bin/status.json",
         status=401,
         text="{}",
     )
 
-    try:
-        await _async_validate_input(
-            hass,
-            {
-                CONF_HOST: host,
-                CONF_USERNAME: "admin",
-                CONF_PASSWORD: "",
-            },
-        )
-    except InvalidAuth:
-        pass
-    else:
-        raise AssertionError("Expected InvalidAuth")
-
-
-async def test_cgi_json_invalid_json_falls_back_to_xml(hass, aioclient_mock):
-    host = "1.2.3.4"
-    aioclient_mock.get(
-        f"http://{host}/cgi-bin/status.json",
-        status=200,
-        text="not-json",
-    )
-    aioclient_mock.get(
-        f"http://{host}/cgi-bin/status.xml",
-        status=200,
-        text="<status></status>",
-    )
-
-    info = await _async_validate_input(
-        hass,
-        {
-            CONF_HOST: host,
-            CONF_USERNAME: "admin",
-            CONF_PASSWORD: "",
-        },
-    )
-
-    assert info["unique_id"] == host
-
-
-async def test_xml_validation_unauthorized_raises_invalid_auth(hass, aioclient_mock):
-    host = "1.2.3.4"
-    aioclient_mock.get(
-        f"http://{host}/cgi-bin/status.json",
-        status=404,
-        text="",
-    )
-    aioclient_mock.get(
-        f"http://{host}/cgi-bin/status.xml",
-        status=401,
-        text="<status></status>",
-    )
+    aioclient_mock.get(f"http://{host}/cgi-bin/status.xml", status=404, text="")
 
     try:
-        await _async_validate_input(
-            hass,
-            {
-                CONF_HOST: host,
-                CONF_USERNAME: "admin",
-                CONF_PASSWORD: "",  # no REST
-            },
-        )
-    except InvalidAuth:
-        pass
-    else:
-        raise AssertionError("Expected InvalidAuth")
-
-
-async def test_xml_validation_parse_error_raises_cannot_connect(hass, aioclient_mock):
-    from custom_components.apex_fusion.config_flow import CannotConnect
-
-    host = "1.2.3.4"
-    aioclient_mock.get(
-        f"http://{host}/cgi-bin/status.json",
-        status=404,
-        text="",
-    )
-    aioclient_mock.get(
-        f"http://{host}/cgi-bin/status.xml",
-        status=200,
-        text="<bad",
-    )
-
-    try:
-        await _async_validate_input(
+        await async_validate_input(
             hass,
             {
                 CONF_HOST: host,
@@ -586,6 +565,96 @@ async def test_xml_validation_parse_error_raises_cannot_connect(hass, aioclient_
         raise AssertionError("Expected CannotConnect")
 
 
+async def test_cgi_json_invalid_json_falls_back_to_xml(hass, aioclient_mock):
+    host = "1.2.3.4"
+    aioclient_mock.get(f"http://{host}/rest/status", status=404, text="")
+    aioclient_mock.get(
+        f"http://{host}/cgi-bin/status.json",
+        status=200,
+        text="not-json",
+    )
+    aioclient_mock.get(
+        f"http://{host}/cgi-bin/status.xml",
+        status=200,
+        text="<status><serial>S</serial></status>",
+    )
+
+    info = await async_validate_input(
+        hass,
+        {
+            CONF_HOST: host,
+            CONF_USERNAME: "admin",
+            CONF_PASSWORD: "",
+        },
+    )
+
+    assert info["unique_id"] == "S"
+    assert info["transport"] == "legacy"
+
+
+async def test_xml_validation_unauthorized_after_rest_404_is_cannot_connect(
+    hass, aioclient_mock
+):
+    host = "1.2.3.4"
+    aioclient_mock.get(f"http://{host}/rest/status", status=404, text="")
+    aioclient_mock.get(
+        f"http://{host}/cgi-bin/status.json",
+        status=404,
+        text="",
+    )
+    aioclient_mock.get(
+        f"http://{host}/cgi-bin/status.xml",
+        status=401,
+        text="<status><serial>S</serial></status>",
+    )
+
+    try:
+        await async_validate_input(
+            hass,
+            {
+                CONF_HOST: host,
+                CONF_USERNAME: "admin",
+                CONF_PASSWORD: "",  # no REST
+            },
+        )
+    except CannotConnect:
+        pass
+    else:
+        raise AssertionError("Expected CannotConnect")
+
+
+async def test_xml_validation_parse_error_raises_cannot_connect(hass, aioclient_mock):
+    from custom_components.apex_fusion.config_flow import CannotConnect
+
+    host = "1.2.3.4"
+    aioclient_mock.get(f"http://{host}/rest/status", status=404, text="")
+    aioclient_mock.get(
+        f"http://{host}/cgi-bin/status.json",
+        status=404,
+        text="",
+    )
+    aioclient_mock.get(
+        f"http://{host}/cgi-bin/status.xml",
+        status=200,
+        text="<bad",
+    )
+
+    try:
+        await async_validate_input(
+            hass,
+            {
+                CONF_HOST: host,
+                CONF_USERNAME: "admin",
+                CONF_PASSWORD: "",
+            },
+        )
+    except CannotConnect:
+        pass
+    else:
+        raise AssertionError("Expected CannotConnect")
+
+
+@pytest.mark.usefixtures("rest_gate_present")
 async def test_rest_login_rejected_for_all_candidates_raises_invalid_auth(
     hass, aioclient_mock
 ):
@@ -607,7 +676,7 @@ async def test_rest_login_rejected_for_all_candidates_raises_invalid_auth(
     )
 
     try:
-        await _async_validate_input(
+        await async_validate_input(
             hass,
             {
                 CONF_HOST: host,
@@ -623,6 +692,7 @@ async def test_rest_login_rejected_for_all_candidates_raises_invalid_auth(
 
 async def test_no_login_ignores_credentials_and_uses_xml(hass, aioclient_mock):
     host = "1.2.3.4"
+    aioclient_mock.get(f"http://{host}/rest/status", status=404, text="")
     # In no-login mode we should not attempt REST at all.
     aioclient_mock.get(
         f"http://{host}/cgi-bin/status.json",
@@ -635,7 +705,7 @@ async def test_no_login_ignores_credentials_and_uses_xml(hass, aioclient_mock):
         text="<status><serial>S1</serial><hostname>Tank</hostname></status>",
     )
 
-    info = await _async_validate_input(
+    info = await async_validate_input(
         hass,
         {
             CONF_HOST: host,
@@ -651,13 +721,14 @@ async def test_no_login_ignores_credentials_and_uses_xml(hass, aioclient_mock):
 
 async def test_cgi_json_validation_success_when_no_password(hass, aioclient_mock):
     host = "1.2.3.4"
+    aioclient_mock.get(f"http://{host}/rest/status", status=404, text="")
     aioclient_mock.get(
         f"http://{host}/cgi-bin/status.json",
         status=200,
-        text='{"system": {"serial": "SER", "hostname": "200XL"}}',
+        text='{"istat": {"serial": "SER", "hostname": "200XL"}}',
     )
 
-    info = await _async_validate_input(
+    info = await async_validate_input(
         hass,
         {
             CONF_HOST: host,
@@ -670,39 +741,8 @@ async def test_cgi_json_validation_success_when_no_password(hass, aioclient_mock
     assert info["title"] == "200XL (1.2.3.4)"
 
 
-async def test_rest_status_404_falls_back_to_xml(hass, aioclient_mock):
-    host = "1.2.3.4"
-
-    aioclient_mock.post(
-        f"http://{host}/rest/login",
-        status=200,
-        text="{}",
-        cookies={"connect.sid": "abc"},
-    )
-    # Correct REST status endpoint returns 404 -> treated as not supported.
-    aioclient_mock.get(
-        f"http://{host}/rest/status",
-        status=404,
-        text="",
-    )
-    aioclient_mock.get(
-        f"http://{host}/cgi-bin/status.xml",
-        status=200,
-        text="<status></status>",
-    )
-
-    info = await _async_validate_input(
-        hass,
-        {
-            CONF_HOST: host,
-            CONF_USERNAME: "admin",
-            CONF_PASSWORD: "pw",
-        },
-    )
-    assert info["unique_id"] == host
-
-
-async def test_rest_status_invalid_json_falls_back_to_xml(hass, aioclient_mock):
+@pytest.mark.usefixtures("rest_gate_present")
+async def test_rest_status_invalid_json_raises_cannot_connect(hass, aioclient_mock):
     host = "1.2.3.4"
 
     aioclient_mock.post(
@@ -719,45 +759,26 @@ async def test_rest_status_invalid_json_falls_back_to_xml(hass, aioclient_mock):
     aioclient_mock.get(
         f"http://{host}/cgi-bin/status.xml",
         status=200,
-        text="<status></status>",
+        text="<status><serial>S</serial></status>",
     )
 
-    info = await _async_validate_input(
-        hass,
-        {
-            CONF_HOST: host,
-            CONF_USERNAME: "admin",
-            CONF_PASSWORD: "pw",
-        },
-    )
-    assert info["unique_id"] == host
+    with pytest.raises(CannotConnect):
+        await async_validate_input(
+            hass,
+            {
+                CONF_HOST: host,
+                CONF_USERNAME: "admin",
+                CONF_PASSWORD: "pw",
+            },
+        )
+    # The legacy endpoint is never consulted.
+    assert not any("cgi-bin" in str(c[1]) for c in aioclient_mock.mock_calls)
 
 
-async def test_rest_404_falls_back_to_xml(hass, aioclient_mock):
-    host = "1.2.3.4"
-    aioclient_mock.post(
-        f"http://{host}/rest/login",
-        status=404,
-        text="{}",
-    )
-    aioclient_mock.get(
-        f"http://{host}/cgi-bin/status.xml",
-        status=200,
-        text="<status></status>",
-    )
-
-    info = await _async_validate_input(
-        hass,
-        {
-            CONF_HOST: host,
-            CONF_USERNAME: "admin",
-            CONF_PASSWORD: "pw",
-        },
-    )
-    assert info["unique_id"] == host
-
-
-async def test_rest_transient_failure_falls_back_to_xml(hass, aioclient_mock):
+@pytest.mark.usefixtures("rest_gate_present")
+async def test_rest_transient_login_failure_raises_cannot_connect_not_legacy(
+    hass, aioclient_mock
+):
     host = "1.2.3.4"
     aioclient_mock.post(
         f"http://{host}/rest/login",
@@ -767,20 +788,23 @@ async def test_rest_transient_failure_falls_back_to_xml(hass, aioclient_mock):
     aioclient_mock.get(
         f"http://{host}/cgi-bin/status.xml",
         status=200,
-        text="<status></status>",
+        text="<status><serial>S</serial></status>",
     )
 
-    info = await _async_validate_input(
-        hass,
-        {
-            CONF_HOST: host,
-            CONF_USERNAME: "admin",
-            CONF_PASSWORD: "pw",
-        },
-    )
-    assert info["unique_id"] == host
+    with pytest.raises(CannotConnect):
+        await async_validate_input(
+            hass,
+            {
+                CONF_HOST: host,
+                CONF_USERNAME: "admin",
+                CONF_PASSWORD: "pw",
+            },
+        )
+    # The legacy endpoint is never consulted.
+    assert not any("cgi-bin" in str(c[1]) for c in aioclient_mock.mock_calls)
 
 
+@pytest.mark.usefixtures("rest_gate_present")
 async def test_rest_status_unauthorized_raises_invalid_auth(hass, aioclient_mock):
     host = "1.2.3.4"
     aioclient_mock.post(
@@ -796,7 +820,7 @@ async def test_rest_status_unauthorized_raises_invalid_auth(hass, aioclient_mock
     )
 
     try:
-        await _async_validate_input(
+        await async_validate_input(
             hass,
             {
                 CONF_HOST: host,
@@ -810,7 +834,10 @@ async def test_rest_status_unauthorized_raises_invalid_auth(hass, aioclient_mock
         raise AssertionError("Expected InvalidAuth")
 
 
-async def test_rest_status_transient_falls_back_to_xml(hass, aioclient_mock):
+@pytest.mark.usefixtures("rest_gate_present")
+async def test_rest_status_transient_raises_cannot_connect_not_legacy(
+    hass, aioclient_mock
+):
     host = "1.2.3.4"
     aioclient_mock.post(
         f"http://{host}/rest/login",
@@ -826,20 +853,23 @@ async def test_rest_status_transient_falls_back_to_xml(hass, aioclient_mock):
     aioclient_mock.get(
         f"http://{host}/cgi-bin/status.xml",
         status=200,
-        text="<status></status>",
+        text="<status><serial>S</serial></status>",
     )
 
-    info = await _async_validate_input(
-        hass,
-        {
-            CONF_HOST: host,
-            CONF_USERNAME: "admin",
-            CONF_PASSWORD: "pw",
-        },
-    )
-    assert info["unique_id"] == host
+    with pytest.raises(CannotConnect):
+        await async_validate_input(
+            hass,
+            {
+                CONF_HOST: host,
+                CONF_USERNAME: "admin",
+                CONF_PASSWORD: "pw",
+            },
+        )
+    # The legacy endpoint is never consulted.
+    assert not any("cgi-bin" in str(c[1]) for c in aioclient_mock.mock_calls)
 
 
+@pytest.mark.usefixtures("rest_gate_present")
 async def test_rest_retries_on_client_error_then_succeeds(
     hass, enable_custom_integrations
 ):
@@ -911,7 +941,7 @@ async def test_rest_retries_on_client_error_then_succeeds(
             return _Resp(200, "{}", cookies={"connect.sid": "abc"})
 
         def get(self, *_args, **_kwargs):
-            return _Resp(200, "{}")
+            return _Resp(200, '{"system": {"serial": "S"}}')
 
     async def _no_sleep(_secs: float):
         return None
@@ -929,7 +959,7 @@ async def test_rest_retries_on_client_error_then_succeeds(
         ),
         patch("custom_components.apex_fusion.config_flow.asyncio.sleep", new=_no_sleep),
     ):
-        info = await config_flow._async_validate_input(
+        info = await config_flow.async_validate_input(
             hass,
             {
                 CONF_HOST: host,
@@ -938,9 +968,10 @@ async def test_rest_retries_on_client_error_then_succeeds(
             },
         )
 
-    assert info["unique_id"] == host
+    assert info["unique_id"] == "S"
 
 
+@pytest.mark.usefixtures("rest_gate_present")
 async def test_rest_login_body_invalid_json_is_ignored(
     hass, enable_custom_integrations
 ):
@@ -997,7 +1028,7 @@ async def test_rest_login_body_invalid_json_is_ignored(
             return _Resp(200, "not-json")
 
         def get(self, *_args, **_kwargs):
-            return _Resp(200, "{}")
+            return _Resp(200, '{"system": {"serial": "S"}}')
 
     host = "1.2.3.4"
     session = _Sess()
@@ -1011,7 +1042,7 @@ async def test_rest_login_body_invalid_json_is_ignored(
             return_value=_NullTimeout(),
         ),
     ):
-        info = await config_flow._async_validate_input(
+        info = await config_flow.async_validate_input(
             hass,
             {
                 CONF_HOST: host,
@@ -1020,9 +1051,10 @@ async def test_rest_login_body_invalid_json_is_ignored(
             },
         )
 
-    assert info["unique_id"] == host
+    assert info["unique_id"] == "S"
 
 
+@pytest.mark.usefixtures("rest_gate_present")
 async def test_rest_validation_retries_login_after_transient_401(
     hass, enable_custom_integrations
 ):
@@ -1092,7 +1124,7 @@ async def test_rest_validation_retries_login_after_transient_401(
             return _Resp(200, "{}", cookies={"connect.sid": "abc"})
 
         def get(self, *_args, **_kwargs):
-            return _Resp(200, "{}")
+            return _Resp(200, '{"system": {"serial": "S"}}')
 
     async def _no_sleep(_secs: float):
         return None
@@ -1111,7 +1143,7 @@ async def test_rest_validation_retries_login_after_transient_401(
         ),
         patch("custom_components.apex_fusion.config_flow.asyncio.sleep", new=_no_sleep),
     ):
-        info = await config_flow._async_validate_input(
+        info = await config_flow.async_validate_input(
             hass,
             {
                 CONF_HOST: host,
@@ -1120,10 +1152,11 @@ async def test_rest_validation_retries_login_after_transient_401(
             },
         )
 
-    assert info["unique_id"] == host
+    assert info["unique_id"] == "S"
 
 
-async def test_rest_exhausts_retry_loop_then_falls_back_to_xml(
+@pytest.mark.usefixtures("rest_gate_present")
+async def test_rest_exhausts_retry_loop_raises_cannot_connect(
     hass, enable_custom_integrations
 ):
     """Cover raising CannotConnect after exhausting REST retry attempts.
@@ -1184,7 +1217,7 @@ async def test_rest_exhausts_retry_loop_then_falls_back_to_xml(
 
         def get(self, *_args, **_kwargs):
             # Called for XML fallback.
-            return _Resp(200, "<status></status>")
+            return _Resp(200, "<status><serial>S</serial></status>")
 
     async def _no_sleep(_secs: float):
         return None
@@ -1202,24 +1235,24 @@ async def test_rest_exhausts_retry_loop_then_falls_back_to_xml(
         ),
         patch("custom_components.apex_fusion.config_flow.asyncio.sleep", new=_no_sleep),
     ):
-        info = await config_flow._async_validate_input(
-            hass,
-            {
-                CONF_HOST: host,
-                CONF_USERNAME: "admin",
-                CONF_PASSWORD: "pw",
-            },
-        )
+        with pytest.raises(config_flow.CannotConnect):
+            await config_flow.async_validate_input(
+                hass,
+                {
+                    CONF_HOST: host,
+                    CONF_USERNAME: "admin",
+                    CONF_PASSWORD: "pw",
+                },
+            )
 
     assert session._calls >= 2
-    assert info["unique_id"] == host
 
 
 async def test_flow_user_step_maps_errors(hass, enable_custom_integrations):
     from custom_components.apex_fusion.config_flow import CannotConnect
 
     with patch(
-        "custom_components.apex_fusion.config_flow._async_validate_input",
+        "custom_components.apex_fusion.config_flow.async_validate_input",
         new=AsyncMock(side_effect=CannotConnect),
     ):
         result = await hass.config_entries.flow.async_init(
@@ -1257,3 +1290,908 @@ async def test_reauth_confirm_aborts_when_entry_missing(
     result = await flow.async_step_reauth_confirm()
     assert result.get("type") == FlowResultType.ABORT
     assert result.get("reason") == "unknown"
+
+
+async def _reconfigure(hass, entry, *, detected: str, redetect: bool | None):
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": "reconfigure", "entry_id": entry.entry_id},
+        data=None,
+    )
+    user_input: dict[str, Any] = {CONF_HOST: "192.0.2.4", CONF_USERNAME: "admin"}
+    if redetect is not None:
+        user_input[CONF_REDETECT_TRANSPORT] = redetect
+    with patch(
+        "custom_components.apex_fusion.config_flow.async_validate_input",
+        new=AsyncMock(
+            return_value={
+                "title": "Apex (192.0.2.4)",
+                "unique_id": "192.0.2.4",
+                "transport": detected,
+            }
+        ),
+    ):
+        return await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input=user_input
+        )
+
+
+@pytest.mark.parametrize(
+    ("stored", "detected", "redetect", "expected"),
+    [
+        (TRANSPORT_LEGACY, TRANSPORT_REST, True, TRANSPORT_REST),
+        (TRANSPORT_REST, TRANSPORT_LEGACY, True, TRANSPORT_LEGACY),
+        (TRANSPORT_LEGACY, TRANSPORT_REST, False, TRANSPORT_LEGACY),
+        (TRANSPORT_REST, TRANSPORT_LEGACY, None, TRANSPORT_REST),
+        (None, TRANSPORT_REST, False, TRANSPORT_REST),
+    ],
+)
+async def test_reconfigure_redetect_option_controls_stored_transport(
+    hass, enable_custom_integrations, stored, detected, redetect, expected
+):
+    data = {CONF_HOST: "192.0.2.4", CONF_USERNAME: "admin", CONF_PASSWORD: "pw"}
+    if stored is not None:
+        data[CONF_TRANSPORT] = stored
+    entry = MockConfigEntry(
+        domain=DOMAIN, title="Apex", data=data, unique_id="192.0.2.4"
+    )
+    entry.add_to_hass(hass)
+
+    result = await _reconfigure(hass, entry, detected=detected, redetect=redetect)
+
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    assert hass.config_entries.async_get_entry(entry.entry_id).data[CONF_TRANSPORT] == (
+        expected
+    )
+
+
+@pytest.mark.usefixtures("rest_gate_present")
+async def test_rest_validation_reports_rest_transport(hass, aioclient_mock):
+    host = "192.0.2.4"
+    aioclient_mock.post(
+        f"http://{host}/rest/login",
+        status=200,
+        text="{}",
+        cookies={"connect.sid": "abc"},
+    )
+    aioclient_mock.get(
+        f"http://{host}/rest/status",
+        status=200,
+        text='{"system": {"serial": "SER1", "hostname": "tank"}}',
+    )
+
+    info = await async_validate_input(
+        hass, {CONF_HOST: host, CONF_USERNAME: "admin", CONF_PASSWORD: "pw"}
+    )
+
+    assert info["transport"] == TRANSPORT_REST
+    assert info["unique_id"] == "SER1"
+
+
+async def test_reconfigure_redetect_updates_legacy_format(
+    hass, enable_custom_integrations
+):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Apex",
+        data={
+            CONF_HOST: "192.0.2.4",
+            CONF_USERNAME: "admin",
+            CONF_PASSWORD: "pw",
+            CONF_TRANSPORT: TRANSPORT_REST,
+        },
+        unique_id="192.0.2.4",
+    )
+    entry.add_to_hass(hass)
+
+    flow = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": "reconfigure", "entry_id": entry.entry_id},
+        data=None,
+    )
+    info = {
+        "title": "Apex (192.0.2.4)",
+        "unique_id": "192.0.2.4",
+        "transport": TRANSPORT_LEGACY,
+        "legacy_format": "cgi_json",
+    }
+    with patch(
+        "custom_components.apex_fusion.config_flow.async_validate_input",
+        new=AsyncMock(return_value=info),
+    ):
+        await hass.config_entries.flow.async_configure(
+            flow["flow_id"],
+            user_input={
+                CONF_HOST: "192.0.2.4",
+                CONF_USERNAME: "admin",
+                CONF_REDETECT_TRANSPORT: True,
+            },
+        )
+    assert entry.data[CONF_TRANSPORT] == TRANSPORT_LEGACY
+    assert entry.data[CONF_LEGACY_FORMAT] == "cgi_json"
+
+    flow = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": "reconfigure", "entry_id": entry.entry_id},
+        data=None,
+    )
+    info = {"title": "Apex", "unique_id": "192.0.2.4", "transport": TRANSPORT_REST}
+    with patch(
+        "custom_components.apex_fusion.config_flow.async_validate_input",
+        new=AsyncMock(return_value=info),
+    ):
+        await hass.config_entries.flow.async_configure(
+            flow["flow_id"],
+            user_input={
+                CONF_HOST: "192.0.2.4",
+                CONF_USERNAME: "admin",
+                CONF_REDETECT_TRANSPORT: True,
+            },
+        )
+    assert entry.data[CONF_TRANSPORT] == TRANSPORT_REST
+    assert CONF_LEGACY_FORMAT not in entry.data
+
+
+_REST_OK = '{"system": {"serial": "SER1", "hostname": "tank"}}'
+_CGI_OK = '{"istat": {"software": "5.16L_AC26", "serial": "SER9", "hostname": "apex"}}'
+_XML_OK = (
+    '<status software="5.1"><serial>SER8</serial><hostname>apex</hostname></status>'
+)
+_OK = (200, "")
+_BAD_BODY = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad")
+
+
+class _SpecResp:
+    def __init__(self, status: int, body: Any = "") -> None:
+        self.status = status
+        self._body = body
+        self.headers: dict[str, str] = {}
+        self.cookies: dict[str, Any] = {}
+
+    async def text(self) -> str:
+        if isinstance(self._body, BaseException):
+            raise self._body
+        return self._body
+
+    def raise_for_status(self) -> None:
+        if self.status >= 400:
+            raise aiohttp.ClientError(f"HTTP {self.status}")
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return False
+
+
+class _SpecSession:
+    """Replays queued responses per (method, path); the last one repeats."""
+
+    def __init__(self, routes: dict[str, list[Any]]) -> None:
+        self.routes = routes
+        self.calls: list[str] = []
+        self.get_kwargs: list[dict[str, Any]] = []
+
+        class _Jar:
+            def filter_cookies(self, *_a, **_k):
+                return {}
+
+            def update_cookies(self, *_a, **_k):
+                return None
+
+        self.cookie_jar = _Jar()
+
+    def _serve(self, method: str, url: str):
+        key = f"{method} {URL(url).path}"
+        self.calls.append(key)
+        queue = self.routes.get(key)
+        if not queue:
+            return _SpecResp(404)
+        item = queue.pop(0) if len(queue) > 1 else queue[0]
+        if isinstance(item, BaseException):
+            raise item
+        return _SpecResp(*item)
+
+    def get(self, url, **kwargs):
+        self.get_kwargs.append(kwargs)
+        return self._serve("GET", url)
+
+    def post(self, url, **_kwargs):
+        return self._serve("POST", url)
+
+
+def _routes(probe, *, login=None, status=None, cgi=None, xml=None):
+    """Build replay queues; `probe`/`login` may be a list of successive answers."""
+    probes = list(probe) if isinstance(probe, list) else [probe]
+    routes: dict[str, list[Any]] = {
+        "GET /rest/status": probes + ([status] if status is not None else [])
+    }
+    if login is not None:
+        routes["POST /rest/login"] = list(login) if isinstance(login, list) else [login]
+    if cgi is not None:
+        routes["GET /cgi-bin/status.json"] = [cgi]
+    if xml is not None:
+        routes["GET /cgi-bin/status.xml"] = [xml]
+    return routes
+
+
+_REST_OK_STATUS = (200, _REST_OK)
+_LOGIN_OK = (200, "{}")
+
+# (id, password?, routes, expected) where expected is
+# (transport, legacy_format|None, unique_id) or an exception type.
+_SPEC_ROWS = [
+    # --- REST gate present + password -> REST, login must succeed -------------
+    (
+        "401+pw+login/status ok",
+        True,
+        _routes((401, ""), login=_LOGIN_OK, status=_REST_OK_STATUS),
+        ("rest", None, "SER1"),
+    ),
+    (
+        "403+pw+login/status ok",
+        True,
+        _routes((403, ""), login=_LOGIN_OK, status=_REST_OK_STATUS),
+        ("rest", None, "SER1"),
+    ),
+    (
+        "200 object+pw+login/status ok",
+        True,
+        _routes((200, "{}"), login=_LOGIN_OK, status=_REST_OK_STATUS),
+        ("rest", None, "SER1"),
+    ),
+    (
+        "401+pw+login rejected",
+        True,
+        _routes((401, ""), login=(401, ""), cgi=(200, _CGI_OK), xml=(200, _XML_OK)),
+        InvalidAuth,
+    ),
+    (
+        "401+pw+login 403",
+        True,
+        _routes((401, ""), login=(403, ""), cgi=(200, _CGI_OK)),
+        InvalidAuth,
+    ),
+    (
+        "401+pw+login 429",
+        True,
+        _routes((401, ""), login=(429, ""), cgi=(200, _CGI_OK)),
+        RateLimited,
+    ),
+    (
+        "401+pw+login 503",
+        True,
+        _routes((401, ""), login=(503, ""), cgi=(200, _CGI_OK)),
+        CannotConnect,
+    ),
+    (
+        "401+pw+login 404",
+        True,
+        _routes((401, ""), login=(404, ""), cgi=(200, _CGI_OK)),
+        CannotConnect,
+    ),
+    (
+        "401+pw+login ok+status empty object",
+        True,
+        _routes((401, ""), login=_LOGIN_OK, status=(200, "{}"), cgi=(200, _CGI_OK)),
+        CannotConnect,
+    ),
+    (
+        "401+pw+login ok+status not json",
+        True,
+        _routes((401, ""), login=_LOGIN_OK, status=(200, "<html>"), cgi=(200, _CGI_OK)),
+        CannotConnect,
+    ),
+    (
+        "401+pw+login ok+status 401",
+        True,
+        _routes((401, ""), login=_LOGIN_OK, status=(401, ""), cgi=(200, _CGI_OK)),
+        InvalidAuth,
+    ),
+    (
+        "401+pw+login ok+status 503",
+        True,
+        _routes((401, ""), login=_LOGIN_OK, status=(503, ""), cgi=(200, _CGI_OK)),
+        CannotConnect,
+    ),
+    (
+        "401+pw+login ok+status 404",
+        True,
+        _routes((401, ""), login=_LOGIN_OK, status=(404, ""), cgi=(200, _CGI_OK)),
+        CannotConnect,
+    ),
+    # --- REST gate present, no password -> read-only legacy -------------------
+    (
+        "401+nopw+cgi ok",
+        False,
+        _routes((401, ""), cgi=(200, _CGI_OK), xml=(200, _XML_OK)),
+        ("legacy", "cgi_json", "SER9"),
+    ),
+    (
+        "403+nopw+cgi bad,xml ok",
+        False,
+        _routes((403, ""), cgi=(200, "{no"), xml=(200, _XML_OK)),
+        ("legacy", "xml", "SER8"),
+    ),
+    (
+        "200 object+nopw+cgi ok",
+        False,
+        _routes((200, "{}"), cgi=(200, _CGI_OK)),
+        ("legacy", "cgi_json", "SER9"),
+    ),
+    ("401+nopw+nothing usable", False, _routes((401, "")), CannotConnect),
+    # --- REST absent -> legacy ------------------------------------------------
+    (
+        "404+nopw+cgi ok",
+        False,
+        _routes((404, ""), cgi=(200, _CGI_OK)),
+        ("legacy", "cgi_json", "SER9"),
+    ),
+    (
+        "404+pw+cgi ok (no login attempted)",
+        True,
+        _routes((404, ""), login=_LOGIN_OK, cgi=(200, _CGI_OK)),
+        ("legacy", "cgi_json", "SER9"),
+    ),
+    (
+        "404+cgi 404,xml ok",
+        False,
+        _routes((404, ""), cgi=(404, ""), xml=(200, _XML_OK)),
+        ("legacy", "xml", "SER8"),
+    ),
+    (
+        "404+cgi 401,xml ok",
+        False,
+        _routes((404, ""), cgi=(401, ""), xml=(200, _XML_OK)),
+        ("legacy", "xml", "SER8"),
+    ),
+    (
+        "404+cgi empty body,xml ok",
+        False,
+        _routes((404, ""), cgi=(200, ""), xml=(200, _XML_OK)),
+        ("legacy", "xml", "SER8"),
+    ),
+    (
+        "404+cgi {},xml ok",
+        False,
+        _routes((404, ""), cgi=(200, "{}"), xml=(200, _XML_OK)),
+        ("legacy", "xml", "SER8"),
+    ),
+    (
+        "404+cgi object without istat,xml ok",
+        False,
+        _routes((404, ""), cgi=(200, '{"a": 1}'), xml=(200, _XML_OK)),
+        ("legacy", "xml", "SER8"),
+    ),
+    (
+        "404+cgi ok object w/ istat only",
+        False,
+        _routes((404, ""), cgi=(200, '{"istat": {}}'), xml=(200, _XML_OK)),
+        ("legacy", "cgi_json", "192.0.2.4"),
+    ),
+    (
+        "404+xml software attr only",
+        False,
+        _routes(
+            (404, ""), cgi=(404, ""), xml=(200, '<status software="5.1"></status>')
+        ),
+        ("legacy", "xml", "192.0.2.4"),
+    ),
+    (
+        "404+xml serial only",
+        False,
+        _routes(
+            (404, ""), cgi=(404, ""), xml=(200, "<status><serial>Z</serial></status>")
+        ),
+        ("legacy", "xml", "Z"),
+    ),
+    (
+        "404+xml without software or serial",
+        False,
+        _routes((404, ""), cgi=(404, ""), xml=(200, "<status></status>")),
+        CannotConnect,
+    ),
+    (
+        "404+xml wrong root",
+        False,
+        _routes((404, ""), cgi=(404, ""), xml=(200, '<foo software="1"/>')),
+        CannotConnect,
+    ),
+    (
+        "404+xml unparseable",
+        False,
+        _routes((404, ""), cgi=(404, ""), xml=(200, "<status")),
+        CannotConnect,
+    ),
+    (
+        "404+cgi 401,xml 401",
+        False,
+        _routes((404, ""), cgi=(401, ""), xml=(401, "")),
+        CannotConnect,
+    ),
+    (
+        "404+cgi 500,xml 500",
+        False,
+        _routes((404, ""), cgi=(500, ""), xml=(500, "")),
+        CannotConnect,
+    ),
+    (
+        "404+cgi timeout,xml timeout",
+        False,
+        _routes((404, ""), cgi=asyncio.TimeoutError(), xml=asyncio.TimeoutError()),
+        CannotConnect,
+    ),
+    # --- probe unusable -> cannot_connect, never guess ------------------------
+    (
+        "probe 500",
+        True,
+        _routes((500, ""), cgi=(200, _CGI_OK), xml=(200, _XML_OK)),
+        CannotConnect,
+    ),
+    ("probe 503", False, _routes((503, ""), cgi=(200, _CGI_OK)), CannotConnect),
+    (
+        "probe 400 -> legacy",
+        False,
+        _routes((400, ""), cgi=(200, _CGI_OK)),
+        ("legacy", "cgi_json", "SER9"),
+    ),
+    (
+        "probe 405 -> legacy",
+        False,
+        _routes((405, ""), cgi=(200, _CGI_OK)),
+        ("legacy", "cgi_json", "SER9"),
+    ),
+    (
+        "probe 501 -> legacy",
+        False,
+        _routes((501, ""), cgi=(200, _CGI_OK)),
+        ("legacy", "cgi_json", "SER9"),
+    ),
+    (
+        "probe 400 + password -> legacy, no login",
+        True,
+        _routes((400, ""), login=_LOGIN_OK, cgi=(200, _CGI_OK)),
+        ("legacy", "cgi_json", "SER9"),
+    ),
+    ("probe 502", False, _routes((502, ""), cgi=(200, _CGI_OK)), CannotConnect),
+    ("probe 504", False, _routes((504, ""), cgi=(200, _CGI_OK)), CannotConnect),
+    (
+        "probe 302 x3 -> cannot_connect",
+        False,
+        _routes((302, ""), cgi=(200, _CGI_OK)),
+        CannotConnect,
+    ),
+    (
+        "unreadable status.json, xml ok -> xml",
+        False,
+        _routes((404, ""), cgi=(200, _BAD_BODY), xml=(200, _XML_OK)),
+        ("legacy", "xml", "SER8"),
+    ),
+    (
+        "unreadable status.json and status.xml -> cannot_connect",
+        False,
+        _routes((404, ""), cgi=(200, _BAD_BODY), xml=(200, _BAD_BODY)),
+        CannotConnect,
+    ),
+    (
+        "unreadable status.xml only -> cannot_connect",
+        False,
+        _routes((404, ""), cgi=(404, ""), xml=(200, _BAD_BODY)),
+        CannotConnect,
+    ),
+    (
+        "deeply nested status.json, xml ok -> xml",
+        False,
+        _routes((404, ""), cgi=(200, "[" * 100000), xml=(200, _XML_OK)),
+        ("legacy", "xml", "SER8"),
+    ),
+    (
+        "probe 200 html -> legacy",
+        False,
+        _routes((200, "<html>"), cgi=(200, _CGI_OK)),
+        ("legacy", "cgi_json", "SER9"),
+    ),
+    (
+        "probe 200 empty -> legacy",
+        False,
+        _routes((200, ""), cgi=(200, _CGI_OK)),
+        ("legacy", "cgi_json", "SER9"),
+    ),
+    (
+        "probe 200 array -> legacy",
+        False,
+        _routes((200, "[]"), cgi=(200, _CGI_OK)),
+        ("legacy", "cgi_json", "SER9"),
+    ),
+    (
+        "probe timeout",
+        True,
+        _routes(asyncio.TimeoutError(), cgi=(200, _CGI_OK)),
+        CannotConnect,
+    ),
+    (
+        "probe connection error",
+        False,
+        _routes(aiohttp.ClientError("down"), cgi=(200, _CGI_OK)),
+        CannotConnect,
+    ),
+    # --- flaky first attempts: the probe is tried up to three times ----------
+    (
+        "probe timeout then 401 -> rest",
+        True,
+        _routes(
+            [asyncio.TimeoutError(), (401, "")], login=_LOGIN_OK, status=_REST_OK_STATUS
+        ),
+        ("rest", None, "SER1"),
+    ),
+    (
+        "probe 404 then 401 -> rest",
+        True,
+        _routes([(404, ""), (401, "")], login=_LOGIN_OK, status=_REST_OK_STATUS),
+        ("rest", None, "SER1"),
+    ),
+    (
+        "probe 503, 404, 403 -> rest",
+        True,
+        _routes(
+            [(503, ""), (404, ""), (403, "")], login=_LOGIN_OK, status=_REST_OK_STATUS
+        ),
+        ("rest", None, "SER1"),
+    ),
+    (
+        "probe 503 then 200 JSON -> rest",
+        True,
+        _routes([(503, ""), (200, "{}")], login=_LOGIN_OK, status=_REST_OK_STATUS),
+        ("rest", None, "SER1"),
+    ),
+    (
+        "probe 404, timeout, 404 -> cannot_connect",
+        False,
+        _routes([(404, ""), asyncio.TimeoutError(), (404, "")], cgi=(200, _CGI_OK)),
+        CannotConnect,
+    ),
+    (
+        "probe 301 x3 -> cannot_connect",
+        False,
+        _routes((301, ""), cgi=(200, _CGI_OK)),
+        CannotConnect,
+    ),
+    (
+        "probe 307 x3 -> cannot_connect",
+        False,
+        _routes((307, ""), cgi=(200, _CGI_OK)),
+        CannotConnect,
+    ),
+    (
+        "probe 308 x3 -> cannot_connect",
+        False,
+        _routes((308, ""), cgi=(200, _CGI_OK)),
+        CannotConnect,
+    ),
+    (
+        "probe 408 x3 -> cannot_connect",
+        False,
+        _routes((408, ""), cgi=(200, _CGI_OK)),
+        CannotConnect,
+    ),
+    (
+        "probe 429 x3 -> cannot_connect",
+        False,
+        _routes((429, ""), cgi=(200, _CGI_OK)),
+        CannotConnect,
+    ),
+    (
+        "probe 404 x3 -> legacy",
+        False,
+        _routes([(404, ""), (404, ""), (404, "")], cgi=(200, _CGI_OK)),
+        ("legacy", "cgi_json", "SER9"),
+    ),
+    (
+        "probe 404, 404, timeout -> cannot_connect",
+        False,
+        _routes([(404, ""), (404, ""), asyncio.TimeoutError()], cgi=(200, _CGI_OK)),
+        CannotConnect,
+    ),
+    (
+        "probe 500, 404, 404 -> cannot_connect",
+        False,
+        _routes([(500, ""), (404, ""), (404, "")], cgi=(200, _CGI_OK)),
+        CannotConnect,
+    ),
+    (
+        "probe timeout x3 -> cannot_connect",
+        False,
+        _routes([asyncio.TimeoutError()] * 3, cgi=(200, _CGI_OK)),
+        CannotConnect,
+    ),
+    # --- flaky login: a single rejection is never invalid_auth ----------------
+    (
+        "login 401, 401, 200 -> rest",
+        True,
+        _routes(
+            (401, ""), login=[(401, ""), (401, ""), (200, "{}")], status=_REST_OK_STATUS
+        ),
+        ("rest", None, "SER1"),
+    ),
+    (
+        "login 403, 200 -> rest",
+        True,
+        _routes((401, ""), login=[(403, ""), (200, "{}")], status=_REST_OK_STATUS),
+        ("rest", None, "SER1"),
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("has_password", "routes", "expected"),
+    [pytest.param(pw, r, e, id=i) for i, pw, r, e in _SPEC_ROWS],
+)
+async def test_transport_detection_spec_table(hass, has_password, routes, expected):
+    probes = list(routes["GET /rest/status"])
+    session = _SpecSession(routes)
+    data = {CONF_HOST: "192.0.2.4", CONF_USERNAME: "admin"}
+    data[CONF_PASSWORD] = "pw" if has_password else ""
+
+    async def _no_sleep(_secs: float):
+        return None
+
+    with (
+        patch(
+            "custom_components.apex_fusion.config_flow.async_get_clientsession",
+            return_value=session,
+        ),
+        patch("custom_components.apex_fusion.config_flow.asyncio.sleep", new=_no_sleep),
+    ):
+        if isinstance(expected, type):
+            with pytest.raises(expected):
+                await async_validate_input(hass, data)
+        else:
+            info = await async_validate_input(hass, data)
+            assert (
+                info["transport"],
+                info.get("legacy_format"),
+                info["unique_id"],
+            ) == expected
+
+    # Exactly one unauthenticated gate probe happens first.
+    assert session.calls[0] == "GET /rest/status"
+    legacy_calls = [c for c in session.calls if "cgi-bin" in c]
+    login_calls = [c for c in session.calls if c == "POST /rest/login"]
+
+    def _classify(item: Any) -> bool | None:
+        if not isinstance(item, tuple):
+            return None
+        code, body = item
+        if code in (401, 403):
+            return True
+        if code == 200:
+            return body == "{}"
+        return False if code in (404, 400, 405, 501) else None
+
+    # Replay the probe attempts the way the session serves them (the last queued
+    # answer repeats), stopping at the first positive signal.
+    attempts: list[bool | None] = []
+    for n in range(3):
+        outcome = _classify(probes[min(n, len(probes) - 1)])
+        attempts.append(outcome)
+        if outcome:
+            break
+    gate_present = True in attempts
+    gate_absent = attempts == [False, False, False]
+    if not (gate_present or gate_absent):
+        # Unreliable signal: never guess a transport, never probe further.
+        assert not legacy_calls
+        assert not login_calls
+    if gate_absent:
+        assert not login_calls  # no REST login on a REST-less controller
+    if gate_present and has_password:
+        assert not legacy_calls  # a REST controller with a password never falls back
+    if gate_present and not has_password:
+        assert not login_calls  # read-only legacy never logs in
+
+
+async def test_gate_probe_makes_up_to_three_attempts_and_login_up_to_four(hass):
+    # Three definite 404s are needed before the controller is called legacy.
+    legacy = _SpecSession(_routes((404, ""), cgi=(200, _CGI_OK)))
+    # A rejected login is retried 4 times before invalid_auth.
+    rest = _SpecSession(_routes((401, ""), login=(401, "")))
+
+    async def _no_sleep(_secs: float):
+        return None
+
+    data = {CONF_HOST: "192.0.2.4", CONF_USERNAME: "admin", CONF_PASSWORD: "pw"}
+    for session, expect in ((legacy, None), (rest, InvalidAuth)):
+        with (
+            patch(
+                "custom_components.apex_fusion.config_flow.async_get_clientsession",
+                return_value=session,
+            ),
+            patch(
+                "custom_components.apex_fusion.config_flow.asyncio.sleep",
+                new=_no_sleep,
+            ),
+        ):
+            if expect is None:
+                info = await async_validate_input(hass, data)
+                assert info["transport"] == "legacy"
+            else:
+                with pytest.raises(expect):
+                    await async_validate_input(hass, data)
+
+    assert legacy.calls.count("GET /rest/status") == 3
+    assert rest.calls.count("GET /rest/status") == 1  # first attempt was positive
+    assert rest.calls.count("POST /rest/login") >= 4
+
+
+async def test_login_falls_back_to_admin_after_the_supplied_username(hass):
+    posted: list[str] = []
+    session = _SpecSession(_routes((401, ""), status=_REST_OK_STATUS))
+    original = session.post
+
+    def _post(url, **kwargs):
+        posted.append(kwargs["json"]["login"])
+        return original(url, **kwargs)
+
+    session.routes["POST /rest/login"] = [
+        (401, ""),
+        (401, ""),
+        (401, ""),
+        (401, ""),
+        (200, "{}"),
+    ]
+    session.post = _post  # type: ignore[method-assign]
+
+    async def _no_sleep(_secs: float):
+        return None
+
+    with (
+        patch(
+            "custom_components.apex_fusion.config_flow.async_get_clientsession",
+            return_value=session,
+        ),
+        patch("custom_components.apex_fusion.config_flow.asyncio.sleep", new=_no_sleep),
+    ):
+        info = await async_validate_input(
+            hass,
+            {CONF_HOST: "192.0.2.4", CONF_USERNAME: "user", CONF_PASSWORD: "pw"},
+        )
+
+    assert info["transport"] == "rest"
+    assert posted[:4] == ["user"] * 4
+    assert posted[4] == "admin"
+
+
+@pytest.mark.parametrize(
+    ("probe", "expected_gets", "outcome"),
+    [
+        ([(401, "")], 1, "rest"),
+        ([(403, "")], 1, "rest"),
+        ([(404, ""), (401, "")], 2, "rest"),
+        ([(404, "")], 3, "legacy"),
+        ([(404, ""), (404, ""), (404, "")], 3, "legacy"),
+        ([(404, ""), asyncio.TimeoutError(), (404, "")], 3, CannotConnect),
+        ([asyncio.TimeoutError()], 3, CannotConnect),
+    ],
+)
+async def test_gate_probe_attempt_counts(hass, probe, expected_gets, outcome):
+    """Stops at the first positive signal; otherwise uses all three attempts."""
+    routes = _routes(probe, cgi=(200, _CGI_OK))
+    session = _SpecSession(routes)
+    sleeps: list[float] = []
+
+    async def _sleep(secs: float):
+        sleeps.append(secs)
+
+    with patch("custom_components.apex_fusion.config_flow.asyncio.sleep", new=_sleep):
+        from custom_components.apex_fusion.config_flow import _async_probe_rest_gate
+
+        if outcome is CannotConnect:
+            with pytest.raises(CannotConnect):
+                await _async_probe_rest_gate(cast(Any, session), base_url="http://x")
+        else:
+            result = await _async_probe_rest_gate(
+                cast(Any, session), base_url="http://x"
+            )
+            assert result is (outcome == "rest")
+
+    assert session.calls.count("GET /rest/status") == expected_gets
+    # Backoff between attempts only (0.25 s x attempt), never after the last one.
+    assert sleeps == [0.25 * n for n in range(1, expected_gets)]
+
+
+class _BodyResp:
+    def __init__(self, status: int, text_exc: BaseException | None, body: str = ""):
+        self.status = status
+        self._exc = text_exc
+        self._body = body
+
+    async def text(self) -> str:
+        if self._exc is not None:
+            raise self._exc
+        return self._body
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return False
+
+
+class _BodySession:
+    def __init__(self, resp: _BodyResp) -> None:
+        self._resp = resp
+
+    def get(self, *_a, **_k):
+        return self._resp
+
+
+@pytest.mark.parametrize(
+    ("resp", "expected"),
+    [
+        # An unreadable body is indeterminate, not legacy.
+        (_BodyResp(200, UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad")), None),
+        (_BodyResp(200, ValueError("boom")), None),
+        # Malformed or absurdly nested JSON is "not a JSON object".
+        (_BodyResp(200, None, "{no"), False),
+        (_BodyResp(200, None, "[" * 100000), False),
+        (_BodyResp(200, None, "[]"), False),
+        (_BodyResp(200, None, '{"a": 1}'), True),
+        # Unspecified statuses are indeterminate.
+        (_BodyResp(429, None), None),
+        (_BodyResp(408, None), None),
+        (_BodyResp(307, None), None),
+        (_BodyResp(418, None), None),
+        (_BodyResp(500, None), None),
+        (_BodyResp(404, None), False),
+        (_BodyResp(302, None), None),
+    ],
+)
+async def test_gate_probe_once_classification(resp, expected):
+    from custom_components.apex_fusion.config_flow import (
+        _async_probe_rest_gate_once,
+    )
+
+    result = await _async_probe_rest_gate_once(
+        cast(Any, _BodySession(resp)), base_url="http://x"
+    )
+    assert result is expected
+
+
+async def test_gate_probe_does_not_swallow_cancellation():
+    from custom_components.apex_fusion.config_flow import (
+        _async_probe_rest_gate_once,
+    )
+
+    resp = _BodyResp(200, asyncio.CancelledError())
+    with pytest.raises(asyncio.CancelledError):
+        await _async_probe_rest_gate_once(
+            cast(Any, _BodySession(resp)), base_url="http://x"
+        )
+
+
+async def test_gate_probe_interleaves_requests_and_sleeps_and_never_follows_redirects():
+    events: list[str] = []
+    session = _SpecSession(_routes((404, ""), cgi=(200, _CGI_OK)))
+    original_get = session.get
+
+    def _get(url, **kwargs):
+        events.append("probe")
+        return original_get(url, **kwargs)
+
+    session.get = _get  # type: ignore[method-assign]
+
+    async def _sleep(secs: float):
+        events.append("sleep")
+
+    with patch("custom_components.apex_fusion.config_flow.asyncio.sleep", new=_sleep):
+        from custom_components.apex_fusion.config_flow import _async_probe_rest_gate
+
+        assert (
+            await _async_probe_rest_gate(cast(Any, session), base_url="http://x")
+            is False
+        )
+
+    assert events == ["probe", "sleep", "probe", "sleep", "probe"]
+    assert session.get_kwargs
+    assert all(k.get("allow_redirects") is False for k in session.get_kwargs)

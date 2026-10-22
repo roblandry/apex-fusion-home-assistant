@@ -27,12 +27,19 @@ from yarl import URL
 
 from .const import (
     CONF_HOST,
+    CONF_LEGACY_FORMAT,
     CONF_NO_LOGIN,
+    CONF_REDETECT_TRANSPORT,
+    CONF_TRANSPORT,
     DEFAULT_PASSWORD,
     DEFAULT_STATUS_PATH,
     DEFAULT_USERNAME,
     DOMAIN,
+    LEGACY_FORMAT_CGI_JSON,
+    LEGACY_FORMAT_XML,
     LOGGER_NAME,
+    TRANSPORT_LEGACY,
+    TRANSPORT_REST,
 )
 from .coordinator import build_base_url, build_status_url, clean_hostname_display
 
@@ -124,6 +131,7 @@ def _step_reconfigure_schema(existing: dict[str, Any]) -> vol.Schema:
             vol.Optional(CONF_NO_LOGIN, default=no_login_default): bool,
             vol.Optional(CONF_USERNAME, default=username_default): str,
             vol.Optional(CONF_PASSWORD): str,
+            vol.Optional(CONF_REDETECT_TRANSPORT, default=False): bool,
         }
     )
 
@@ -211,6 +219,10 @@ class CannotConnect(HomeAssistantError):
     """Error raised when the controller cannot be reached."""
 
 
+class RateLimited(CannotConnect):
+    """Error raised when the controller rate limits the REST login."""
+
+
 class InvalidAuth(HomeAssistantError):
     """Error raised when authentication fails."""
 
@@ -276,20 +288,232 @@ def _extract_serial_from_status_obj(status_obj: dict[str, Any]) -> str | None:
     return None
 
 
-async def _async_validate_input(
+def _apply_detected_transport(data: dict[str, Any], info: dict[str, str]) -> None:
+    """Store the detected transport (and legacy format) in config entry data."""
+    data[CONF_TRANSPORT] = info["transport"]
+    legacy_format = info.get("legacy_format")
+    if legacy_format:
+        data[CONF_LEGACY_FORMAT] = legacy_format
+    else:
+        data.pop(CONF_LEGACY_FORMAT, None)
+
+
+_GATE_PROBE_ATTEMPTS = 3
+
+# Definite "this path is not the REST gate" answers.
+_GATE_ABSENT_STATUSES = frozenset(
+    {
+        HTTPStatus.NOT_FOUND,
+        HTTPStatus.BAD_REQUEST,
+        HTTPStatus.METHOD_NOT_ALLOWED,
+        HTTPStatus.NOT_IMPLEMENTED,
+    }
+)
+
+
+async def _async_probe_rest_gate_once(
+    session: aiohttp.ClientSession, *, base_url: str
+) -> bool | None:
+    """Make one unauthenticated ``GET /rest/status`` and classify the answer.
+
+    Returns:
+        True for the positive REST signal (401/403, or a 200 JSON object). False
+        only for the definite non-REST answers: 404, 400, 405, 501 and a 200
+        whose body is not a JSON object. `None` (indeterminate, treated as
+        transient) for everything else: a timeout, a connection error, an
+        unreadable body, any other 3xx, 408, 429 and any other 4xx/5xx.
+    """
+    try:
+        async with async_timeout.timeout(10):
+            async with session.get(
+                f"{base_url}/rest/status",
+                headers={"Accept": "*/*"},
+                allow_redirects=False,
+            ) as resp:
+                status = resp.status
+                _LOGGER.debug("REST gate probe HTTP %s", status)
+                if status in (HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN):
+                    return True
+                if status == HTTPStatus.OK:
+                    try:
+                        body = await resp.text()
+                    except (UnicodeDecodeError, ValueError):
+                        return None
+                    try:
+                        parsed: Any = json.loads(body) if body else None
+                    except (ValueError, RecursionError):
+                        # Malformed or absurdly nested JSON: not a JSON object.
+                        parsed = None
+                    return isinstance(parsed, dict)
+                if status in _GATE_ABSENT_STATUSES:
+                    return False
+                return None
+    except (asyncio.TimeoutError, aiohttp.ClientError) as err:
+        _LOGGER.debug("REST gate probe failed: %s", err)
+        return None
+
+
+async def _async_probe_rest_gate(
+    session: aiohttp.ClientSession, *, base_url: str
+) -> bool:
+    """Return whether the controller has the ``/rest/`` API.
+
+    Controllers with the REST API gate the whole ``/rest/`` prefix behind a login
+    (401/403 without credentials); anything outside it is a plain 404. The signal
+    must positively identify REST. Controllers are flaky on the first attempts, so
+    the probe is tried up to three times with a short backoff:
+
+    - REST as soon as any attempt returns the positive signal;
+    - legacy only if every attempt returned a definite non-REST answer;
+    - otherwise (any indeterminate answer in the mix: a timeout, connection error,
+      5xx, 408, 429, an unexpected 3xx, an unreadable body) the signal cannot be
+      trusted and no transport is chosen.
+
+    Args:
+        session: Shared HTTP session.
+        base_url: Controller base URL.
+
+    Returns:
+        True when REST is present, False when it is absent.
+
+    Raises:
+        CannotConnect: If the signal cannot be read reliably.
+    """
+    definite_absent = 0
+    for attempt in range(1, _GATE_PROBE_ATTEMPTS + 1):
+        result = await _async_probe_rest_gate_once(session, base_url=base_url)
+        if result:
+            return True
+        if result is False:
+            definite_absent += 1
+        if attempt < _GATE_PROBE_ATTEMPTS:
+            await asyncio.sleep(0.25 * attempt)
+    if definite_absent == _GATE_PROBE_ATTEMPTS:
+        return False
+    raise CannotConnect
+
+
+async def _async_validate_legacy(
+    session: aiohttp.ClientSession,
+    *,
+    base_url: str,
+    host: str,
+    url: str,
+    auth: aiohttp.BasicAuth | None,
+) -> dict[str, str]:
+    """Detect the legacy format: status.json if usable, else status.xml.
+
+    status.json is usable on a 200 with a non-empty JSON object that has an
+    ``istat`` object. status.xml is usable on a 200 whose ``<status>`` root has a
+    ``software`` attribute or a ``<serial>``. The firmware version is only
+    logged, never used to decide.
+
+    Args:
+        session: Shared HTTP session.
+        base_url: Controller base URL.
+        host: Controller host (for the title).
+        url: status.xml URL.
+        auth: Optional basic auth.
+
+    Returns:
+        Validation info for the legacy transport, including `legacy_format`.
+
+    Raises:
+        CannotConnect: If neither endpoint is usable.
+    """
+
+    def _info(
+        serial: str | None, hostname: str | None, legacy_format: str
+    ) -> dict[str, str]:
+        hostname_disp = clean_hostname_display(hostname) if hostname else None
+        title_hostname = hostname_disp or hostname
+        title = f"{title_hostname} ({host})" if title_hostname else f"Apex ({host})"
+        return {
+            "title": title,
+            "unique_id": serial or host,
+            "transport": TRANSPORT_LEGACY,
+            "legacy_format": legacy_format,
+        }
+
+    try:
+        async with async_timeout.timeout(10):
+            async with session.get(
+                f"{base_url}/cgi-bin/status.json", auth=auth
+            ) as resp:
+                _LOGGER.debug("CGI JSON status HTTP %s", resp.status)
+                if resp.status == HTTPStatus.OK:
+                    body = await resp.text()
+                    status_any: Any = json.loads(body) if body else None
+                    if isinstance(status_any, dict) and isinstance(
+                        cast(dict[str, Any], status_any).get("istat"), dict
+                    ):
+                        status_obj = cast(dict[str, Any], status_any)
+                        istat = cast(dict[str, Any], status_obj["istat"])
+                        _LOGGER.debug(
+                            "Legacy transport via status.json (AOS %s)",
+                            istat.get("software"),
+                        )
+                        return _info(
+                            _extract_serial_from_status_obj(status_obj),
+                            _extract_hostname_from_status_obj(status_obj),
+                            LEGACY_FORMAT_CGI_JSON,
+                        )
+    except (
+        asyncio.TimeoutError,
+        aiohttp.ClientError,
+        UnicodeDecodeError,
+        ValueError,  # includes json.JSONDecodeError
+        RecursionError,
+    ) as err:
+        _LOGGER.debug("status.json not usable: %s", err)
+
+    try:
+        async with async_timeout.timeout(10):
+            async with session.get(url, auth=auth) as resp:
+                _LOGGER.debug("XML status HTTP %s", resp.status)
+                if resp.status == HTTPStatus.OK:
+                    root = ET.fromstring(await resp.text())
+                    serial = (root.findtext("./serial") or "").strip() or None
+                    software = (root.attrib.get("software") or "").strip() or None
+                    if root.tag == "status" and (software or serial):
+                        _LOGGER.debug(
+                            "Legacy transport via status.xml (AOS %s)", software
+                        )
+                        return _info(
+                            serial,
+                            (root.findtext("./hostname") or "").strip() or None,
+                            LEGACY_FORMAT_XML,
+                        )
+    except (
+        asyncio.TimeoutError,
+        aiohttp.ClientError,
+        ET.ParseError,
+        UnicodeDecodeError,
+        ValueError,
+        RecursionError,
+    ) as err:
+        _LOGGER.debug("status.xml not usable: %s", err)
+
+    raise CannotConnect
+
+
+async def async_validate_input(
     hass: HomeAssistant, data: dict[str, Any]
 ) -> dict[str, str]:
     """Validate user input.
 
-    Tries REST first (if a password is provided and no-login is disabled),
-    then falls back to the unauthenticated CGI/ XML status endpoints.
+    The transport is decided by one signal: whether the ``/rest/`` API gate is
+    present (see `_async_probe_rest_gate`). A REST controller with a password
+    uses REST and must log in (no fallback to legacy); a REST controller without
+    a password, or a controller without REST, uses the legacy endpoints.
 
     Args:
         hass: Home Assistant instance.
         data: User-provided config data.
 
     Returns:
-        A dict containing a display title and unique_id.
+        A dict containing a display title, unique_id and the detected
+        transport (`rest` or `legacy`).
 
     Raises:
         CannotConnect: If the device cannot be reached.
@@ -321,9 +545,9 @@ async def _async_validate_input(
     if password:
         auth = aiohttp.BasicAuth(username or "admin", password)
 
-    # Prefer REST when credentials are provided; fall back to unauthenticated
-    # endpoints when no credentials are configured.
-    if password:
+    rest_present = await _async_probe_rest_gate(session, base_url=base_url)
+
+    if rest_present and password:
         try:
             login_url = f"{base_url}/rest/login"
             accept_headers = {
@@ -379,6 +603,8 @@ async def _async_validate_input(
                                     )
                                     if resp.status == 404:
                                         raise KeyError("rest_not_supported")
+                                    if resp.status == 429:
+                                        raise RateLimited
                                     if resp.status in (401, 403):
                                         # Some controllers intermittently reject the first login.
                                         if login_attempt < max_login_attempts:
@@ -487,6 +713,8 @@ async def _async_validate_input(
                         if isinstance(status_any, dict)
                         else {}
                     )
+                    if not status_obj:
+                        raise CannotConnect
                     serial = _extract_serial_from_status_obj(status_obj)
 
                     # Prefer the controller-reported hostname for tank naming.
@@ -529,7 +757,11 @@ async def _async_validate_input(
                         if title_hostname
                         else f"Apex ({host})"
                     )
-                    return {"title": title, "unique_id": serial or host}
+                    return {
+                        "title": title,
+                        "unique_id": serial or host,
+                        "transport": TRANSPORT_REST,
+                    }
 
                 except (asyncio.TimeoutError, aiohttp.ClientError) as err:
                     _LOGGER.debug("Transient REST validation error: %s", err)
@@ -538,77 +770,19 @@ async def _async_validate_input(
 
             raise CannotConnect
 
-        except KeyError:
-            # No REST, try XML.
-            _LOGGER.debug("REST not supported; falling back to status.xml")
-            pass
-        except InvalidAuth:
-            raise
-        except (CannotConnect, json.JSONDecodeError) as err:
-            # REST flaky? Try XML before failing.
-            _LOGGER.debug("REST validation failed; trying status.xml: %s", err)
+        except KeyError as err:
+            # The gate said REST exists but the endpoints are missing: unusable.
+            raise CannotConnect from err
+        except json.JSONDecodeError as err:
+            raise CannotConnect from err
 
-    # If no password is configured, prefer the CGI JSON endpoint first.
-    if not password:
-        json_url = f"{base_url}/cgi-bin/status.json"
-        try:
-            _LOGGER.debug("Trying CGI JSON validation: %s", json_url)
-            async with async_timeout.timeout(10):
-                async with session.get(json_url) as resp:
-                    _LOGGER.debug("CGI JSON status HTTP %s", resp.status)
-                    if resp.status in (401, 403):
-                        raise InvalidAuth
-                    if resp.status == 404:
-                        raise FileNotFoundError
-                    resp.raise_for_status()
-                    body = await resp.text()
-
-            status_any: Any = json.loads(body) if body else {}
-            status_obj: dict[str, Any] = (
-                cast(dict[str, Any], status_any) if isinstance(status_any, dict) else {}
-            )
-
-            serial = _extract_serial_from_status_obj(status_obj)
-            hostname = _extract_hostname_from_status_obj(status_obj)
-            hostname_disp = clean_hostname_display(hostname) if hostname else None
-            title_hostname = hostname_disp or hostname
-            title = f"{title_hostname} ({host})" if title_hostname else f"Apex ({host})"
-            return {"title": title, "unique_id": serial or host}
-
-        except FileNotFoundError:
-            _LOGGER.debug("CGI status.json not found; trying status.xml")
-        except InvalidAuth:
-            raise
-        except (
-            asyncio.TimeoutError,
-            aiohttp.ClientError,
-            json.JSONDecodeError,
-        ) as err:
-            _LOGGER.debug("CGI JSON validation failed; trying status.xml: %s", err)
-
-    try:
-        _LOGGER.debug("Trying XML validation: %s", url)
-        async with async_timeout.timeout(10):
-            async with session.get(url, auth=auth) as resp:
-                _LOGGER.debug("XML status HTTP %s", resp.status)
-                if resp.status in (401, 403):
-                    raise InvalidAuth
-                resp.raise_for_status()
-                body = await resp.text()
-
-        root = ET.fromstring(body)
-        serial = (root.findtext("./serial") or "").strip() or None
-        hostname = (root.findtext("./hostname") or "").strip() or None
-
-    except InvalidAuth:
-        raise
-    except (asyncio.TimeoutError, aiohttp.ClientError, ET.ParseError) as err:
-        raise CannotConnect from err
-
-    hostname_disp = clean_hostname_display(hostname) if hostname else None
-    title_hostname = hostname_disp or hostname
-    title = f"{title_hostname} ({host})" if title_hostname else f"Apex ({host})"
-    return {"title": title, "unique_id": serial or host}
+    # Legacy: a controller without REST, or a REST controller with no password
+    # (read-only; REST and controls need a password).
+    if rest_present:
+        _LOGGER.debug("REST present but no password supplied; using read-only legacy")
+    return await _async_validate_legacy(
+        session, base_url=base_url, host=host, url=url, auth=auth
+    )
 
 
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -644,7 +818,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 normalized_input[CONF_PASSWORD] = ""
 
             try:
-                info = await _async_validate_input(self.hass, normalized_input)
+                info = await async_validate_input(self.hass, normalized_input)
+            except RateLimited:
+                errors["base"] = "rate_limited"
             except CannotConnect:
                 errors["base"] = "cannot_connect"
             except InvalidAuth:
@@ -653,6 +829,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 _LOGGER.exception("Unexpected exception")
                 errors["base"] = "unknown"
             else:
+                _apply_detected_transport(normalized_input, info)
                 await self.async_set_unique_id(info["unique_id"])
 
                 # If this controller is already configured, treat running the flow
@@ -727,7 +904,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 merged[CONF_USERNAME] = DEFAULT_USERNAME
                 merged[CONF_PASSWORD] = ""
             try:
-                await _async_validate_input(self.hass, merged)
+                await async_validate_input(self.hass, merged)
+            except RateLimited:
+                errors["base"] = "rate_limited"
             except CannotConnect:
                 errors["base"] = "cannot_connect"
             except InvalidAuth:
@@ -797,6 +976,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             merged: dict[str, Any] = dict(entry.data)
             merged.update(user_input)
+            redetect = bool(merged.pop(CONF_REDETECT_TRANSPORT, False))
 
             merged.setdefault(CONF_NO_LOGIN, bool(entry.data.get(CONF_NO_LOGIN, False)))
             if bool(merged.get(CONF_NO_LOGIN)):
@@ -814,7 +994,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     )
 
             try:
-                info = await _async_validate_input(self.hass, merged)
+                info = await async_validate_input(self.hass, merged)
+            except RateLimited:
+                errors["base"] = "rate_limited"
             except CannotConnect:
                 errors["base"] = "cannot_connect"
             except InvalidAuth:
@@ -846,6 +1028,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     self.hass.config_entries.async_update_entry(
                         entry, unique_id=info["unique_id"]
                     )
+
+                # The transport is only replaced on request (or when none is
+                # stored yet), so a reconfigure never silently switches it.
+                if redetect or not entry.data.get(CONF_TRANSPORT):
+                    _apply_detected_transport(merged, info)
 
                 self.hass.config_entries.async_update_entry(
                     entry, data=merged, title=info["title"]
