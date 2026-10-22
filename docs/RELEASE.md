@@ -13,10 +13,11 @@ Versions are calendar based: `YYYY.M.D`, with an optional pre-release suffix.
 | `2026.10.25`        | stable, cut on 25 Oct 2026 | normal release |
 
 - Month and day have no leading zeros (`2026.3.5`, not `2026.03.05`).
-- Use the date you cut the release (UTC).
+- Use the date you cut the release (UTC). A version dated after today (UTC) is
+  rejected; an earlier date is fine, so a PR opened yesterday can merge today.
 - Suffixes are `-alpha.N`, `-beta.N` and `-rc.N`. Betas are the normal choice.
   They order as `-alpha.1 < -beta.1 < -beta.2 < -rc.1 < stable`.
-- **Never go past `beta.9`.** If a day's betas run out, roll the date forward to
+- **Never go past `beta.9`** (the cap is for betas; alpha and rc numbers are not capped). If a day's betas run out, roll the date forward to
   today and start again at `beta.1`. The tooling refuses `beta.10` and higher.
 - The dash form is deliberate: Home Assistant and HACS rank it correctly on
   every day of the month, which they do not for a compact `b1` suffix.
@@ -58,7 +59,8 @@ The version is stored in `custom_components/apex_fusion/manifest.json`, and
    PEP 440 and AwesomeVersion ordering, the latter being what Home Assistant
    and HACS use) and that the changelog section exists.
 
-4. Merge it. The **Release on version bump** workflow then creates the annotated
+4. Merge it. The **Release on version bump** workflow then, if this push
+   raised the version, creates the annotated
    tag `v2026.10.25` and a GitHub release, marked as a pre-release for any
    suffixed version. The release notes are the `CHANGELOG.md` section. If there
    is none, notes are generated from the Conventional Commit subjects since the
@@ -81,7 +83,9 @@ this repository in HACS. Everyone else stays on the latest stable release.
 
 ## If the release did not happen
 
-There is no manual release workflow. If the automatic release was missed or
+There is no manual release workflow. The automatic release only happens when a
+push to `main` raises the version, so re-running it or pushing an unrelated
+change will not release anything. If the automatic release was missed or
 failed, check the run under **Actions**, then tag and publish by hand from the
 merged commit on `main`:
 

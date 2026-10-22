@@ -23,6 +23,7 @@ def _load() -> ModuleType:
 
 
 bv = _load()
+_real_today = bv._today
 
 
 def _make_root(tmp_path: Path, version: str = "0.1.6", changelog: str = "") -> Path:
@@ -45,6 +46,12 @@ def _today(monkeypatch: pytest.MonkeyPatch, year: int, month: int, day: int) -> 
     monkeypatch.setattr(bv, "_today", lambda: dt.date(year, month, day))
 
 
+@pytest.fixture(autouse=True)
+def _far_future_today(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin "today" late enough that fixture versions are never future-dated."""
+    _today(monkeypatch, 2030, 1, 1)
+
+
 def test_repo_sources_are_in_sync() -> None:
     version = bv.synchronized_version()
     assert version is not None
@@ -61,6 +68,9 @@ def test_repo_sources_are_in_sync() -> None:
         "2026.3.4-alpha.1",
         "2028.2.29",
         "2026.10.22-beta.9",
+        "2026.10.22-alpha.10",  # the cap is for betas only
+        "2026.10.22-rc.10",
+        "2026.10.22-rc.99",
     ],
 )
 def test_valid_new_versions(version: str) -> None:
@@ -81,7 +91,7 @@ def test_valid_new_versions(version: str) -> None:
         "2026.10.22-beta.",
         "2026.10.22-beta.0",
         "2026.10.22-beta.10",
-        "2026.10.22-rc.10",
+        "2026.10.22-pre.1",
         "2026.10.22-beta.01",
         "2026.10.22-foo.1",
         "2026.10.22-beta.1.2",
@@ -333,14 +343,35 @@ def test_next_beta_and_stable_cli(
     assert "after today" in capsys.readouterr().err
 
 
-def test_next_beta_cli_uses_utc_date(tmp_path: Path) -> None:
-    today = dt.datetime.now(dt.timezone.utc).date()
-    root = _make_root(tmp_path)
-    assert _run(root, "--next-beta") == 0
-    version = bv.synchronized_version(root)
-    # Allow for the clock crossing midnight UTC between the two reads.
-    options = {f"{d.year}.{d.month}.{d.day}-beta.1" for d in (today, bv._today())}
-    assert version in options
+def test_today_is_the_utc_date() -> None:
+    before = dt.datetime.now(dt.timezone.utc).date()
+    value = _real_today()
+    after = dt.datetime.now(dt.timezone.utc).date()
+    assert before <= value <= after
+
+
+def test_future_problem() -> None:
+    today = dt.date(2026, 10, 22)
+    assert bv.future_problem("2026.10.23", today) is not None
+    assert bv.future_problem("2026.10.23-beta.1", today) is not None
+    assert bv.future_problem("2027.1.1", today) is not None
+    assert bv.future_problem("2026.10.22", today) is None
+    assert bv.future_problem("2026.10.21-beta.3", today) is None
+    assert bv.future_problem("garbage", today) is None
+
+
+def test_check_increase_rejects_future_dates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _today(monkeypatch, 2026, 10, 22)
+    tomorrow = _make_root(tmp_path / "a", "2026.10.23-beta.1")
+    assert _run(tomorrow, "--check-increase", "0.1.6") == 1
+    far = _make_root(tmp_path / "b", "2030.1.1-beta.1")
+    assert _run(far, "--check-increase", "0.1.6") == 1
+    today = _make_root(tmp_path / "c", "2026.10.22-beta.1")
+    assert _run(today, "--check-increase", "0.1.6") == 0
+    yesterday = _make_root(tmp_path / "d", "2026.10.21")
+    assert _run(yesterday, "--check-increase", "0.1.6") == 0
 
 
 def test_check_increase_ordering(tmp_path: Path) -> None:

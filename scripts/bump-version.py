@@ -140,15 +140,24 @@ def calver_problem(version: str) -> str | None:
         dt.date(parsed.major, parsed.minor, parsed.patch)
     except ValueError:
         return f"{version!r} is not a real calendar date"
-    if parsed.stage:
-        if parsed.num < 1:
-            return f"{version!r}: pre-release numbers start at 1"
-        if parsed.num > _PRERELEASE_CAP:
-            return (
-                f"{version!r} exceeds the {parsed.stage}.{_PRERELEASE_CAP} cap. "
-                f"Roll the date forward to today and reset to {parsed.stage}.1 "
-                "instead"
-            )
+    if parsed.stage and parsed.num < 1:
+        return f"{version!r}: pre-release numbers start at 1"
+    if parsed.stage == "beta" and parsed.num > _PRERELEASE_CAP:
+        return (
+            f"{version!r} exceeds the beta.{_PRERELEASE_CAP} cap. Roll the date "
+            "forward to today and reset to beta.1 instead"
+        )
+    return None
+
+
+def future_problem(version: str, today: dt.date) -> str | None:
+    """Return why *version* is dated after *today*, or None."""
+    parsed = parse(version)
+    if parsed is not None and _date(parsed) > (today.year, today.month, today.day):
+        return (
+            f"{version} is dated after today ({_stamp(today)}, UTC); "
+            "use today's date or earlier"
+        )
     return None
 
 
@@ -351,7 +360,7 @@ def _check_increase(base: str, root: Path) -> int:
     current = synchronized_version(root)
     if current is None:
         return 1
-    problem = calver_problem(current)
+    problem = calver_problem(current) or future_problem(current, _today())
     if problem is not None:
         return _fail(f"new version: {problem}")
     if not is_valid(base):
