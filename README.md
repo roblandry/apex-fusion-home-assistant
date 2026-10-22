@@ -30,8 +30,14 @@ Contributors are welcome (issues, testing feedback, and PRs).
 > This integration validates REST logins: if you provide credentials and they’re wrong, setup/update
 > fails (no silent fallback).
 >
-> The connection type (REST or legacy) is detected once when you add the controller and then kept. If
-> the controller goes offline, its entities become unavailable; the integration never switches to the
+> The connection type (REST or legacy) is detected once when you add the controller and then kept.
+> Controllers with the REST API require a login for everything under `/rest/`, so that is the signal:
+> a controller that answers `/rest/status` with 401/403 has REST. With a password it is set up on REST
+> (and a wrong password is reported as invalid auth, never "fixed" by switching APIs). Without a
+> password it is set up read-only on the legacy endpoints: **REST data and controls need a password.**
+> A controller without `/rest/` (404) uses the legacy endpoints.
+>
+> If the controller goes offline, its entities become unavailable; the integration never switches to the
 > other API, so no duplicate devices appear. If a controller was upgraded (or was set up while it was
 > misbehaving), use **Reconfigure** and tick **Re-detect connection type**.
 

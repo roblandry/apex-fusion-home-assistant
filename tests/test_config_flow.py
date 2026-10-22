@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
+import aiohttp
 import pytest
 from aiohttp import ClientSession
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
+from yarl import URL
 
 from custom_components.apex_fusion.config_flow import (
     CannotConnect,
     InvalidAuth,
+    RateLimited,
     async_validate_input,
 )
 from custom_components.apex_fusion.const import (
@@ -26,6 +30,16 @@ from custom_components.apex_fusion.const import (
     TRANSPORT_LEGACY,
     TRANSPORT_REST,
 )
+
+
+@pytest.fixture
+def rest_gate_present():
+    """Make the unauthenticated REST gate probe report that REST is present."""
+    with patch(
+        "custom_components.apex_fusion.config_flow._async_probe_rest_gate",
+        new=AsyncMock(return_value=True),
+    ):
+        yield
 
 
 def test_normalize_host_variants():
@@ -88,6 +102,7 @@ def test_extract_serial_helpers_cover_branches():
     assert _extract_hostname_from_status_obj({"data": "nope"}) is None
 
 
+@pytest.mark.usefixtures("rest_gate_present")
 async def test_rest_validation_uses_hostname_from_config_when_missing_in_status(
     hass, aioclient_mock
 ):
@@ -102,7 +117,7 @@ async def test_rest_validation_uses_hostname_from_config_when_missing_in_status(
     aioclient_mock.get(
         f"http://{host}/rest/status",
         status=200,
-        text="{}",
+        text='{"system": {"serial": "S"}}',
     )
     aioclient_mock.get(
         f"http://{host}/rest/config",
@@ -284,6 +299,7 @@ async def test_reconfigure_flow_is_supported_and_updates_entry(
     assert CONF_REDETECT_TRANSPORT not in updated.data
 
 
+@pytest.mark.usefixtures("rest_gate_present")
 async def test_rest_validation_accepts_cookie_from_set_cookie(hass, aioclient_mock):
     """REST validation sends connect.sid from Set-Cookie.
 
@@ -305,7 +321,7 @@ async def test_rest_validation_accepts_cookie_from_set_cookie(hass, aioclient_mo
     aioclient_mock.get(
         f"http://{host}/rest/status",
         status=200,
-        text="{}",
+        text='{"system": {"serial": "S"}}',
     )
 
     await async_validate_input(
@@ -328,6 +344,7 @@ async def test_rest_validation_accepts_cookie_from_set_cookie(hass, aioclient_mo
     assert (headers or {}).get("Cookie") == "connect.sid=abc"
 
 
+@pytest.mark.usefixtures("rest_gate_present")
 async def test_rest_validation_accepts_cookie_from_json_body(hass, aioclient_mock):
     """REST validation sends connect.sid from JSON body.
 
@@ -348,7 +365,7 @@ async def test_rest_validation_accepts_cookie_from_json_body(hass, aioclient_moc
     aioclient_mock.get(
         f"http://{host}/rest/status",
         status=200,
-        text="{}",
+        text='{"system": {"serial": "S"}}',
     )
 
     await async_validate_input(
@@ -371,6 +388,7 @@ async def test_rest_validation_accepts_cookie_from_json_body(hass, aioclient_moc
     assert (headers or {}).get("Cookie") == "connect.sid=abc"
 
 
+@pytest.mark.usefixtures("rest_gate_present")
 async def test_rest_validation_401_raises_invalid_auth(hass, aioclient_mock):
     """REST validation raises InvalidAuth when login is unauthorized.
 
@@ -407,6 +425,7 @@ async def test_rest_validation_401_raises_invalid_auth(hass, aioclient_mock):
         raise AssertionError("Expected InvalidAuth")
 
 
+@pytest.mark.usefixtures("rest_gate_present")
 async def test_rest_validation_includes_admin_candidate_when_username_not_admin(
     hass, aioclient_mock
 ):
@@ -466,7 +485,7 @@ async def test_rest_validation_reraises_invalid_auth_from_rest_block(
     aioclient_mock.get(
         f"http://{host}/rest/status",
         status=200,
-        text="{}",
+        text='{"system": {"serial": "S"}}',
     )
 
     def _boom(*_args, **_kwargs):
@@ -502,7 +521,7 @@ async def test_xml_validation_success_when_no_password(hass, aioclient_mock):
     aioclient_mock.get(
         f"http://{host}/cgi-bin/status.xml",
         status=200,
-        text="<status></status>",
+        text="<status><serial>S</serial></status>",
     )
 
     info = await async_validate_input(
@@ -514,7 +533,7 @@ async def test_xml_validation_success_when_no_password(hass, aioclient_mock):
         },
     )
 
-    assert info["unique_id"] == host
+    assert info["unique_id"] == "S"
     assert info["transport"] == "legacy"
 
 
@@ -557,7 +576,7 @@ async def test_cgi_json_invalid_json_falls_back_to_xml(hass, aioclient_mock):
     aioclient_mock.get(
         f"http://{host}/cgi-bin/status.xml",
         status=200,
-        text="<status></status>",
+        text="<status><serial>S</serial></status>",
     )
 
     info = await async_validate_input(
@@ -569,7 +588,7 @@ async def test_cgi_json_invalid_json_falls_back_to_xml(hass, aioclient_mock):
         },
     )
 
-    assert info["unique_id"] == host
+    assert info["unique_id"] == "S"
     assert info["transport"] == "legacy"
 
 
@@ -586,7 +605,7 @@ async def test_xml_validation_unauthorized_after_rest_404_is_cannot_connect(
     aioclient_mock.get(
         f"http://{host}/cgi-bin/status.xml",
         status=401,
-        text="<status></status>",
+        text="<status><serial>S</serial></status>",
     )
 
     try:
@@ -635,6 +654,7 @@ async def test_xml_validation_parse_error_raises_cannot_connect(hass, aioclient_
         raise AssertionError("Expected CannotConnect")
 
 
+@pytest.mark.usefixtures("rest_gate_present")
 async def test_rest_login_rejected_for_all_candidates_raises_invalid_auth(
     hass, aioclient_mock
 ):
@@ -705,7 +725,7 @@ async def test_cgi_json_validation_success_when_no_password(hass, aioclient_mock
     aioclient_mock.get(
         f"http://{host}/cgi-bin/status.json",
         status=200,
-        text='{"system": {"serial": "SER", "hostname": "200XL"}}',
+        text='{"istat": {"serial": "SER", "hostname": "200XL"}}',
     )
 
     info = await async_validate_input(
@@ -721,38 +741,7 @@ async def test_cgi_json_validation_success_when_no_password(hass, aioclient_mock
     assert info["title"] == "200XL (1.2.3.4)"
 
 
-async def test_rest_status_404_falls_back_to_xml(hass, aioclient_mock):
-    host = "1.2.3.4"
-
-    aioclient_mock.post(
-        f"http://{host}/rest/login",
-        status=200,
-        text="{}",
-        cookies={"connect.sid": "abc"},
-    )
-    # Correct REST status endpoint returns 404 -> treated as not supported.
-    aioclient_mock.get(
-        f"http://{host}/rest/status",
-        status=404,
-        text="",
-    )
-    aioclient_mock.get(
-        f"http://{host}/cgi-bin/status.xml",
-        status=200,
-        text="<status></status>",
-    )
-
-    info = await async_validate_input(
-        hass,
-        {
-            CONF_HOST: host,
-            CONF_USERNAME: "admin",
-            CONF_PASSWORD: "pw",
-        },
-    )
-    assert info["unique_id"] == host
-
-
+@pytest.mark.usefixtures("rest_gate_present")
 async def test_rest_status_invalid_json_raises_cannot_connect(hass, aioclient_mock):
     host = "1.2.3.4"
 
@@ -770,7 +759,7 @@ async def test_rest_status_invalid_json_raises_cannot_connect(hass, aioclient_mo
     aioclient_mock.get(
         f"http://{host}/cgi-bin/status.xml",
         status=200,
-        text="<status></status>",
+        text="<status><serial>S</serial></status>",
     )
 
     with pytest.raises(CannotConnect):
@@ -786,30 +775,7 @@ async def test_rest_status_invalid_json_raises_cannot_connect(hass, aioclient_mo
     assert not any("cgi-bin" in str(c[1]) for c in aioclient_mock.mock_calls)
 
 
-async def test_rest_404_falls_back_to_xml(hass, aioclient_mock):
-    host = "1.2.3.4"
-    aioclient_mock.post(
-        f"http://{host}/rest/login",
-        status=404,
-        text="{}",
-    )
-    aioclient_mock.get(
-        f"http://{host}/cgi-bin/status.xml",
-        status=200,
-        text="<status></status>",
-    )
-
-    info = await async_validate_input(
-        hass,
-        {
-            CONF_HOST: host,
-            CONF_USERNAME: "admin",
-            CONF_PASSWORD: "pw",
-        },
-    )
-    assert info["unique_id"] == host
-
-
+@pytest.mark.usefixtures("rest_gate_present")
 async def test_rest_transient_login_failure_raises_cannot_connect_not_legacy(
     hass, aioclient_mock
 ):
@@ -822,7 +788,7 @@ async def test_rest_transient_login_failure_raises_cannot_connect_not_legacy(
     aioclient_mock.get(
         f"http://{host}/cgi-bin/status.xml",
         status=200,
-        text="<status></status>",
+        text="<status><serial>S</serial></status>",
     )
 
     with pytest.raises(CannotConnect):
@@ -838,6 +804,7 @@ async def test_rest_transient_login_failure_raises_cannot_connect_not_legacy(
     assert not any("cgi-bin" in str(c[1]) for c in aioclient_mock.mock_calls)
 
 
+@pytest.mark.usefixtures("rest_gate_present")
 async def test_rest_status_unauthorized_raises_invalid_auth(hass, aioclient_mock):
     host = "1.2.3.4"
     aioclient_mock.post(
@@ -867,6 +834,7 @@ async def test_rest_status_unauthorized_raises_invalid_auth(hass, aioclient_mock
         raise AssertionError("Expected InvalidAuth")
 
 
+@pytest.mark.usefixtures("rest_gate_present")
 async def test_rest_status_transient_raises_cannot_connect_not_legacy(
     hass, aioclient_mock
 ):
@@ -885,7 +853,7 @@ async def test_rest_status_transient_raises_cannot_connect_not_legacy(
     aioclient_mock.get(
         f"http://{host}/cgi-bin/status.xml",
         status=200,
-        text="<status></status>",
+        text="<status><serial>S</serial></status>",
     )
 
     with pytest.raises(CannotConnect):
@@ -901,6 +869,7 @@ async def test_rest_status_transient_raises_cannot_connect_not_legacy(
     assert not any("cgi-bin" in str(c[1]) for c in aioclient_mock.mock_calls)
 
 
+@pytest.mark.usefixtures("rest_gate_present")
 async def test_rest_retries_on_client_error_then_succeeds(
     hass, enable_custom_integrations
 ):
@@ -972,7 +941,7 @@ async def test_rest_retries_on_client_error_then_succeeds(
             return _Resp(200, "{}", cookies={"connect.sid": "abc"})
 
         def get(self, *_args, **_kwargs):
-            return _Resp(200, "{}")
+            return _Resp(200, '{"system": {"serial": "S"}}')
 
     async def _no_sleep(_secs: float):
         return None
@@ -999,9 +968,10 @@ async def test_rest_retries_on_client_error_then_succeeds(
             },
         )
 
-    assert info["unique_id"] == host
+    assert info["unique_id"] == "S"
 
 
+@pytest.mark.usefixtures("rest_gate_present")
 async def test_rest_login_body_invalid_json_is_ignored(
     hass, enable_custom_integrations
 ):
@@ -1058,7 +1028,7 @@ async def test_rest_login_body_invalid_json_is_ignored(
             return _Resp(200, "not-json")
 
         def get(self, *_args, **_kwargs):
-            return _Resp(200, "{}")
+            return _Resp(200, '{"system": {"serial": "S"}}')
 
     host = "1.2.3.4"
     session = _Sess()
@@ -1081,9 +1051,10 @@ async def test_rest_login_body_invalid_json_is_ignored(
             },
         )
 
-    assert info["unique_id"] == host
+    assert info["unique_id"] == "S"
 
 
+@pytest.mark.usefixtures("rest_gate_present")
 async def test_rest_validation_retries_login_after_transient_401(
     hass, enable_custom_integrations
 ):
@@ -1153,7 +1124,7 @@ async def test_rest_validation_retries_login_after_transient_401(
             return _Resp(200, "{}", cookies={"connect.sid": "abc"})
 
         def get(self, *_args, **_kwargs):
-            return _Resp(200, "{}")
+            return _Resp(200, '{"system": {"serial": "S"}}')
 
     async def _no_sleep(_secs: float):
         return None
@@ -1181,9 +1152,10 @@ async def test_rest_validation_retries_login_after_transient_401(
             },
         )
 
-    assert info["unique_id"] == host
+    assert info["unique_id"] == "S"
 
 
+@pytest.mark.usefixtures("rest_gate_present")
 async def test_rest_exhausts_retry_loop_raises_cannot_connect(
     hass, enable_custom_integrations
 ):
@@ -1245,7 +1217,7 @@ async def test_rest_exhausts_retry_loop_raises_cannot_connect(
 
         def get(self, *_args, **_kwargs):
             # Called for XML fallback.
-            return _Resp(200, "<status></status>")
+            return _Resp(200, "<status><serial>S</serial></status>")
 
     async def _no_sleep(_secs: float):
         return None
@@ -1372,6 +1344,7 @@ async def test_reconfigure_redetect_option_controls_stored_transport(
     )
 
 
+@pytest.mark.usefixtures("rest_gate_present")
 async def test_rest_validation_reports_rest_transport(hass, aioclient_mock):
     host = "1.2.3.4"
     aioclient_mock.post(
@@ -1392,75 +1365,6 @@ async def test_rest_validation_reports_rest_transport(hass, aioclient_mock):
 
     assert info["transport"] == TRANSPORT_REST
     assert info["unique_id"] == "SER1"
-
-
-async def test_no_login_uses_rest_when_served_without_login(hass, aioclient_mock):
-    host = "1.2.3.4"
-    aioclient_mock.get(
-        f"http://{host}/rest/status",
-        status=200,
-        text='{"system": {"serial": "SER1", "hostname": "tank_one"}}',
-    )
-
-    info = await async_validate_input(
-        hass, {CONF_HOST: host, CONF_NO_LOGIN: True, CONF_USERNAME: "admin"}
-    )
-
-    assert info["transport"] == TRANSPORT_REST
-    assert info["unique_id"] == "SER1"
-    assert host in info["title"]
-
-
-@pytest.mark.parametrize(
-    ("status", "text"),
-    [
-        (404, ""),
-        (405, ""),
-    ],
-)
-async def test_no_login_without_rest_detects_legacy(hass, aioclient_mock, status, text):
-    host = "1.2.3.4"
-    aioclient_mock.get(f"http://{host}/rest/status", status=status, text=text)
-    aioclient_mock.get(
-        f"http://{host}/cgi-bin/status.json",
-        status=200,
-        text='{"istat": {"serial": "SER9", "hostname": "apex"}}',
-    )
-
-    info = await async_validate_input(
-        hass, {CONF_HOST: host, CONF_NO_LOGIN: True, CONF_USERNAME: "admin"}
-    )
-
-    assert info["transport"] == TRANSPORT_LEGACY
-    assert info["unique_id"] == "SER9"
-
-
-async def test_no_login_rest_transient_error_is_not_mistaken_for_legacy(
-    hass, aioclient_mock
-):
-    host = "1.2.3.4"
-    aioclient_mock.get(f"http://{host}/rest/status", status=503, text="")
-
-    with pytest.raises(CannotConnect):
-        await async_validate_input(
-            hass, {CONF_HOST: host, CONF_NO_LOGIN: True, CONF_USERNAME: "admin"}
-        )
-
-    assert not any("cgi-bin" in str(c[1]) for c in aioclient_mock.mock_calls)
-
-
-async def test_no_login_rest_connection_error_raises_cannot_connect(
-    hass, aioclient_mock
-):
-    import aiohttp
-
-    host = "1.2.3.4"
-    aioclient_mock.get(f"http://{host}/rest/status", exc=aiohttp.ClientError("down"))
-
-    with pytest.raises(CannotConnect):
-        await async_validate_input(
-            hass, {CONF_HOST: host, CONF_NO_LOGIN: True, CONF_USERNAME: "admin"}
-        )
 
 
 async def test_reconfigure_redetect_updates_legacy_format(
@@ -1528,84 +1432,367 @@ async def test_reconfigure_redetect_updates_legacy_format(
 
 
 _REST_OK = '{"system": {"serial": "SER1", "hostname": "tank"}}'
-_CGI_OK = '{"istat": {"serial": "SER9", "hostname": "apex"}}'
-_XML_OK = "<status><serial>SER8</serial><hostname>apex</hostname></status>"
+_CGI_OK = '{"istat": {"software": "5.16L_AC26", "serial": "SER9", "hostname": "apex"}}'
+_XML_OK = (
+    '<status software="5.1"><serial>SER8</serial><hostname>apex</hostname></status>'
+)
+_OK = (200, "")
+
+
+class _SpecResp:
+    def __init__(self, status: int, body: str = "") -> None:
+        self.status = status
+        self._body = body
+        self.headers: dict[str, str] = {}
+        self.cookies: dict[str, Any] = {}
+
+    async def text(self) -> str:
+        return self._body
+
+    def raise_for_status(self) -> None:
+        if self.status >= 400:
+            raise aiohttp.ClientError(f"HTTP {self.status}")
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return False
+
+
+class _SpecSession:
+    """Replays queued responses per (method, path); the last one repeats."""
+
+    def __init__(self, routes: dict[str, list[Any]]) -> None:
+        self.routes = routes
+        self.calls: list[str] = []
+
+        class _Jar:
+            def filter_cookies(self, *_a, **_k):
+                return {}
+
+            def update_cookies(self, *_a, **_k):
+                return None
+
+        self.cookie_jar = _Jar()
+
+    def _serve(self, method: str, url: str):
+        key = f"{method} {URL(url).path}"
+        self.calls.append(key)
+        queue = self.routes.get(key)
+        if not queue:
+            return _SpecResp(404)
+        item = queue.pop(0) if len(queue) > 1 else queue[0]
+        if isinstance(item, BaseException):
+            raise item
+        return _SpecResp(*item)
+
+    def get(self, url, **_kwargs):
+        return self._serve("GET", url)
+
+    def post(self, url, **_kwargs):
+        return self._serve("POST", url)
+
+
+def _routes(probe, *, login=None, status=None, cgi=None, xml=None):
+    routes: dict[str, list[Any]] = {"GET /rest/status": [probe]}
+    if status is not None:
+        routes["GET /rest/status"] = [probe, status]
+    if login is not None:
+        routes["POST /rest/login"] = [login]
+    if cgi is not None:
+        routes["GET /cgi-bin/status.json"] = [cgi]
+    if xml is not None:
+        routes["GET /cgi-bin/status.xml"] = [xml]
+    return routes
+
+
+_REST_OK_STATUS = (200, _REST_OK)
+_LOGIN_OK = (200, "{}")
+
+# (id, password?, routes, expected) where expected is
+# (transport, legacy_format|None, unique_id) or an exception type.
+_SPEC_ROWS = [
+    # --- REST gate present + password -> REST, login must succeed -------------
+    (
+        "401+pw+login/status ok",
+        True,
+        _routes((401, ""), login=_LOGIN_OK, status=_REST_OK_STATUS),
+        ("rest", None, "SER1"),
+    ),
+    (
+        "403+pw+login/status ok",
+        True,
+        _routes((403, ""), login=_LOGIN_OK, status=_REST_OK_STATUS),
+        ("rest", None, "SER1"),
+    ),
+    (
+        "200 object+pw+login/status ok",
+        True,
+        _routes((200, "{}"), login=_LOGIN_OK, status=_REST_OK_STATUS),
+        ("rest", None, "SER1"),
+    ),
+    (
+        "401+pw+login rejected",
+        True,
+        _routes((401, ""), login=(401, ""), cgi=(200, _CGI_OK), xml=(200, _XML_OK)),
+        InvalidAuth,
+    ),
+    (
+        "401+pw+login 403",
+        True,
+        _routes((401, ""), login=(403, ""), cgi=(200, _CGI_OK)),
+        InvalidAuth,
+    ),
+    (
+        "401+pw+login 429",
+        True,
+        _routes((401, ""), login=(429, ""), cgi=(200, _CGI_OK)),
+        RateLimited,
+    ),
+    (
+        "401+pw+login 503",
+        True,
+        _routes((401, ""), login=(503, ""), cgi=(200, _CGI_OK)),
+        CannotConnect,
+    ),
+    (
+        "401+pw+login 404",
+        True,
+        _routes((401, ""), login=(404, ""), cgi=(200, _CGI_OK)),
+        CannotConnect,
+    ),
+    (
+        "401+pw+login ok+status empty object",
+        True,
+        _routes((401, ""), login=_LOGIN_OK, status=(200, "{}"), cgi=(200, _CGI_OK)),
+        CannotConnect,
+    ),
+    (
+        "401+pw+login ok+status not json",
+        True,
+        _routes((401, ""), login=_LOGIN_OK, status=(200, "<html>"), cgi=(200, _CGI_OK)),
+        CannotConnect,
+    ),
+    (
+        "401+pw+login ok+status 401",
+        True,
+        _routes((401, ""), login=_LOGIN_OK, status=(401, ""), cgi=(200, _CGI_OK)),
+        InvalidAuth,
+    ),
+    (
+        "401+pw+login ok+status 503",
+        True,
+        _routes((401, ""), login=_LOGIN_OK, status=(503, ""), cgi=(200, _CGI_OK)),
+        CannotConnect,
+    ),
+    (
+        "401+pw+login ok+status 404",
+        True,
+        _routes((401, ""), login=_LOGIN_OK, status=(404, ""), cgi=(200, _CGI_OK)),
+        CannotConnect,
+    ),
+    # --- REST gate present, no password -> read-only legacy -------------------
+    (
+        "401+nopw+cgi ok",
+        False,
+        _routes((401, ""), cgi=(200, _CGI_OK), xml=(200, _XML_OK)),
+        ("legacy", "cgi_json", "SER9"),
+    ),
+    (
+        "403+nopw+cgi bad,xml ok",
+        False,
+        _routes((403, ""), cgi=(200, "{no"), xml=(200, _XML_OK)),
+        ("legacy", "xml", "SER8"),
+    ),
+    (
+        "200 object+nopw+cgi ok",
+        False,
+        _routes((200, "{}"), cgi=(200, _CGI_OK)),
+        ("legacy", "cgi_json", "SER9"),
+    ),
+    ("401+nopw+nothing usable", False, _routes((401, "")), CannotConnect),
+    # --- REST absent -> legacy ------------------------------------------------
+    (
+        "404+nopw+cgi ok",
+        False,
+        _routes((404, ""), cgi=(200, _CGI_OK)),
+        ("legacy", "cgi_json", "SER9"),
+    ),
+    (
+        "404+pw+cgi ok (no login attempted)",
+        True,
+        _routes((404, ""), login=_LOGIN_OK, cgi=(200, _CGI_OK)),
+        ("legacy", "cgi_json", "SER9"),
+    ),
+    (
+        "404+cgi 404,xml ok",
+        False,
+        _routes((404, ""), cgi=(404, ""), xml=(200, _XML_OK)),
+        ("legacy", "xml", "SER8"),
+    ),
+    (
+        "404+cgi 401,xml ok",
+        False,
+        _routes((404, ""), cgi=(401, ""), xml=(200, _XML_OK)),
+        ("legacy", "xml", "SER8"),
+    ),
+    (
+        "404+cgi empty body,xml ok",
+        False,
+        _routes((404, ""), cgi=(200, ""), xml=(200, _XML_OK)),
+        ("legacy", "xml", "SER8"),
+    ),
+    (
+        "404+cgi {},xml ok",
+        False,
+        _routes((404, ""), cgi=(200, "{}"), xml=(200, _XML_OK)),
+        ("legacy", "xml", "SER8"),
+    ),
+    (
+        "404+cgi object without istat,xml ok",
+        False,
+        _routes((404, ""), cgi=(200, '{"a": 1}'), xml=(200, _XML_OK)),
+        ("legacy", "xml", "SER8"),
+    ),
+    (
+        "404+cgi ok object w/ istat only",
+        False,
+        _routes((404, ""), cgi=(200, '{"istat": {}}'), xml=(200, _XML_OK)),
+        ("legacy", "cgi_json", "1.2.3.4"),
+    ),
+    (
+        "404+xml software attr only",
+        False,
+        _routes(
+            (404, ""), cgi=(404, ""), xml=(200, '<status software="5.1"></status>')
+        ),
+        ("legacy", "xml", "1.2.3.4"),
+    ),
+    (
+        "404+xml serial only",
+        False,
+        _routes(
+            (404, ""), cgi=(404, ""), xml=(200, "<status><serial>Z</serial></status>")
+        ),
+        ("legacy", "xml", "Z"),
+    ),
+    (
+        "404+xml without software or serial",
+        False,
+        _routes((404, ""), cgi=(404, ""), xml=(200, "<status></status>")),
+        CannotConnect,
+    ),
+    (
+        "404+xml wrong root",
+        False,
+        _routes((404, ""), cgi=(404, ""), xml=(200, '<foo software="1"/>')),
+        CannotConnect,
+    ),
+    (
+        "404+xml unparseable",
+        False,
+        _routes((404, ""), cgi=(404, ""), xml=(200, "<status")),
+        CannotConnect,
+    ),
+    (
+        "404+cgi 401,xml 401",
+        False,
+        _routes((404, ""), cgi=(401, ""), xml=(401, "")),
+        CannotConnect,
+    ),
+    (
+        "404+cgi 500,xml 500",
+        False,
+        _routes((404, ""), cgi=(500, ""), xml=(500, "")),
+        CannotConnect,
+    ),
+    (
+        "404+cgi timeout,xml timeout",
+        False,
+        _routes((404, ""), cgi=asyncio.TimeoutError(), xml=asyncio.TimeoutError()),
+        CannotConnect,
+    ),
+    # --- probe unusable -> cannot_connect, never guess ------------------------
+    (
+        "probe 500",
+        True,
+        _routes((500, ""), cgi=(200, _CGI_OK), xml=(200, _XML_OK)),
+        CannotConnect,
+    ),
+    ("probe 503", False, _routes((503, ""), cgi=(200, _CGI_OK)), CannotConnect),
+    ("probe 400", False, _routes((400, ""), cgi=(200, _CGI_OK)), CannotConnect),
+    ("probe 405", False, _routes((405, ""), cgi=(200, _CGI_OK)), CannotConnect),
+    ("probe 302", False, _routes((302, ""), cgi=(200, _CGI_OK)), CannotConnect),
+    (
+        "probe 200 html",
+        False,
+        _routes((200, "<html>"), cgi=(200, _CGI_OK)),
+        CannotConnect,
+    ),
+    ("probe 200 empty", False, _routes((200, ""), cgi=(200, _CGI_OK)), CannotConnect),
+    ("probe 200 array", False, _routes((200, "[]"), cgi=(200, _CGI_OK)), CannotConnect),
+    (
+        "probe timeout",
+        True,
+        _routes(asyncio.TimeoutError(), cgi=(200, _CGI_OK)),
+        CannotConnect,
+    ),
+    (
+        "probe connection error",
+        False,
+        _routes(aiohttp.ClientError("down"), cgi=(200, _CGI_OK)),
+        CannotConnect,
+    ),
+]
 
 
 @pytest.mark.parametrize(
-    ("rest", "cgi", "xml", "expected"),
-    [
-        # 200 + non-empty JSON object -> REST (legacy never probed).
-        ((200, _REST_OK), (200, _CGI_OK), (200, _XML_OK), ("rest", "SER1")),
-        # 200 but unusable body -> cannot_connect, CGI never probed.
-        ((200, ""), (200, _CGI_OK), (200, _XML_OK), CannotConnect),
-        ((200, "{no"), (200, _CGI_OK), (200, _XML_OK), CannotConnect),
-        ((200, "<html></html>"), (200, _CGI_OK), (200, _XML_OK), CannotConnect),
-        ((200, "[]"), (200, _CGI_OK), (200, _XML_OK), CannotConnect),
-        ((200, "{}"), (200, _CGI_OK), (200, _XML_OK), CannotConnect),
-        # 404/405 -> legacy: CGI JSON, then XML, else cannot_connect.
-        ((404, ""), (200, _CGI_OK), (200, _XML_OK), ("legacy", "SER9")),
-        ((405, ""), (200, _CGI_OK), (200, _XML_OK), ("legacy", "SER9")),
-        ((404, ""), (404, ""), (200, _XML_OK), ("legacy", "SER8")),
-        ((404, ""), (404, ""), (500, ""), CannotConnect),
-        # 401/403 -> legacy if it works, else invalid_auth.
-        ((401, "{}"), (200, _CGI_OK), (200, _XML_OK), ("legacy", "SER9")),
-        ((403, "{}"), (200, _CGI_OK), (200, _XML_OK), ("legacy", "SER9")),
-        ((401, "{}"), (404, ""), (200, _XML_OK), ("legacy", "SER8")),
-        ((401, "{}"), (404, ""), (500, ""), InvalidAuth),
-        ((403, "{}"), (401, "{}"), (401, ""), InvalidAuth),
-        # CGI JSON 401 still falls through to XML.
-        ((404, ""), (401, "{}"), (200, _XML_OK), ("legacy", "SER8")),
-        ((404, ""), (401, "{}"), (500, ""), CannotConnect),
-        ((401, "{}"), (401, "{}"), (200, _XML_OK), ("legacy", "SER8")),
-        ((401, "{}"), (401, "{}"), (500, ""), InvalidAuth),
-        # CGI JSON 200 with an unusable body falls through to XML.
-        ((404, ""), (200, "{}"), (200, _XML_OK), ("legacy", "SER8")),
-        ((404, ""), (200, ""), (200, _XML_OK), ("legacy", "SER8")),
-        ((404, ""), (200, ""), (500, ""), CannotConnect),
-        ((404, ""), (200, "{}"), (200, "<status"), CannotConnect),
-        # After REST 404 nothing usable is cannot_connect even if auth was refused.
-        ((404, ""), (401, "{}"), (401, ""), CannotConnect),
-        # Anything else -> cannot_connect, CGI never probed.
-        ((400, ""), (200, _CGI_OK), (200, _XML_OK), CannotConnect),
-        ((500, ""), (200, _CGI_OK), (200, _XML_OK), CannotConnect),
-        ((503, ""), (200, _CGI_OK), (200, _XML_OK), CannotConnect),
-    ],
+    ("has_password", "routes", "expected"),
+    [pytest.param(pw, r, e, id=i) for i, pw, r, e in _SPEC_ROWS],
 )
-async def test_no_login_probe_decision_table(
-    hass, aioclient_mock, rest, cgi, xml, expected
-):
-    host = "1.2.3.4"
-    aioclient_mock.get(f"http://{host}/rest/status", status=rest[0], text=rest[1])
-    aioclient_mock.get(f"http://{host}/cgi-bin/status.json", status=cgi[0], text=cgi[1])
-    aioclient_mock.get(f"http://{host}/cgi-bin/status.xml", status=xml[0], text=xml[1])
-    data = {CONF_HOST: host, CONF_NO_LOGIN: True, CONF_USERNAME: "admin"}
+async def test_transport_detection_spec_table(hass, has_password, routes, expected):
+    probe = routes["GET /rest/status"][0]
+    session = _SpecSession(routes)
+    data = {CONF_HOST: "1.2.3.4", CONF_USERNAME: "admin"}
+    data[CONF_PASSWORD] = "pw" if has_password else ""
 
-    if isinstance(expected, type):
-        with pytest.raises(expected):
-            await async_validate_input(hass, data)
-        probed_legacy = any("cgi-bin" in str(c[1]) for c in aioclient_mock.mock_calls)
-        # Only 401/403/404/405 may consult legacy.
-        assert probed_legacy is (rest[0] in (401, 403, 404, 405))
-        return
+    async def _no_sleep(_secs: float):
+        return None
 
-    info = await async_validate_input(hass, data)
-    assert (info["transport"], info["unique_id"]) == expected
-    if expected[0] == "rest":
-        assert not any("cgi-bin" in str(c[1]) for c in aioclient_mock.mock_calls)
+    with (
+        patch(
+            "custom_components.apex_fusion.config_flow.async_get_clientsession",
+            return_value=session,
+        ),
+        patch("custom_components.apex_fusion.config_flow.asyncio.sleep", new=_no_sleep),
+    ):
+        if isinstance(expected, type):
+            with pytest.raises(expected):
+                await async_validate_input(hass, data)
+        else:
+            info = await async_validate_input(hass, data)
+            assert (
+                info["transport"],
+                info.get("legacy_format"),
+                info["unique_id"],
+            ) == expected
 
-
-async def test_no_login_rest_timeout_is_cannot_connect_without_probing_cgi(
-    hass, aioclient_mock
-):
-    import asyncio
-
-    host = "1.2.3.4"
-    aioclient_mock.get(f"http://{host}/rest/status", exc=asyncio.TimeoutError())
-    aioclient_mock.get(f"http://{host}/cgi-bin/status.json", status=200, text=_CGI_OK)
-
-    with pytest.raises(CannotConnect):
-        await async_validate_input(
-            hass, {CONF_HOST: host, CONF_NO_LOGIN: True, CONF_USERNAME: "admin"}
-        )
-    assert not any("cgi-bin" in str(c[1]) for c in aioclient_mock.mock_calls)
+    # Exactly one unauthenticated gate probe happens first.
+    assert session.calls[0] == "GET /rest/status"
+    legacy_calls = [c for c in session.calls if "cgi-bin" in c]
+    login_calls = [c for c in session.calls if c == "POST /rest/login"]
+    gate_present = isinstance(probe, tuple) and (
+        probe[0] in (401, 403) or (probe[0] == 200 and probe[1] == "{}")
+    )
+    gate_absent = isinstance(probe, tuple) and probe[0] == 404
+    if not (gate_present or gate_absent):
+        # Unusable probe: never guess a transport, never probe further.
+        assert not legacy_calls
+        assert not login_calls
+    if gate_absent:
+        assert not login_calls  # no REST login on a REST-less controller
+    if gate_present and has_password:
+        assert not legacy_calls  # a REST controller with a password never falls back
+    if gate_present and not has_password:
+        assert not login_calls  # read-only legacy never logs in

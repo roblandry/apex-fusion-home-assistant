@@ -40,6 +40,7 @@
     },
     "error": {
       "cannot_connect": "Failed to connect",
+      "rate_limited": "The controller is rate limiting logins. Try again in a few minutes.",
       "invalid_auth": "Invalid authentication",
       "unknown": "Unexpected error"
     }
