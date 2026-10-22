@@ -330,7 +330,9 @@ async def test_collision_with_another_entry_leaves_entity_untouched(
     hass, enable_custom_integrations
 ):
     entry = _entry(hass, **{CONF_LAST_SOURCE: "xml"})
-    other = MockConfigEntry(domain=DOMAIN, data={CONF_HOST: "9.9.9.9"}, unique_id="x")
+    other = MockConfigEntry(
+        domain=DOMAIN, data={CONF_HOST: "198.51.100.9"}, unique_id="x"
+    )
     other.add_to_hass(hass)
     ent_reg = er.async_get(hass)
     mine = _entity(hass, entry, "sensor", f"{HOST}_probe_tmp", "mine")
@@ -509,7 +511,9 @@ async def test_foreign_entities_on_an_orphan_device_are_never_touched(
     hass, enable_custom_integrations
 ):
     entry = _entry(hass, **{CONF_LAST_SOURCE: "rest"})
-    other = MockConfigEntry(domain=DOMAIN, data={CONF_HOST: "9.9.9.9"}, unique_id="x")
+    other = MockConfigEntry(
+        domain=DOMAIN, data={CONF_HOST: "198.51.100.9"}, unique_id="x"
+    )
     other.add_to_hass(hass)
     dev_reg = dr.async_get(hass)
     ent_reg = er.async_get(hass)

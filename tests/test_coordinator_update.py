@@ -1257,10 +1257,10 @@ async def test_rest_rate_limited_on_login_sets_backoff_and_fails_update(
 async def test_coordinator_device_identifier_and_serial_cache(
     hass, enable_custom_integrations
 ):
-    coord = await _make_coordinator(hass, host="1.2.3.4")
+    coord = await _make_coordinator(hass, host="192.0.2.4")
 
     # Default: the entry's original unique_id (never an "entry:" token).
-    assert coord.device_identifier == "1.2.3.4"
+    assert coord.device_identifier == "192.0.2.4"
 
     # A serial seen in the data wins over that fallback.
     coord._cached_serial = "SER123"
