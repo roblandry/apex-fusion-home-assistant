@@ -1527,8 +1527,8 @@ async def test_marker_read_back_error_fails_closed_and_cleans_up(
     assert _marker_key(coord) not in _storage(hass)
 
 
-async def test_unused_marker_cleanup_failure_is_swallowed(
-    hass, enable_custom_integrations, ctl
+async def test_unused_marker_cleanup_failure_is_logged_as_a_warning(
+    hass, enable_custom_integrations, ctl, caplog
 ):
     from homeassistant.helpers.storage import Store
 
@@ -1538,10 +1538,70 @@ async def test_unused_marker_cleanup_failure_is_swallowed(
     async def _boom(_store: Any) -> Any:
         raise HomeAssistantError("unreadable")
 
-    with patch.object(Store, "async_load", _boom):
+    with caplog.at_level(logging.WARNING):
+        with patch.object(Store, "async_load", _boom):
+            with pytest.raises(HomeAssistantError, match="not starting the update"):
+                await coord.async_request_firmware_install()
+    assert ctl.calls_for("PUT", "/rest/config/nconf") == []
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("unused install marker" in r.getMessage() for r in warnings)
+
+
+async def test_marker_store_uses_atomic_writes(hass, enable_custom_integrations, ctl):
+    from custom_components.apex_fusion.coordinator import _install_store_for
+
+    coord = await _make_coordinator(hass)
+    assert coord._install_store._atomic_writes is True
+    assert _install_store_for(hass, "x")._atomic_writes is True
+
+
+async def test_marker_carries_a_unique_attempt_id(
+    hass, enable_custom_integrations, ctl, freezer
+):
+    coord = await _polled(hass, ctl)
+    freezer.move_to("2026-10-23 18:00:00")
+    ids = []
+    for _ in range(2):
+        await coord.async_begin_install_window()
+        ids.append(_storage(hass)[_marker_key(coord)]["data"]["attempt_id"])
+        await coord.async_end_install_window(INSTALL_RESULT_REJECTED)
+    assert ids[0] != ids[1]
+    assert all(len(i) == 16 for i in ids)
+
+
+async def test_equal_time_older_marker_does_not_confirm_a_swallowed_write_error(
+    hass, enable_custom_integrations, ctl, freezer
+):
+    """Fixed clock, an older marker with identical times, WriteError swallowed."""
+    from homeassistant.helpers.storage import Store
+    from homeassistant.util import dt as dt_util
+    from homeassistant.util.file import WriteError
+
+    coord = await _polled(hass, ctl)
+    freezer.move_to("2026-10-23 18:00:00")
+    started_at = dt_util.utcnow().timestamp()
+    _storage(hass)[_marker_key(coord)] = {
+        "version": 1,
+        "minor_version": 1,
+        "key": _marker_key(coord),
+        "data": {
+            "entry_id": coord.entry.entry_id,
+            "attempt_id": "0000000000000000",
+            "started_at": started_at,
+            "expires_at": started_at + 1200,
+            "from_version": OLD,
+            "expected_version": NEW,
+        },
+    }
+
+    async def _failing_write(_store: Any, _data: Any) -> None:
+        raise WriteError("read-only filesystem")
+
+    with patch.object(Store, "_async_write_data", _failing_write):
         with pytest.raises(HomeAssistantError, match="not starting the update"):
             await coord.async_request_firmware_install()
     assert ctl.calls_for("PUT", "/rest/config/nconf") == []
+    assert coord.install_in_progress is False
 
 
 async def test_marker_remove_failure_is_logged_not_raised(

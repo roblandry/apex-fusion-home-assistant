@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import re
+import secrets
 import time
 import xml.etree.ElementTree as ET
 from collections.abc import AsyncGenerator, Mapping
@@ -988,7 +989,14 @@ def _parse_install_marker(
 
 
 def _install_store_for(hass: HomeAssistant, entry_id: str) -> Store[dict[str, Any]]:
-    return Store(hass, INSTALL_STORE_VERSION, f"{DOMAIN}.install_{entry_id}")
+    # atomic_writes: write to a temp file, fsync and rename, so a crash or power
+    # loss can never leave a torn or missing marker after a confirmed save.
+    return Store(
+        hass,
+        INSTALL_STORE_VERSION,
+        f"{DOMAIN}.install_{entry_id}",
+        atomic_writes=True,
+    )
 
 
 async def async_remove_install_state(hass: HomeAssistant, entry: ConfigEntry) -> None:
@@ -3123,6 +3131,9 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         await self._async_save_install_marker(
             {
                 "entry_id": self.entry.entry_id,
+                # Unique per attempt, so the read-back cannot be satisfied by an
+                # older marker that happens to share the same timestamps.
+                "attempt_id": secrets.token_hex(8),
                 "started_at": started_at,
                 "expires_at": started_at + INSTALL_WINDOW_MAX_SECONDS,
                 "from_version": from_version,
@@ -3174,9 +3185,11 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             await self._install_store.async_remove()
         except Exception as err:  # noqa: BLE001
-            _LOGGER.debug(
-                "Could not remove the unused install marker (%s)",
+            _LOGGER.warning(
+                "Could not remove the unused install marker (%s); a reload may "
+                "resume it and block controller writes for up to %d minutes",
                 err.__class__.__name__,
+                int(INSTALL_WINDOW_MAX_SECONDS // 60),
             )
 
     async def _async_clear_install_marker(self, generation: int) -> None:
