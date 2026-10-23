@@ -33,6 +33,7 @@ from .const import (
 )
 from .coordinator import (
     ApexNeptuneDataUpdateCoordinator,
+    async_remove_install_state,
     clean_hostname_display,
     legacy_format_from_entry_data,
     transport_from_entry_data,
@@ -139,6 +140,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry=entry,
         rest_sid_seed=rest_sid,
     )
+    # Resume a firmware install that outlived the previous coordinator (reload or
+    # restart) before the first poll, so a boot-time 401 cannot start reauth and
+    # a second install is refused. Also clears a stale Repairs issue.
+    await coordinator.async_restore_install_window()
     # Raises ConfigEntryNotReady when the pinned transport cannot be read, so
     # Home Assistant retries later instead of switching transport.
     await coordinator.async_config_entry_first_refresh()
@@ -246,6 +251,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     ] = list(platforms)
 
     return True
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Drop the persisted firmware-install marker and its Repairs issue.
+
+    Args:
+        hass: Home Assistant instance.
+        entry: The config entry being removed.
+    """
+    await async_remove_install_state(hass, entry)
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

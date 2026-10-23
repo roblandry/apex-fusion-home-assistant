@@ -61,6 +61,7 @@ async def test_async_setup_entry_stores_coordinator_and_forwards_platforms(
 
     assert hass.data[DOMAIN][entry.entry_id] is coordinator
     forward.assert_awaited()
+    coordinator.async_restore_install_window.assert_awaited_once()
 
 
 async def test_async_setup_entry_reuses_cached_rest_sid_when_available(

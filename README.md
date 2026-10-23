@@ -274,6 +274,11 @@ These entities are only available when REST parsing is active (they are not crea
 > initiate or install firmware updates. Apply firmware updates using Neptune’s own
 > workflow (Fusion/app/controller UI).
 
+> Known limitation: Before the update request is sent, the in-progress record is written with an
+> atomic, fsynced file write. Durability beyond what the OS and filesystem guarantee (for example,
+> power loss on storage that ignores fsync) is not guaranteed. Don't start a second update until
+> the first has clearly finished or timed out.
+
 - **Controller update** uses controller-reported values (prefers sanitized config from `/rest/config` when
   available, otherwise `/rest/status`):
   - Installed version from `system.software`

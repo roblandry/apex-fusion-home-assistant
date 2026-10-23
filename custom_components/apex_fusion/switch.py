@@ -186,23 +186,26 @@ class ApexFeedModeSwitch(SwitchEntity):
                 feed_sel,
             )
 
-            async with async_timeout.timeout(timeout_seconds):
-                async with session.post(
-                    url,
-                    data=data,
-                    auth=aiohttp.BasicAuth(username, password),
-                    headers={"Content-Type": "application/x-www-form-urlencoded"},
-                ) as resp:
-                    if resp.status in (401, 403):
-                        raise HomeAssistantError(
-                            "Invalid auth for Apex status.cgi feed control"
-                        )
-                    if resp.status == 404:
-                        raise HomeAssistantError(
-                            "Feed control endpoint not found on controller"
-                        )
-                    resp.raise_for_status()
-                    await resp.text()
+            # The CGI POST is a controller write too: serialize it with firmware
+            # installs and re-check the window right before sending.
+            async with self._coordinator.async_control_write():
+                async with async_timeout.timeout(timeout_seconds):
+                    async with session.post(
+                        url,
+                        data=data,
+                        auth=aiohttp.BasicAuth(username, password),
+                        headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    ) as resp:
+                        if resp.status in (401, 403):
+                            raise HomeAssistantError(
+                                "Invalid auth for Apex status.cgi feed control"
+                            )
+                        if resp.status == 404:
+                            raise HomeAssistantError(
+                                "Feed control endpoint not found on controller"
+                            )
+                        resp.raise_for_status()
+                        await resp.text()
 
         try:
             rest_path, rest_payload = _rest_payload_and_path()

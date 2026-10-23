@@ -38,59 +38,10 @@ from .coordinator import (
     build_module_device_info_from_data,
     build_trident_device_info,
 )
-
-# Apex firmware strings look like "5.15J_6B26" (installed) or "5.16_AC26"
-# (latest): <major>.<minor>[family letter]_<build>. The optional J/L letter is the
-# hardware family, not part of the release identity.
-_FIRMWARE_RE = re.compile(r"^(\d+)\.(\d+)[A-Za-z]?_([0-9A-Za-z]+)$")
-
-
-def normalize_firmware(value: str | None) -> tuple[int, int, str] | None:
-    """Parse an Apex firmware string into (major, minor, build).
-
-    The optional family letter (e.g. the "J" in "5.15J_6B26") is dropped.
-
-    Returns:
-        The normalized tuple, or None when the string is missing or unparseable.
-    """
-    if value is None:
-        return None
-    m = _FIRMWARE_RE.match(value.strip())
-    if m is None:
-        return None
-    return int(m.group(1)), int(m.group(2)), m.group(3)
-
-
-def firmware_update_available(
-    latest: str | None, installed: str | None, flag: bool | None = None
-) -> bool:
-    """Decide whether `latest` represents an update over `installed`.
-
-    Rules:
-    - If major.minor differs, the numerically greater one is newer.
-    - If major.minor is equal and the build code differs, an update is
-      available. Build codes are opaque; their order is never inferred.
-    - If the normalized versions are equal, the controller `flag` decides
-      (True means update available; False/None means none).
-    - If either string is unparseable, fall back to string inequality when both
-      are present.
-    - If either string is missing, only a True `flag` reports an update.
-
-    A False flag never hides a visibly newer version.
-    """
-    if latest is None or installed is None:
-        return flag is True
-
-    new = normalize_firmware(latest)
-    old = normalize_firmware(installed)
-    if new is None or old is None:
-        return latest != installed or flag is True
-
-    if new[:2] != old[:2]:
-        return new[:2] > old[:2] or flag is True
-    if new[2] != old[2]:
-        return True
-    return flag is True
+from .firmware import (
+    firmware_update_available as firmware_update_available,
+    normalize_firmware as normalize_firmware,
+)
 
 
 def _raw_nstat(data: dict[str, Any]) -> dict[str, Any]:
