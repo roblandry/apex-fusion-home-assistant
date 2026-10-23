@@ -190,7 +190,9 @@ class ApexUpdateEntity(UpdateEntity):
         self._ref = ref
         self._install_waiters: list[asyncio.Future[None]] = []
         self._install_unsubs: list[Callable[[], None]] = []
-        self._removed = False
+        # Bumped on every removal. HA re-adds the same instance after an
+        # entity_id rename, so a flag could not tell "removed" from "re-added".
+        self._removal_gen = 0
 
         ctx = ApexFusionContext.from_entry_and_coordinator(entry, coordinator)
 
@@ -374,12 +376,15 @@ class ApexUpdateEntity(UpdateEntity):
         if not self._update_available():
             raise HomeAssistantError("No firmware update is available")
 
+        removal_gen = self._removal_gen
         await coordinator.async_request_firmware_install()
 
-        if self._removed:
-            # Removed while the request was in flight: there is nothing left to
-            # settle a waiter, so do not create one. The install carries on with
-            # the coordinator and is not resent.
+        if self._removal_gen != removal_gen:
+            # Removed while the request was in flight (even if re-added since):
+            # the removal already ran, so nothing would settle a waiter. Do not
+            # create one. The install carries on with the coordinator and is not
+            # resent. A call started after a re-add captures the new generation
+            # and is unaffected.
             raise HomeAssistantError(_REMOVED_MESSAGE)
 
         # No await between the request returning and the listener below, so the
@@ -430,7 +435,7 @@ class ApexUpdateEntity(UpdateEntity):
         The install itself belongs to the coordinator and carries on; only this
         entity's wait for it ends.
         """
-        self._removed = True
+        self._removal_gen += 1
         for unsub in list(self._install_unsubs):
             unsub()
         self._install_unsubs.clear()

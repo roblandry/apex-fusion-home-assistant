@@ -579,6 +579,65 @@ async def test_removal_while_the_request_is_in_flight_creates_no_waiter(
     assert coord.install_in_progress is True
 
 
+async def _remove_and_re_add(ent: Any, coord: Any) -> None:
+    """What HA does to the same instance when its entity_id is renamed."""
+    await ent.async_will_remove_from_hass()
+    await ent.async_added_to_hass()
+    # Drop the entity's own state listener so tests count only the install wait.
+    coord.listeners.clear()
+
+
+async def test_install_after_a_same_instance_remove_and_re_add_succeeds(
+    hass, enable_custom_integrations
+):
+    ent, coord = await _controller(hass)
+    await _remove_and_re_add(ent, coord)
+
+    async def _quick() -> str:
+        coord.last_install_result = INSTALL_RESULT_SUCCESS
+        return "accepted"
+
+    coord.request.side_effect = _quick
+    await ent.async_install(None, False)
+
+    coord.request.assert_awaited_once()
+    coord.end_window.assert_not_awaited()
+    assert coord.listeners == []
+    assert ent._install_waiters == []
+    assert ent._install_unsubs == []
+
+
+async def test_removal_then_re_add_during_the_request_still_raises_removed(
+    hass, enable_custom_integrations
+):
+    ent, coord = await _controller(hass)
+    release = asyncio.Event()
+
+    async def _held() -> str:
+        await release.wait()
+        coord.install_in_progress = True
+        return "accepted"
+
+    coord.request.side_effect = _held
+    task = asyncio.ensure_future(ent.async_install(None, False))
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert not task.done()
+
+    await _remove_and_re_add(ent, coord)
+    release.set()
+    async with asyncio.timeout(1):
+        with pytest.raises(HomeAssistantError, match="entity was removed"):
+            await task
+
+    assert coord.listeners == []
+    assert ent._install_waiters == []
+    assert ent._install_unsubs == []
+    coord.request.assert_awaited_once()
+    coord.end_window.assert_not_awaited()
+    assert coord.install_in_progress is True
+
+
 async def test_removal_with_nothing_pending_is_a_no_op(
     hass, enable_custom_integrations
 ):
