@@ -363,7 +363,7 @@ class ApexUpdateEntity(UpdateEntity):
 
         # No await between the request returning and the listener below, so the
         # window cannot close unseen.
-        closed: asyncio.Future[None] = self.hass.loop.create_future()
+        closed: asyncio.Future[None] = asyncio.get_running_loop().create_future()
 
         def _on_update() -> None:
             if not coordinator.install_in_progress and not closed.done():

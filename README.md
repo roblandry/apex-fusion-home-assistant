@@ -20,9 +20,10 @@ Contributors are welcome (issues, testing feedback, and PRs).
 > This project is not affiliated with Neptune Systems and has no connection to the Apex Fusion
 > cloud service. It communicates only with the controller on your local network.
 >
-> Use at your own discretion. Firmware updates are applied via Neptune’s workflow, and this
-> project cannot guarantee update safety. You assume all risk, including potential device
-> malfunction or warranty implications.
+> Use at your own discretion. The controller can be updated from Home Assistant (see
+> [Firmware updates](#firmware-updates)), and this project cannot guarantee update
+> safety. You assume all risk, including potential device malfunction or warranty
+> implications.
 
 > [!NOTE]
 > The Apex REST API and legacy CGI endpoints can report different device/module layouts.
@@ -149,7 +150,7 @@ Always created:
 
 Only when **REST is active** (no legacy CGI parsing):
 
-- **Updates** (read-only firmware version entities)
+- **Updates** (firmware version entities; the controller's can install, see [Firmware updates](#firmware-updates))
 - **Network diagnostics** (IP, gateway, netmask, Wi‑Fi SSID/strength/quality, DHCP/Wi‑Fi enabled)
 
 Only when **REST is active and login is enabled** (authenticated control):
@@ -263,16 +264,44 @@ Wi-Fi SSID: MySSID-IoT-2.4
 Wi-Fi Strength: 100.0%
 ```
 
-## Firmware Updates
+## Firmware updates
 
 Home Assistant has a first-class Update platform; this integration exposes firmware
-updates there.
+updates there. These entities are only available when REST parsing is active (they are not
+created in legacy CGI mode).
 
-These entities are only available when REST parsing is active (they are not created in legacy CGI mode).
+The controller's **Firmware** update entity can install a new AOS version from Home Assistant.
+Module firmware is shown for information only; this integration does not update modules.
 
-> Important: The Update entities are **informational only**. This integration does not
-> initiate or install firmware updates. Apply firmware updates using Neptune’s own
-> workflow (Fusion/app/controller UI).
+> **Read this before you press Update.** A firmware update can fail. A failed or
+> interrupted update can leave an Apex unresponsive, and recovery can mean contacting
+> Neptune Support. This integration cannot make the update safe and does not
+> guarantee that it will succeed. You install at your own risk.
+
+Before you update:
+
+1. **Read Neptune's release notes** for the new AOS version. Make sure it supports your hardware and modules.
+2. **Back up your controller configuration.** In Apex Local, use the Load/Save Apex Configuration page to save the configuration file, and keep a copy off the controller. Home Assistant backups do not contain controller settings.
+3. **Be there.** Update in person, with physical access to the controller's power and network cable, so you can react if something goes wrong. Do not start an update remotely or from an automation.
+4. **Prepare the tank.** Pick a quiet time. The controller stops managing outputs while it restarts. Do not run feed, test or maintenance cycles, and make sure heaters, return pumps and lighting are safe to be uncontrolled for 10 minutes or more.
+5. **Keep it powered and wired.** The controller must stay on stable power and wired Ethernet for the whole update. Never remove power while it updates.
+
+What happens when you press Update:
+
+- The controller downloads the new AOS itself and restarts. Expect it to be **offline for roughly 5 to 10 minutes**, sometimes longer. Its entities become unavailable during that time and recover on their own, while the Firmware entity stays visible and shows progress.
+- The progress bar is time-based: the controller reports no real progress, so the percentage follows the same timings as its own web UI. Only a changed firmware version counts as success.
+- The integration waits up to 20 minutes for the controller to come back on the new version. It never retries the install by itself and never starts one automatically.
+- If the controller does not return on the new version, nothing is retried and a Repairs issue is raised. Check it locally, and follow Neptune's recovery steps (restart with the reset button, wait about five minutes, then check Apex Local; contact Neptune Support if needed).
+- Neptune's guidance is to update AOS first, then wait 5 to 10 minutes before updating any module. Module install is not supported yet.
+
+Requirements: REST transport and a controller password configured. The install is not offered
+in read-only, legacy or no-login setups.
+
+The install is a normal `update.install` action, so anything that can call it
+(automations, scripts, voice assistants) can start an update. Do not expose it to
+automations you do not fully control.
+
+How the entities get their data:
 
 > Known limitation: Before the update request is sent, the in-progress record is written with an
 > atomic, fsynced file write. Durability beyond what the OS and filesystem guarantee (for example,
