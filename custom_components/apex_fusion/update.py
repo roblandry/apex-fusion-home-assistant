@@ -350,7 +350,7 @@ def _ui_software_key(value: Any) -> int | None:
     m = _UI_SOFTWARE_RE.match(str(value).strip())
     if m is None:
         return None
-    return (
+    packed = (
         int(m.group(1)) << 26
         | int(m.group(2)) << 19
         | int(m.group(5)) << 12
@@ -358,6 +358,10 @@ def _ui_software_key(value: Any) -> int | None:
         | ord(m.group(4)) << 1
         | (1 if m.group(6) else 0)
     )
+    # The UI packs this with JavaScript bitwise operators, which wrap to a
+    # signed 32-bit integer; reproduce that so large majors order the same way.
+    packed &= 0xFFFFFFFF
+    return packed - (1 << 32) if packed >= 1 << 31 else packed
 
 
 _OLD_TRI_CONTROLLER_MIN_KEY = cast(int, _ui_software_key(_OLD_TRI_CONTROLLER_MIN))
@@ -369,7 +373,15 @@ def _module_excluded(module: dict[str, Any], data: dict[str, Any]) -> bool:
     if hwtype in _NO_UPDATE_HWTYPES:
         return True
 
-    if hwtype == "TRI" and str(module.get("hwrev") or "").strip() == "2":
+    hwrev: Any = module.get("hwrev")
+    # The UI tests `2 === hwrev`: only a JSON number equal to 2 matches (not "2"
+    # or true).
+    if (
+        hwtype == "TRI"
+        and isinstance(hwrev, (int, float))
+        and not isinstance(hwrev, bool)
+        and hwrev == 2
+    ):
         controller_key = _ui_software_key(_controller_installed(data))
         # Exclude conservatively when the controller software can't be compared.
         return controller_key is None or controller_key < _OLD_TRI_CONTROLLER_MIN_KEY
@@ -401,6 +413,10 @@ def _module_effective_latest(
     """Latest version to display for a present module."""
     if _module_excluded(module, data):
         # Never an update, whatever the controller reports as latest.
+        return installed
+
+    if str(module.get("swstat") or "").strip().upper() == "PENDING":
+        # An update is already queued or running; the UI offers none.
         return installed
 
     reported_any: Any = module.get("latestFirmware") or module.get("latestSw")

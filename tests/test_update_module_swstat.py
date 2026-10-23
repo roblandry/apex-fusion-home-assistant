@@ -146,9 +146,40 @@ def test_other_trident_hardware_is_not_excluded(hwrev: Any) -> None:
     assert _ref(data).update_flag_fn(data) is True
 
 
-def test_old_hardware_trident_hwrev_as_string() -> None:
-    data = _tri("5.05_3H19", "5.15_6A26", hwrev="2")
-    assert _ref(data).update_flag_fn(data) is None
+@pytest.mark.parametrize(
+    ("hwrev", "excluded"),
+    [(2, True), (2.0, True), ("2", False), (True, False), (1, False), (None, False)],
+)
+def test_trident_hwrev_matches_strict_numeric_two(hwrev: Any, excluded: bool) -> None:
+    data = _tri("5.05_3H19", "5.15_6A26", hwrev=hwrev)
+    assert (_ref(data).update_flag_fn(data) is None) is excluded
+
+
+@pytest.mark.parametrize(
+    ("controller", "offered"),
+    [
+        # The UI's packed value wraps to a signed 32-bit integer, so these major
+        # versions compare below the threshold there.
+        ("32.00_1A00", False),
+        ("36.06_CD21", False),
+        # An ordinary newer major version is still eligible.
+        ("6.00_1A00", True),
+    ],
+)
+def test_trident_controller_version_wraps_like_the_ui(
+    controller: str, offered: bool
+) -> None:
+    data = _tri(controller, "5.15_6A26")
+    assert (_ref(data).update_flag_fn(data) is True) is offered
+
+
+def test_trident_same_month_build_letter_boundary() -> None:
+    below = _tri("5.06_CC21", "5.01_1A20")
+    at = _tri("5.06_CD21", "5.01_1A20")
+    above = _tri("5.06_CE21", "5.01_1A20")
+    assert _ref(below).update_flag_fn(below) is None
+    assert _ref(at).update_flag_fn(at) is True
+    assert _ref(above).update_flag_fn(above) is True
 
 
 def test_missing_module_is_unknown() -> None:
@@ -244,3 +275,48 @@ async def test_entity_states_for_old_edge_cases(hass, enable_custom_integrations
     assert by["PM2"].state == "on"
     assert by["PM2"].installed_version == "Unknown"
     assert by["IOTA"].state == "off"
+
+
+@pytest.mark.parametrize("with_mconf", [False, True])
+@pytest.mark.parametrize("latest_key", ["latestFirmware", "latestSw"])
+async def test_pending_ignores_reported_latest_in_ha_state(
+    hass, enable_custom_integrations, with_mconf: bool, latest_key: str
+) -> None:
+    from tests.test_update_firmware_compare import _device_model, _entities
+
+    data: dict[str, Any] = {
+        "meta": {"serial": "SER", "hostname": "apex", "type": "AC6J"},
+        "raw": {
+            "modules": [
+                {
+                    "abaddr": 1,
+                    "hwtype": "FMM",
+                    "present": True,
+                    "software": "5.06_CD21",
+                    latest_key: "5.15_6A26",
+                    "swstat": "PENDING",
+                },
+                # OK with a newer reported latest is still offered.
+                {
+                    "abaddr": 2,
+                    "hwtype": "PM2",
+                    "present": True,
+                    "software": "5.06_CD21",
+                    latest_key: "5.15_6A26",
+                    "swstat": "OK",
+                },
+            ]
+        },
+    }
+    if with_mconf:
+        data["config"] = {
+            "mconf": [
+                {"abaddr": 1, "hwtype": "FMM", "update": True},
+                {"abaddr": 2, "hwtype": "PM2", "update": False},
+            ]
+        }
+    added = await _entities(hass, data)
+    by = {_device_model(e): e for e in added}
+    assert by["FMM"].latest_version == "5.06_CD21"
+    assert by["FMM"].state == "off"
+    assert by["PM2"].state == "on"
