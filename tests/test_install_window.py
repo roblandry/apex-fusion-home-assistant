@@ -48,6 +48,7 @@ from custom_components.apex_fusion.coordinator import (
     install_progress,
     redact_nconf_for_install,
 )
+from custom_components.apex_fusion.firmware import firmware_is_newer
 
 # The module-level fixture below replaces asyncio.sleep globally (login retries
 # would otherwise sleep); tests that need to yield to the loop use this one.
@@ -2090,3 +2091,213 @@ async def test_rejection_after_the_window_already_closed_still_raises(
         await coord.async_request_firmware_install()
     assert coord.install_in_progress is False
     assert len(ctl.calls_for("PUT", "/rest/config/nconf")) == 1
+
+
+# ---------------------------------------------------------------------------
+# Recorded close result and downgrade handling (PR C requirements)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("candidate", "installed", "expected"),
+    [
+        ("5.16L_AC26", "5.15J_6B26", True),
+        ("5.15J_6B26", "5.16L_AC26", False),  # rollback
+        ("5.14J_0001", "5.15J_6B26", False),  # rollback
+        ("5.15J_6B26", "5.15J_6B26", False),  # unchanged
+        ("5.16L_AC26", "5.16J_AC26", False),  # family letter ignored
+        ("5.16L_BC27", "5.16J_AC26", True),  # same release line, other build
+        ("6.00_0001", "5.99J_ZZ99", True),
+        ("garbage", "5.15J_6B26", False),  # unparseable is never newer
+        ("5.16L_AC26", "garbage", False),
+        ("5.16L_AC26", None, False),
+        (None, "5.15J_6B26", False),
+    ],
+)
+def test_firmware_is_newer(candidate, installed, expected):
+    assert firmware_is_newer(candidate, installed) is expected
+
+
+async def test_last_install_result_is_none_before_any_attempt(
+    hass, enable_custom_integrations, ctl
+):
+    coord = await _polled(hass, ctl)
+    assert coord.last_install_result is None
+    assert coord.last_install_version is None
+    await coord.async_begin_install_window()
+    assert coord.last_install_result is None
+    await coord.async_end_install_window(INSTALL_RESULT_REJECTED)
+
+
+async def test_success_result_is_set_before_listeners_run(
+    hass, enable_custom_integrations, ctl, freezer
+):
+    coord = await _polled(hass, ctl)
+    coord.update_interval = None
+    seen: list[tuple[bool, str | None, str | None]] = []
+
+    def _listener() -> None:
+        seen.append(
+            (
+                coord.install_in_progress,
+                coord.last_install_result,
+                coord.last_install_version,
+            )
+        )
+
+    coord.async_add_listener(_listener)
+    await coord.async_begin_install_window(expected_version=NEW)
+    ctl.software = NEW
+    await _advance(hass, freezer, 130)
+    await coord.async_refresh()
+    await _advance(hass, freezer, 125)
+
+    assert coord.install_in_progress is False
+    assert coord.last_install_result == INSTALL_RESULT_SUCCESS
+    assert coord.last_install_version == NEW
+    # Every notification that saw the window closed already saw the result.
+    closed = [entry for entry in seen if entry[0] is False]
+    assert closed
+    assert all(r == (False, INSTALL_RESULT_SUCCESS, NEW) for r in closed)
+    # And while it was open there was no result yet.
+    assert all(r[1] is None for r in seen if r[0] is True)
+
+
+async def test_late_version_change_that_misses_the_soak_is_a_timeout(
+    hass, enable_custom_integrations, ctl, freezer
+):
+    coord = await _polled(hass, ctl)
+    coord.update_interval = None
+    await coord.async_begin_install_window()
+    ctl.mode = "refuse"
+    await _advance(hass, freezer, 1150)
+    # The controller only answers at 1150 s, on the new version: the soak cannot
+    # finish before the 20 minute cap.
+    ctl.mode = "ok"
+    ctl.software = NEW
+    await coord.async_refresh()
+    assert coord.install_in_progress is True
+    await _advance(hass, freezer, 60)
+
+    assert coord.install_in_progress is False
+    assert coord.last_install_result == INSTALL_RESULT_TIMEOUT
+    assert coord.last_install_version is None
+    assert _issue(hass, coord) is not None
+
+
+async def test_result_is_retained_after_close_and_reset_by_the_next_attempt(
+    hass, enable_custom_integrations, ctl
+):
+    coord = await _polled(hass, ctl)
+    await coord.async_begin_install_window()
+    await coord.async_end_install_window(INSTALL_RESULT_TIMEOUT)
+    assert coord.last_install_result == INSTALL_RESULT_TIMEOUT
+    # Nothing but the next attempt clears it.
+    await coord.async_refresh()
+    assert coord.last_install_result == INSTALL_RESULT_TIMEOUT
+
+    await coord.async_begin_install_window()
+    assert coord.last_install_result is None
+    assert coord.last_install_version is None
+    await coord.async_end_install_window(INSTALL_RESULT_REJECTED)
+    assert coord.last_install_result == INSTALL_RESULT_REJECTED
+
+
+@pytest.mark.parametrize("status", [400, 404])
+async def test_rejected_request_records_a_rejected_result(
+    hass, enable_custom_integrations, ctl, status
+):
+    coord = await _polled(hass, ctl)
+    ctl.put_result = status
+    with pytest.raises(HomeAssistantError):
+        await coord.async_request_firmware_install()
+    assert coord.last_install_result == INSTALL_RESULT_REJECTED
+    assert coord.last_install_version is None
+
+
+async def test_hard_cap_without_any_version_change_records_a_timeout(
+    hass, enable_custom_integrations, ctl, freezer
+):
+    coord = await _polled(hass, ctl)
+    await coord.async_begin_install_window()
+    ctl.mode = "refuse"
+    await _advance(hass, freezer, 1201)
+    assert coord.last_install_result == INSTALL_RESULT_TIMEOUT
+
+
+@pytest.mark.parametrize("seen_version", ["5.14J_0001", "5.15J_6B26", "garbage"])
+async def test_downgrade_or_unparseable_version_is_never_success(
+    hass, enable_custom_integrations, ctl, freezer, caplog, seen_version
+):
+    coord = await _polled(hass, ctl)
+    coord.update_interval = None
+    await coord.async_begin_install_window(expected_version=NEW)
+    ctl.software = seen_version
+
+    await _advance(hass, freezer, 130)
+    with caplog.at_level(logging.WARNING):
+        await coord.async_refresh()
+        await _advance(hass, freezer, 200)
+        await coord.async_refresh()
+        await _advance(hass, freezer, 300)
+        await coord.async_refresh()
+    # Long past the soak, still waiting; no success.
+    assert coord.install_in_progress is True
+    assert coord.last_install_result is None
+    assert coord._install_version_changed is False
+    warned = [r for r in caplog.records if "not newer" in r.getMessage()]
+    assert len(warned) == (0 if seen_version == OLD else 1)
+
+    await _advance(hass, freezer, 700)
+    assert coord.install_in_progress is False
+    assert coord.last_install_result == INSTALL_RESULT_TIMEOUT
+    assert coord.last_install_version is None
+    assert _issue(hass, coord) is not None
+    assert ctl.calls_for("PUT", "/rest/config/nconf") == []
+
+
+async def test_rollback_then_newer_version_still_succeeds(
+    hass, enable_custom_integrations, ctl, freezer
+):
+    coord = await _polled(hass, ctl)
+    coord.update_interval = None
+    await coord.async_begin_install_window()
+    ctl.software = "5.14J_0001"
+    await _advance(hass, freezer, 130)
+    await coord.async_refresh()
+    assert coord._install_version_changed is False
+
+    ctl.software = NEW
+    await coord.async_refresh()
+    assert coord._install_version_changed is True
+    await _advance(hass, freezer, 125)
+    assert coord.last_install_result == INSTALL_RESULT_SUCCESS
+    assert coord.last_install_version == NEW
+
+
+async def test_expired_marker_result_is_recorded(
+    hass, enable_custom_integrations, ctl, freezer
+):
+    coord = await _polled(hass, ctl)
+    entry = coord.entry
+    await coord.async_begin_install_window()
+    await coord.async_shutdown()
+    freezer.tick(timedelta(minutes=25))
+    ctl.software = NEW
+    fresh = _coordinator_for(hass, entry)
+    await fresh.async_restore_install_window()
+    await fresh.async_refresh()
+    assert fresh.last_install_result == INSTALL_RESULT_SUCCESS
+    assert fresh.last_install_version == NEW
+
+    # A rolled-back version at an expired marker is not success.
+    await fresh.async_begin_install_window()
+    await fresh.async_shutdown()
+    freezer.tick(timedelta(minutes=25))
+    ctl.software = "5.14J_0001"
+    again = _coordinator_for(hass, entry)
+    await again.async_restore_install_window()
+    await again.async_refresh()
+    assert again.last_install_result == INSTALL_RESULT_TIMEOUT
+    assert again.last_install_version is None
+    assert _issue(hass, again) is not None
