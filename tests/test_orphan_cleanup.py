@@ -104,79 +104,44 @@ def _idents(hass, entry) -> set[str]:
     }
 
 
-async def test_orphan_owns_suffixed_id_is_removed_and_live_id_kept(
-    hass, enable_custom_integrations
-):
-    """Rob's likely shape: the orphan holds ``_2``; the live entity keeps its id."""
+async def test_entity_free_orphan_is_removed(hass, enable_custom_integrations):
     entry = _entry(hass)
-    live, module, orphan = _seed(hass, entry)
-    ent_reg = er.async_get(hass)
-    live_ent = _ent(hass, entry, LIVE_UID, "tank_temp", live)
-    stale = _ent(hass, entry, OLD_UID, "tank_temp_2", orphan)
-    assert (live_ent.entity_id, stale.entity_id) == (
-        "sensor.tank_temp",
-        "sensor.tank_temp_2",
-    )
+    _live, module, orphan = _seed(hass, entry)
 
     await _setup(hass, entry)
 
     assert _idents(hass, entry) == {LIVE, f"{LIVE}_module_FMM_1"}
+    assert dr.async_get(hass).async_get(orphan.id) is None
     assert dr.async_get(hass).async_get(module.id) is not None
-    assert ent_reg.async_get(stale.entity_id) is None
-    assert ent_reg.async_get_entity_id("sensor", DOMAIN, LIVE_UID) == "sensor.tank_temp"
 
 
-async def test_orphan_owns_canonical_id_live_entity_is_renamed_to_it(
+async def test_orphan_with_entities_is_left_untouched_and_removable(
     hass, enable_custom_integrations
 ):
     entry = _entry(hass)
     live, _module, orphan = _seed(hass, entry)
     ent_reg = er.async_get(hass)
-    old_ent = _ent(hass, entry, OLD_UID, "tank_temp", orphan)
-    live_ent = _ent(hass, entry, LIVE_UID, "tank_temp_2", live)
-    assert (old_ent.entity_id, live_ent.entity_id) == (
-        "sensor.tank_temp",
-        "sensor.tank_temp_2",
+    _ent(hass, entry, LIVE_UID, "tank_temp", live)
+    _ent(hass, entry, OLD_UID, "tank_temp_2", orphan)
+    disabled = _ent(hass, entry, "ac6_12345_probe_x", "tank_x", orphan)
+    ent_reg.async_update_entity(
+        disabled.entity_id, disabled_by=er.RegistryEntryDisabler.USER
     )
 
     await _setup(hass, entry)
 
-    assert OLD not in _idents(hass, entry)
-    assert ent_reg.async_get_entity_id("sensor", DOMAIN, LIVE_UID) == "sensor.tank_temp"
-    assert ent_reg.async_get("sensor.tank_temp_2") is None
-    assert ent_reg.async_get_entity_id("sensor", DOMAIN, OLD_UID) is None
-
-
-async def test_orphan_entity_without_live_counterpart_keeps_the_device(
-    hass, enable_custom_integrations
-):
-    entry = _entry(hass)
-    live, _module, orphan = _seed(hass, entry)
-    _ent(hass, entry, LIVE_UID, "tank_temp", live)
-    lonely = _ent(hass, entry, "ac6_12345_probe_nothing", "tank_lonely", orphan)
-
-    await _setup(hass, entry)
-
     assert OLD in _idents(hass, entry)
-    assert er.async_get(hass).async_get(lonely.entity_id) is not None
-
-
-async def test_unpaired_entity_ids_keep_the_device(hass, enable_custom_integrations):
-    entry = _entry(hass)
-    live, _module, orphan = _seed(hass, entry)
-    _ent(hass, entry, LIVE_UID, "tank_temp", live)
-    _ent(hass, entry, OLD_UID, "renamed_by_user", orphan)
-
-    await _setup(hass, entry)
-
-    assert OLD in _idents(hass, entry)
+    assert ent_reg.async_get("sensor.tank_temp_2") is not None
+    assert ent_reg.async_get(disabled.entity_id) is not None
+    assert ent_reg.async_get("sensor.tank_temp") is not None
+    kept = dr.async_get(hass).async_get(orphan.id)
+    assert kept is not None
+    assert await async_remove_config_entry_device(hass, cast(Any, entry), kept)
 
 
 async def test_second_setup_is_a_noop(hass, enable_custom_integrations):
     entry = _entry(hass)
-    live, _module, orphan = _seed(hass, entry)
-    _ent(hass, entry, LIVE_UID, "tank_temp", live)
-    _ent(hass, entry, OLD_UID, "tank_temp_2", orphan)
+    _seed(hass, entry)
     await _setup(hass, entry)
     before = _idents(hass, entry)
 
@@ -365,133 +330,6 @@ async def test_unpaired_orphan_stays_removable_from_the_ui_when_loaded(
     assert await async_remove_config_entry_device(hass, cast(Any, entry), kept)
 
 
-async def test_disabled_live_counterpart_defers_the_whole_device(
-    hass, enable_custom_integrations
-):
-    entry = _entry(hass)
-    live, _module, orphan = _seed(hass, entry)
-    ent_reg = er.async_get(hass)
-    old_ent = _ent(hass, entry, OLD_UID, "tank_temp", orphan)
-    live_ent = _ent(hass, entry, LIVE_UID, "tank_temp_2", live)
-    ent_reg.async_update_entity(
-        live_ent.entity_id, disabled_by=er.RegistryEntryDisabler.USER
-    )
-
-    await _setup(hass, entry)
-
-    assert OLD in _idents(hass, entry)
-    assert ent_reg.async_get(old_ent.entity_id) is not None
-    assert (
-        ent_reg.async_get_entity_id("sensor", DOMAIN, LIVE_UID) == "sensor.tank_temp_2"
-    )
-
-
-def _fail_update(match):
-    """Wrap EntityRegistry.async_update_entity to fail when ``match`` is true."""
-    original = er.EntityRegistry.async_update_entity
-
-    def wrapper(self, entity_id, **kwargs):
-        if match(entity_id, kwargs.get("new_entity_id")):
-            raise RuntimeError("injected failure")
-        return original(self, entity_id, **kwargs)
-
-    return patch.object(er.EntityRegistry, "async_update_entity", wrapper)
-
-
-async def _canonical_case(hass):
-    entry = _entry(hass)
-    live, _module, orphan = _seed(hass, entry)
-    _ent(hass, entry, OLD_UID, "tank_temp", orphan)
-    _ent(hass, entry, LIVE_UID, "tank_temp_2", live)
-    return entry
-
-
-async def _assert_recovers(hass, entry):
-    """Next clean setup finishes the transfer."""
-    with patch(
-        "custom_components.apex_fusion.coordinator."
-        "ApexNeptuneDataUpdateCoordinator._async_update_rest",
-        new=AsyncMock(return_value=_payload()),
-    ):
-        assert await hass.config_entries.async_reload(entry.entry_id)
-        await hass.async_block_till_done()
-    ent_reg = er.async_get(hass)
-    assert OLD not in _idents(hass, entry)
-    assert ent_reg.async_get_entity_id("sensor", DOMAIN, LIVE_UID) == "sensor.tank_temp"
-    assert ent_reg.async_get("sensor.tank_temp_2") is None
-    assert ent_reg.async_get_entity_id("sensor", DOMAIN, OLD_UID) is None
-
-
-async def test_failure_parking_the_orphan_keeps_canonical_and_recovers(
-    hass, enable_custom_integrations
-):
-    entry = await _canonical_case(hass)
-    with _fail_update(lambda eid, new: bool(new and new.endswith("_apex_legacy"))):
-        await _setup(hass, entry)
-
-    ent_reg = er.async_get(hass)
-    assert OLD in _idents(hass, entry)
-    assert ent_reg.async_get_entity_id("sensor", DOMAIN, OLD_UID) == "sensor.tank_temp"
-    await _assert_recovers(hass, entry)
-
-
-async def test_failure_renaming_the_live_entity_rolls_back_and_recovers(
-    hass, enable_custom_integrations
-):
-    entry = await _canonical_case(hass)
-    with _fail_update(
-        lambda eid, new: eid == "sensor.tank_temp_2" and new == "sensor.tank_temp"
-    ):
-        await _setup(hass, entry)
-
-    ent_reg = er.async_get(hass)
-    assert OLD in _idents(hass, entry)
-    assert ent_reg.async_get_entity_id("sensor", DOMAIN, OLD_UID) == "sensor.tank_temp"
-    assert (
-        ent_reg.async_get_entity_id("sensor", DOMAIN, LIVE_UID) == "sensor.tank_temp_2"
-    )
-    await _assert_recovers(hass, entry)
-
-
-async def test_failure_in_rollback_leaves_a_parked_entity_that_recovers(
-    hass, enable_custom_integrations
-):
-    entry = await _canonical_case(hass)
-    with _fail_update(
-        lambda eid, new: (eid == "sensor.tank_temp_2" and new == "sensor.tank_temp")
-        or (eid == "sensor.tank_temp_apex_legacy" and new == "sensor.tank_temp")
-    ):
-        await _setup(hass, entry)
-
-    ent_reg = er.async_get(hass)
-    assert OLD in _idents(hass, entry)
-    assert (
-        ent_reg.async_get_entity_id("sensor", DOMAIN, OLD_UID)
-        == "sensor.tank_temp_apex_legacy"
-    )
-    await _assert_recovers(hass, entry)
-
-
-async def test_failure_removing_the_parked_orphan_recovers(
-    hass, enable_custom_integrations
-):
-    entry = await _canonical_case(hass)
-    original = er.EntityRegistry.async_remove
-
-    def failing_remove(self, entity_id):
-        if entity_id == "sensor.tank_temp_apex_legacy":
-            raise RuntimeError("injected failure")
-        return original(self, entity_id)
-
-    with patch.object(er.EntityRegistry, "async_remove", failing_remove):
-        await _setup(hass, entry)
-
-    ent_reg = er.async_get(hass)
-    assert OLD in _idents(hass, entry)
-    assert ent_reg.async_get_entity_id("sensor", DOMAIN, LIVE_UID) == "sensor.tank_temp"
-    await _assert_recovers(hass, entry)
-
-
 async def test_remove_device_fails_closed_without_identity(
     hass, enable_custom_integrations
 ):
@@ -519,15 +357,3 @@ async def test_absent_live_device_defers_cleanup(hass, enable_custom_integration
 
     assert not async_remove_orphan_controller_device(hass, cast(Any, entry), LIVE)
     assert dr.async_get(hass).async_get(orphan.id) is not None
-
-
-async def test_orphan_entity_with_unrecognised_unique_id_keeps_the_device(
-    hass, enable_custom_integrations
-):
-    entry = _entry(hass)
-    live, _module, orphan = _seed(hass, entry)
-    _ent(hass, entry, LIVE_UID, "tank_temp", live)
-    _ent(hass, entry, "something_else_entirely", "tank_odd", orphan)
-
-    assert not async_remove_orphan_controller_device(hass, cast(Any, entry), LIVE)
-    assert OLD in _idents(hass, entry)

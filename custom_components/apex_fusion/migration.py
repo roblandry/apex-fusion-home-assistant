@@ -412,92 +412,15 @@ def find_orphan_controller_device(
     return sharing[0]
 
 
-_TEMP_SUFFIX = "_apex_legacy"
-
-
-def _plan_entity_pairing(
-    hass: HomeAssistant,
-    entry: ConfigEntry,
-    orphan: dr.DeviceEntry,
-    live_identifier: str,
-) -> tuple[list[tuple[str, str, str | None]], str | None]:
-    """Pair each orphan entity with its live counterpart.
-
-    Returns ``(plan, problem)``. Each plan item is ``(orphan_entity_id,
-    live_entity_id, canonical_id)``; ``canonical_id`` is set when the live
-    entity must take over the orphan's id. ``problem`` is set when any entity
-    cannot be paired with certainty (or the pairing would disable a working
-    entity), in which case nothing may be removed.
-
-    An orphan entity id ending in ``_apex_legacy`` is a half-finished transfer
-    from an earlier attempt and is recognised so it can be completed.
-    """
-    ent_reg = er.async_get(hass)
-    orphan_token = next(iter(orphan.identifiers))[1].partition(":")[2]
-    old_prefix = f"{_LEGACY_PREFIX}_{orphan_token}_".lower()
-    live_prefix = f"{live_identifier.replace(':', '_')}_".lower()
-    plan: list[tuple[str, str, str | None]] = []
-    for reg_entry in er.async_entries_for_device(
-        ent_reg, orphan.id, include_disabled_entities=True
-    ):
-        if reg_entry.config_entry_id != entry.entry_id:
-            return [], f"{reg_entry.entity_id} belongs to another config entry"
-        if not reg_entry.unique_id.startswith(old_prefix):
-            return [], f"{reg_entry.entity_id} has an unrecognised unique_id"
-        key = reg_entry.unique_id[len(old_prefix) :]
-        live_id = ent_reg.async_get_entity_id(
-            reg_entry.domain, reg_entry.platform, f"{live_prefix}{key}"
-        )
-        live_entry = ent_reg.async_get(live_id) if live_id else None
-        if live_entry is None or live_entry.config_entry_id != entry.entry_id:
-            return [], f"{reg_entry.entity_id} has no live counterpart"
-        if reg_entry.disabled_by is None and live_entry.disabled_by is not None:
-            return [], f"live counterpart of {reg_entry.entity_id} is disabled"
-        old_id, new_id = reg_entry.entity_id, live_entry.entity_id
-        canonical = old_id.removesuffix(_TEMP_SUFFIX)
-        if re.fullmatch(rf"{re.escape(canonical)}_\d+", new_id):
-            # The orphan holds the canonical id; the live entity takes it over.
-            plan.append((old_id, new_id, canonical))
-        elif re.fullmatch(rf"{re.escape(new_id)}_(\d+|apex_legacy)", old_id):
-            plan.append((old_id, new_id, None))
-        else:
-            return [], f"{old_id} and {new_id} are not a suffix pair"
-    return plan, None
-
-
-def _transfer_entity_id(
-    ent_reg: er.EntityRegistry, old_id: str, live_id: str, canonical: str
-) -> None:
-    """Give ``canonical`` to the live entity so that no step can lose the id.
-
-    The orphan entity is parked at a temporary id, the live entity is renamed,
-    and only then is the orphan removed. If the live rename fails the orphan is
-    put back, so the canonical id always stays on an entity. A leftover parked
-    entity is recognised by the next setup and the transfer is completed.
-    """
-    parked = old_id
-    if old_id == canonical:
-        parked = f"{canonical}{_TEMP_SUFFIX}"
-        ent_reg.async_update_entity(old_id, new_entity_id=parked)
-    try:
-        ent_reg.async_update_entity(live_id, new_entity_id=canonical)
-    except Exception:
-        if parked != old_id:
-            ent_reg.async_update_entity(parked, new_entity_id=old_id)
-        raise
-    ent_reg.async_remove(parked)
-
-
 def async_remove_orphan_controller_device(
     hass: HomeAssistant, entry: ConfigEntry, live_identifier: str
 ) -> bool:
-    """Remove the old ``AC6:<token>`` controller device when it is provably a dupe.
+    """Remove the old ``AC6:<token>`` controller device when it is a bare duplicate.
 
-    Does nothing (and logs why) if the live identity is unverified, the orphan
-    is ambiguous, an entity cannot be paired with a live one, or pairing would
-    hand an id to a disabled entity. If a registry step fails part way, the
-    canonical entity id stays on an entity, the device is kept, and the next
-    setup completes the work.
+    Only a device that passes ``find_orphan_controller_device`` and has no
+    entities in the entity registry (any entry, including disabled ones) is
+    removed. An orphan that still holds entities is left untouched, with its
+    entities, so it can be deleted from the device page instead.
 
     Returns:
         True if a device was removed.
@@ -505,34 +428,19 @@ def async_remove_orphan_controller_device(
     orphan = find_orphan_controller_device(hass, entry, live_identifier)
     if orphan is None:
         return False
-    plan, problem = _plan_entity_pairing(hass, entry, orphan, live_identifier)
-    if problem is not None:
+    if er.async_entries_for_device(
+        er.async_get(hass), orphan.id, include_disabled_entities=True
+    ):
         _LOGGER.info(
-            "Apex entry %s: leaving old controller device in place (%s)",
+            "Apex entry %s: old controller device still holds entities; "
+            "it can be removed from its device page",
             entry.entry_id,
-            problem,
         )
         return False
-    ent_reg = er.async_get(hass)
-    try:
-        for old_id, live_id, canonical in plan:
-            if canonical is None:
-                ent_reg.async_remove(old_id)
-            else:
-                _transfer_entity_id(ent_reg, old_id, live_id, canonical)
-        dr.async_get(hass).async_remove_device(orphan.id)
-    except Exception:  # noqa: BLE001
-        _LOGGER.warning(
-            "Apex entry %s: could not finish removing the old controller device; "
-            "it will be retried on the next start",
-            entry.entry_id,
-            exc_info=True,
-        )
-        return False
+    dr.async_get(hass).async_remove_device(orphan.id)
     _LOGGER.info(
-        "Apex entry %s: removed duplicate controller device %s (%d entities)",
+        "Apex entry %s: removed duplicate controller device %s",
         entry.entry_id,
         next(iter(orphan.identifiers))[1],
-        len(plan),
     )
     return True
