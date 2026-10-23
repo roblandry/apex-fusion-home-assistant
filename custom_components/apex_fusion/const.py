@@ -93,10 +93,13 @@ INSTALL_PROGRESS_TICK: Final = timedelta(seconds=5)
 # Longest REST backoff honoured while the controller is expected to be rebooting.
 INSTALL_REST_BACKOFF_CAP_SECONDS: Final = 30.0
 
-# nconf fields never sent back to the controller with the install request.
-INSTALL_NCONF_STRIPPED_KEYS: Final = frozenset(
-    {"password", "emailPassword", "wifiAPPassword", "ssid"}
-)
+# Key names (case-insensitive substring, at any depth) that are never sent back
+# to the controller with the install request. The controller treats omitted
+# fields as unchanged, so dropping them is safe; echoing a secret is not.
+INSTALL_NCONF_REDACT_PATTERN: Final = r"pass|pwd|secret|token|key|auth|credential|ssid"
+
+# Persisted in-flight marker (one per config entry).
+INSTALL_STORE_VERSION: Final = 1
 
 PLATFORMS: Final[list[Platform]] = [
     Platform.SENSOR,

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, Callable, cast
+from typing import Any, AsyncGenerator, Callable, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
@@ -39,6 +40,12 @@ class _CoordinatorStub:
                 self._listeners.remove(cb)
 
         return _remove
+
+    @asynccontextmanager
+    async def async_control_write(self) -> AsyncGenerator[None]:
+        if self.install_in_progress:
+            raise HomeAssistantError("A firmware install is in progress")
+        yield
 
     def fire_update(self) -> None:
         for cb in list(self._listeners):
@@ -415,6 +422,51 @@ async def test_switch_feed_no_cgi_fallback_during_firmware_install(
     )
     coordinator.async_rest_put_json = AsyncMock(
         side_effect=HomeAssistantError("A firmware install is in progress")
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
+    session = _Session()
+    monkeypatch.setattr(
+        "custom_components.apex_fusion.switch.async_get_clientsession",
+        lambda _h: session,
+    )
+
+    from custom_components.apex_fusion.switch import ApexFeedModeSwitch, _FeedRef
+
+    ent = ApexFeedModeSwitch(
+        hass,
+        cast(Any, coordinator),
+        cast(Any, entry),
+        ref=_FeedRef(did="1", name="Feed A"),
+    )
+
+    with pytest.raises(HomeAssistantError, match="firmware install"):
+        await ent.async_turn_on()
+    assert session.post_calls == []
+
+
+async def test_switch_feed_404_fallback_rechecks_window_before_cgi_post(
+    hass, enable_custom_integrations, monkeypatch
+):
+    """The REST write began before the install; its 404 arrives after it opened."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "192.0.2.10", CONF_USERNAME: "admin", CONF_PASSWORD: "pw"},
+        unique_id="192.0.2.10",
+        title="Apex (192.0.2.10)",
+    )
+    entry.add_to_hass(hass)
+
+    coordinator = _CoordinatorStub(
+        data={"meta": {"serial": "ABC"}, "feed": {"name": 0}}
+    )
+
+    async def _rest_put_404_after_install_opens(**_kwargs: Any) -> None:
+        coordinator.install_in_progress = True
+        raise FileNotFoundError
+
+    coordinator.async_rest_put_json = AsyncMock(
+        side_effect=_rest_put_404_after_install_opens
     )
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
 

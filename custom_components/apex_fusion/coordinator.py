@@ -13,12 +13,15 @@ import logging
 import re
 import time
 import xml.etree.ElementTree as ET
-from collections.abc import Mapping
+from collections.abc import AsyncGenerator, Mapping
+from contextlib import asynccontextmanager
 from http import HTTPStatus
 from typing import Any, cast
 
 import aiohttp
 import async_timeout
+from aiohttp.connector import Connection
+from aiohttp.tracing import Trace
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
@@ -26,8 +29,9 @@ from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.event import async_call_later, async_track_time_interval
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
-from homeassistant.util import slugify
+from homeassistant.util import dt as dt_util, slugify
 from yarl import URL
 
 from .const import (
@@ -43,7 +47,7 @@ from .const import (
     DEFAULT_STATUS_PATH,
     DEFAULT_TIMEOUT_SECONDS,
     DOMAIN,
-    INSTALL_NCONF_STRIPPED_KEYS,
+    INSTALL_NCONF_REDACT_PATTERN,
     INSTALL_PHASE_RECONNECTING,
     INSTALL_PHASE_RESTARTING,
     INSTALL_PHASE_WEB_PAGES,
@@ -56,6 +60,7 @@ from .const import (
     INSTALL_RESULT_REJECTED,
     INSTALL_RESULT_SUCCESS,
     INSTALL_RESULT_TIMEOUT,
+    INSTALL_STORE_VERSION,
     INSTALL_UI_FAIL_WARNING_SECONDS,
     INSTALL_WEB_PAGES_SECONDS,
     INSTALL_WEB_PAGES_SPAN_PERCENT,
@@ -880,6 +885,122 @@ def install_progress(
     return (
         INSTALL_PHASE_RECONNECTING,
         INSTALL_RESTART_PERCENT + int(INSTALL_RECONNECT_CREEP_PERCENT * creep),
+    )
+
+
+_INSTALL_REDACT_RE = re.compile(INSTALL_NCONF_REDACT_PATTERN, re.IGNORECASE)
+
+
+def redact_nconf_for_install(value: Any) -> Any:
+    """Return a copy of an nconf value without secret-like keys.
+
+    The rule is applied recursively, to dict keys at every depth (including
+    dicts inside lists): a key is dropped when its name contains, case
+    insensitively, any of ``pass``, ``pwd``, ``secret``, ``token``, ``key``,
+    ``auth``, ``credential`` or ``ssid``. Everything else is copied unchanged.
+
+    Args:
+        value: A JSON value from the controller's nconf object.
+
+    Returns:
+        A redacted deep copy of ``value``.
+    """
+    if isinstance(value, dict):
+        return {
+            key: redact_nconf_for_install(item)
+            for key, item in cast(dict[Any, Any], value).items()
+            if not _INSTALL_REDACT_RE.search(str(key))
+        }
+    if isinstance(value, list):
+        return [redact_nconf_for_install(item) for item in cast(list[Any], value)]
+    return value
+
+
+class _SingleConnectionConnector(aiohttp.TCPConnector):
+    """TCP connector that hands out one connection, ever.
+
+    aiohttp transparently re-sends idempotent requests (PUT included) once when
+    a connection drops, inside ``ClientSession._request`` and before the caller
+    sees any error. That retry must go through ``connect()``; refusing a second
+    connection turns it into a plain error, so exactly one request can reach
+    the wire. A failed connect (nothing sent) does not use the allowance.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(force_close=True)  # pyright: ignore[reportUnknownMemberType]
+        self._connections_made = 0
+
+    async def connect(
+        self,
+        req: aiohttp.ClientRequest,
+        traces: list[Trace],
+        timeout: aiohttp.ClientTimeout,
+    ) -> Connection:
+        """Return the single allowed connection, or refuse."""
+        if self._connections_made:
+            raise aiohttp.ClientConnectionError(
+                "single-use connection already used; not retrying"
+            )
+        connection = await super().connect(req, traces, timeout)
+        self._connections_made += 1
+        return connection
+
+
+@asynccontextmanager
+async def _one_shot_session() -> AsyncGenerator[aiohttp.ClientSession]:
+    """Yield a private session whose requests can never be retried."""
+    session = aiohttp.ClientSession(connector=_SingleConnectionConnector())
+    try:
+        yield session
+    finally:
+        await session.close()
+
+
+def _parse_install_marker(
+    raw: Any,
+) -> tuple[float, float, str, str | None] | None:
+    """Validate a persisted install marker.
+
+    Returns:
+        ``(started_at, expires_at, from_version, expected_version)`` or
+        ``None`` when the marker is missing or malformed.
+    """
+    if not isinstance(raw, dict):
+        return None
+    marker = cast(dict[str, Any], raw)
+    started: Any = marker.get("started_at")
+    expires: Any = marker.get("expires_at")
+    from_version: Any = marker.get("from_version")
+    expected: Any = marker.get("expected_version")
+    if (
+        not isinstance(started, (int, float))
+        or not isinstance(expires, (int, float))
+        or not isinstance(from_version, str)
+        or not from_version
+    ):
+        return None
+    return (
+        float(started),
+        float(expires),
+        from_version,
+        expected if isinstance(expected, str) and expected else None,
+    )
+
+
+def _install_store_for(hass: HomeAssistant, entry_id: str) -> Store[dict[str, Any]]:
+    return Store(hass, INSTALL_STORE_VERSION, f"{DOMAIN}.install_{entry_id}")
+
+
+async def async_remove_install_state(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Delete an entry's persisted install marker and Repairs issue.
+
+    Args:
+        hass: Home Assistant instance.
+        entry: The config entry being removed.
+    """
+    await _install_store_for(hass, entry.entry_id).async_remove()
+    ir.async_delete_issue(
+        hass, DOMAIN, f"firmware_install_unconfirmed_{entry.entry_id}"
     )
 
 
@@ -2039,9 +2160,20 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._install_active: bool = False
         self._install_started: float | None = None
         self._install_reconnected_at: float | None = None
+        self._install_version_changed: bool = False
         self._install_from_version: str | None = None
         self._install_expected_version: str | None = None
         self._install_unsubs: list[CALLBACK_TYPE] = []
+        # Bumped by every new attempt so a stale completion/cleanup can tell it
+        # no longer owns the window or the persisted marker.
+        self._install_generation: int = 0
+        # Marker of an attempt that expired while the entry was not loaded;
+        # judged at the first good poll.
+        self._install_unresolved: tuple[float, float, str, str | None] | None = None
+        # Serializes every controller write with the opening of an install window.
+        self._write_lock = asyncio.Lock()
+        self._marker_lock = asyncio.Lock()
+        self._install_store = _install_store_for(hass, entry.entry_id)
 
         super().__init__(
             hass,
@@ -2573,12 +2705,12 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             HomeAssistantError: On auth, rate limit, or network failures, or
                 while a firmware install is in progress.
         """
-        if self._install_active:
-            raise HomeAssistantError(
-                "A firmware install is in progress; controller writes are blocked "
-                "until it finishes"
-            )
+        async with self.async_control_write():
+            await self._async_rest_put_json_locked(path=path, payload=payload)
 
+    async def _async_rest_put_json_locked(
+        self, *, path: str, payload: dict[str, Any]
+    ) -> None:
         now = time.monotonic()
         if now < self._rest_disabled_until:
             raise HomeAssistantError(
@@ -2602,6 +2734,9 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             headers: dict[str, str] = {"Accept": "*/*"}
             if sid:
                 headers["Cookie"] = f"connect.sid={sid}"
+            # Last check before the bytes go out (the lock already excludes an
+            # install opening meanwhile).
+            self._raise_if_install_active()
             async with async_timeout.timeout(timeout_seconds):
                 async with session.put(url, json=payload, headers=headers) as resp:
                     if resp.status == 404:
@@ -2911,6 +3046,47 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             elapsed=now - self._install_started, reconnected_for=reconnected_for
         )
 
+    @property
+    def _install_issue_id(self) -> str:
+        return f"firmware_install_unconfirmed_{self.entry.entry_id}"
+
+    def _raise_if_install_active(self) -> None:
+        if self._install_active:
+            raise HomeAssistantError(
+                "A firmware install is in progress; controller writes are blocked "
+                "until it finishes"
+            )
+
+    @asynccontextmanager
+    async def async_control_write(self) -> AsyncGenerator[None]:
+        """Serialize a controller write with firmware installs.
+
+        Every write to the controller (REST or CGI) must run inside this
+        context. It holds the per-entry write lock, so a write can never
+        overlap the opening of an install window, and re-checks the window
+        immediately before the caller sends.
+
+        Raises:
+            HomeAssistantError: If a firmware install is in progress.
+        """
+        async with self._write_lock:
+            self._raise_if_install_active()
+            yield
+
+    def _require_known_software(self) -> str:
+        meta_any: Any = (self.data or {}).get("meta")
+        software: Any = (
+            cast(dict[str, Any], meta_any).get("software")
+            if isinstance(meta_any, dict)
+            else None
+        )
+        version = str(software or "").strip()
+        if not version:
+            raise HomeAssistantError(
+                "The installed firmware version is unknown; cannot track an install"
+            )
+        return version
+
     async def async_begin_install_window(
         self, *, expected_version: str | None = None
     ) -> None:
@@ -2919,71 +3095,147 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         While it is open, a controller that refuses sessions or lacks endpoints
         (it is rebooting) makes polls fail with ``UpdateFailed`` instead of
         starting reauth, retries and REST backoff are capped, and every other
-        REST write is blocked.
+        controller write is blocked. An in-flight marker is persisted first so
+        a reload or restart cannot lose track of the install.
 
         Args:
             expected_version: Version the install is expected to produce, used
                 only to flag a surprising result in the log.
 
         Raises:
-            HomeAssistantError: If a window is already open or the installed
-                version is unknown (success could not be detected).
+            HomeAssistantError: If a window is already open, the installed
+                version is unknown, or the marker cannot be persisted.
         """
+        async with self._write_lock:
+            await self._async_begin_install_window_locked(
+                expected_version=expected_version
+            )
+
+    async def _async_begin_install_window_locked(
+        self, *, expected_version: str | None
+    ) -> None:
         if self._install_active:
             raise HomeAssistantError("A firmware install is already in progress")
-        meta_any: Any = (self.data or {}).get("meta")
-        software: Any = (
-            cast(dict[str, Any], meta_any).get("software")
-            if isinstance(meta_any, dict)
-            else None
+        from_version = self._require_known_software()
+
+        started_at = dt_util.utcnow().timestamp()
+        self._install_generation += 1
+        await self._async_save_install_marker(
+            {
+                "entry_id": self.entry.entry_id,
+                "started_at": started_at,
+                "expires_at": started_at + INSTALL_WINDOW_MAX_SECONDS,
+                "from_version": from_version,
+                "expected_version": expected_version,
+            }
         )
-        from_version = str(software or "").strip()
-        if not from_version:
-            raise HomeAssistantError(
-                "The installed firmware version is unknown; cannot track an install"
-            )
 
         self._install_active = True
         self._install_from_version = from_version
         self._install_expected_version = expected_version
         self._install_reconnected_at = None
+        self._install_version_changed = False
+        self._install_unresolved = None
         # A pre-reboot session will not survive the restart.
         self._rest_sid = None
         ir.async_delete_issue(self.hass, DOMAIN, self._install_issue_id)
         self._start_install_clock()
         self.async_update_listeners()
 
-    @property
-    def _install_issue_id(self) -> str:
-        return f"firmware_install_unconfirmed_{self.entry.entry_id}"
+    async def _async_save_install_marker(self, marker: dict[str, Any]) -> None:
+        async with self._marker_lock:
+            try:
+                await self._install_store.async_save(marker)
+            except Exception as err:  # noqa: BLE001
+                raise HomeAssistantError(
+                    "Could not record the firmware install on disk; not starting it "
+                    f"({err.__class__.__name__})"
+                ) from err
 
-    def _start_install_clock(self) -> None:
-        """(Re)start the install clock and its timers from now."""
+    async def _async_clear_install_marker(self, generation: int) -> None:
+        """Remove the persisted marker unless a newer attempt replaced it."""
+        async with self._marker_lock:
+            if generation != self._install_generation:
+                return
+            try:
+                await self._install_store.async_remove()
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.warning(
+                    "Could not remove the firmware install marker (%s)",
+                    err.__class__.__name__,
+                )
+
+    async def async_restore_install_window(self) -> None:
+        """Resume or resolve an install that outlived the previous coordinator.
+
+        Called during entry setup, before the first refresh. A marker younger
+        than the hard cap reopens the window (so a second install is refused
+        and a boot-time 401 cannot start reauth). An expired marker is judged
+        at the first good poll. With no marker, a stale Repairs issue from an
+        earlier failed attempt is removed.
+        """
+        marker_any: Any = await self._install_store.async_load()
+        marker = _parse_install_marker(marker_any)
+        if marker is None:
+            ir.async_delete_issue(self.hass, DOMAIN, self._install_issue_id)
+            if marker_any is not None:
+                await self._async_clear_install_marker(self._install_generation)
+            return
+
+        started_at, expires_at, from_version, expected_version = marker
+        now = dt_util.utcnow().timestamp()
+        if now >= expires_at:
+            self._install_unresolved = marker
+            return
+
+        self._install_generation += 1
+        self._install_active = True
+        self._install_from_version = from_version
+        self._install_expected_version = expected_version
+        self._install_reconnected_at = None
+        self._install_version_changed = False
+        self._start_install_clock(elapsed=max(0.0, now - started_at))
+        _LOGGER.warning(
+            "Resuming a firmware install started before this entry was reloaded; "
+            "new install requests are refused until it resolves"
+        )
+
+    def _start_install_clock(self, *, elapsed: float = 0.0) -> None:
+        """(Re)start the install clock and its timers.
+
+        Args:
+            elapsed: Seconds already spent in this window (when resuming).
+        """
         self._cancel_install_timers()
-        self._install_started = time.monotonic()
-        self._install_unsubs = [
+        self._install_started = time.monotonic() - elapsed
+        unsubs: list[CALLBACK_TYPE] = [
             async_track_time_interval(
                 self.hass, self._async_install_tick, INSTALL_PROGRESS_TICK
-            ),
+            )
+        ]
+        ui_delay = INSTALL_UI_FAIL_WARNING_SECONDS - elapsed
+        if ui_delay > 0:
+            unsubs.append(
+                async_call_later(self.hass, ui_delay, self._async_install_ui_fail_point)
+            )
+        unsubs.append(
             async_call_later(
                 self.hass,
-                INSTALL_UI_FAIL_WARNING_SECONDS,
-                self._async_install_ui_fail_point,
-            ),
-            async_call_later(
-                self.hass, INSTALL_WINDOW_MAX_SECONDS, self._async_install_hard_cap
-            ),
-        ]
+                max(0.0, INSTALL_WINDOW_MAX_SECONDS - elapsed),
+                self._async_install_hard_cap,
+            )
+        )
+        self._install_unsubs = unsubs
 
     def _cancel_install_timers(self) -> None:
         unsubs, self._install_unsubs = self._install_unsubs, []
         for unsub in unsubs:
             unsub()
 
-    @callback
-    def _async_install_tick(self, _now: Any) -> None:
-        """Push the time-based progress to listeners."""
+    async def _async_install_tick(self, _now: Any) -> None:
+        """Push the time-based progress to listeners; finish a soaked install."""
         self.async_update_listeners()
+        await self._async_maybe_complete_install()
 
     @callback
     def _async_install_ui_fail_point(self, _now: Any) -> None:
@@ -3001,8 +3253,20 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._install_active:
             await self.async_end_install_window(INSTALL_RESULT_TIMEOUT)
 
-    def _observe_install_poll(self, data: dict[str, Any]) -> None:
-        """Track a good poll while the window is open (reconnect, completion)."""
+    async def _async_observe_install_poll(self, data: dict[str, Any]) -> None:
+        """Track a good poll: reconnect, version change, expired-marker verdict."""
+        meta_any: Any = data.get("meta")
+        software: Any = (
+            cast(dict[str, Any], meta_any).get("software")
+            if isinstance(meta_any, dict)
+            else None
+        )
+        version = str(software or "").strip()
+
+        if not self._install_active:
+            await self._async_resolve_expired_install(version)
+            return
+
         now = time.monotonic()
         started = self._install_started
         if (
@@ -3014,14 +3278,15 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Do not carry a pre-reboot session into the new firmware.
             self._rest_sid = None
 
-        meta_any: Any = data.get("meta")
-        software: Any = (
-            cast(dict[str, Any], meta_any).get("software")
-            if isinstance(meta_any, dict)
-            else None
-        )
-        version = str(software or "").strip()
-        if version and version != self._install_from_version:
+        if (
+            version
+            and version != self._install_from_version
+            and not self._install_version_changed
+        ):
+            # Remember it, but keep the window (and its write block) open
+            # through the web-pages soak: the version may flip at reconnect
+            # while the controller is still loading its web pages.
+            self._install_version_changed = True
             expected = self._install_expected_version
             if expected and version != expected:
                 _LOGGER.warning(
@@ -3030,12 +3295,36 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     version,
                     expected,
                 )
-            self._close_install_window(INSTALL_RESULT_SUCCESS)
-            self.entry.async_create_background_task(
-                self.hass,
-                self._async_refresh_config_after_install(),
-                f"{DOMAIN}_post_install_config_refresh",
-            )
+        await self._async_maybe_complete_install()
+
+    async def _async_maybe_complete_install(self) -> None:
+        """Close the window once the version changed and the web pages soaked."""
+        reconnected = self._install_reconnected_at
+        if (
+            not self._install_active
+            or not self._install_version_changed
+            or reconnected is None
+            or time.monotonic() - reconnected < INSTALL_WEB_PAGES_SECONDS
+        ):
+            return
+        await self._async_close_install_window(INSTALL_RESULT_SUCCESS)
+        self.entry.async_create_background_task(
+            self.hass,
+            self._async_refresh_config_after_install(),
+            f"{DOMAIN}_post_install_config_refresh",
+        )
+
+    async def _async_resolve_expired_install(self, version: str) -> None:
+        marker = self._install_unresolved
+        if marker is None or not version:
+            return
+        self._install_unresolved = None
+        generation = self._install_generation
+        if version != marker[2]:
+            ir.async_delete_issue(self.hass, DOMAIN, self._install_issue_id)
+        else:
+            self._report_install_unconfirmed()
+        await self._async_clear_install_marker(generation)
 
     async def _async_refresh_config_after_install(self) -> None:
         try:
@@ -3046,32 +3335,40 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 _safe_str(err),
             )
 
-    def _close_install_window(self, result: str) -> None:
+    def _report_install_unconfirmed(self) -> None:
+        _LOGGER.error(
+            "Controller did not report a new firmware version within %d "
+            "minutes; the install is not retried",
+            int(INSTALL_WINDOW_MAX_SECONDS // 60),
+        )
+        ir.async_create_issue(
+            self.hass,
+            DOMAIN,
+            self._install_issue_id,
+            is_fixable=False,
+            severity=ir.IssueSeverity.ERROR,
+            translation_key="firmware_install_unconfirmed",
+            translation_placeholders={"name": self.entry.title},
+        )
+
+    async def _async_close_install_window(self, result: str) -> None:
         """Close the window and clear its state (never retries anything)."""
+        if not self._install_active:
+            return
+        generation = self._install_generation
         self._cancel_install_timers()
         self._install_active = False
         self._install_started = None
         self._install_reconnected_at = None
+        self._install_version_changed = False
         self._install_from_version = None
         self._install_expected_version = None
         if result == INSTALL_RESULT_TIMEOUT:
-            _LOGGER.error(
-                "Controller did not report a new firmware version within %d "
-                "minutes; the install is not retried",
-                int(INSTALL_WINDOW_MAX_SECONDS // 60),
-            )
-            ir.async_create_issue(
-                self.hass,
-                DOMAIN,
-                self._install_issue_id,
-                is_fixable=False,
-                severity=ir.IssueSeverity.ERROR,
-                translation_key="firmware_install_unconfirmed",
-                translation_placeholders={"name": self.entry.title},
-            )
+            self._report_install_unconfirmed()
         elif result == INSTALL_RESULT_SUCCESS:
             ir.async_delete_issue(self.hass, DOMAIN, self._install_issue_id)
         self.async_update_listeners()
+        await self._async_clear_install_marker(generation)
 
     async def async_end_install_window(self, result: str) -> None:
         """Close the install window.
@@ -3082,12 +3379,16 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """
         if not self._install_active:
             return
-        self._close_install_window(result)
+        await self._async_close_install_window(result)
         if result == INSTALL_RESULT_SUCCESS:
             await self._async_refresh_config_after_install()
 
     async def async_shutdown(self) -> None:
-        """Cancel the install timers, then shut the coordinator down."""
+        """Cancel the install timers, then shut the coordinator down.
+
+        The persisted install marker is kept: it is what lets the next
+        coordinator for this entry resume the window.
+        """
         self._cancel_install_timers()
         self._install_active = False
         await super().async_shutdown()
@@ -3095,21 +3396,26 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def async_request_firmware_install(self) -> str:
         """Ask the controller to install its latest firmware, exactly once.
 
-        Sends one ``PUT /rest/config/nconf`` with ``updateFirmware: true`` and
-        never resends it, whatever happens: an ambiguous outcome (timeout,
-        reset, 5xx) may mean the controller already started, and the window,
-        not a retry, decides what happened. The body is the controller's own
-        nconf object (read fresh) minus the credential fields and ``ssid``;
-        the controller treats omitted fields as unchanged. The nconf object is
-        held in a local only and is never logged or stored.
+        Sends one ``PUT /rest/config/nconf`` with ``updateFirmware: true`` on a
+        connection that can never be retried or reused: aiohttp's own
+        transparent retry of idempotent requests is defeated by a connector
+        that hands out a single connection. An ambiguous outcome (timeout,
+        reset, 5xx) may mean the controller already started, so the window,
+        not a retry, decides what happened.
+
+        The body is the controller's own nconf object (read with one GET on
+        its own single connection, no relogin retry) with every secret-like
+        key removed at any depth (see ``redact_nconf_for_install``). The
+        object is held in a local only and never logged or stored.
 
         Returns:
             ``"accepted"`` for a 2xx answer, ``"possibly_started"`` when the
             outcome is ambiguous. In both cases the install window is open.
 
         Raises:
-            HomeAssistantError: If the preconditions are not met or the
-                controller definitely rejected the request (window closed).
+            HomeAssistantError: If the preconditions are not met, the install
+                marker cannot be saved, or the controller definitely rejected
+                the request (window closed).
         """
         if self.transport != TRANSPORT_REST:
             raise HomeAssistantError("Firmware install requires the REST transport")
@@ -3117,79 +3423,145 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.entry.data.get(CONF_PASSWORD, "") or ""
         ):
             raise HomeAssistantError("Firmware install requires a configured password")
-        if self._install_active:
-            raise HomeAssistantError("A firmware install is already in progress")
+        now = time.monotonic()
+        if now < self._rest_disabled_until:
+            raise HomeAssistantError(
+                f"REST temporarily disabled (retry in ~{int(self._rest_disabled_until - now)}s)"
+            )
 
+        async with self._write_lock:
+            if self._install_active:
+                raise HomeAssistantError("A firmware install is already in progress")
+            self._require_known_software()
+
+            try:
+                sid = await self._async_rest_login(
+                    session=async_get_clientsession(self.hass)
+                )
+            except FileNotFoundError as err:
+                raise HomeAssistantError(
+                    "Controller does not expose its REST login; cannot install"
+                ) from err
+
+            body = await self._async_install_request_body(sid)
+            await self._async_begin_install_window_locked(
+                expected_version=self._cached_latest_firmware()
+            )
+            generation = self._install_generation
+            outcome = await self._async_send_install_put(sid=sid, body=body)
+            del body
+
+            # The restart period is measured from when the request returned.
+            # A window that closed (or was replaced) meanwhile is left alone.
+            if self._install_active and self._install_generation == generation:
+                self._start_install_clock()
+            return outcome
+
+    async def _async_install_request_body(self, sid: str) -> dict[str, Any]:
+        """Read nconf once and build the redacted install body."""
+        url = (
+            f"{build_base_url(str(self.entry.data.get(CONF_HOST, '')))}"
+            "/rest/config/nconf"
+        )
+        headers = {"Accept": "*/*", "Cookie": f"connect.sid={sid}"}
         try:
-            nconf_obj = await self.async_rest_get_json(path="/rest/config/nconf")
-        except FileNotFoundError as err:
+            async with _one_shot_session() as session:
+                async with async_timeout.timeout(DEFAULT_TIMEOUT_SECONDS):
+                    async with session.get(url, headers=headers) as resp:
+                        status = resp.status
+                        text = await resp.text() if 200 <= status < 300 else ""
+        except (asyncio.TimeoutError, aiohttp.ClientError) as err:
+            raise HomeAssistantError(
+                "Could not read the controller network config; nothing was "
+                f"sent ({err.__class__.__name__})"
+            ) from err
+
+        if status in (401, 403):
+            self._rest_sid = None
+            raise HomeAssistantError(
+                "Controller rejected the session while reading its network "
+                "config; nothing was sent, try again"
+            )
+        if status == 404:
             raise HomeAssistantError(
                 "Controller does not expose its network config; cannot install"
-            ) from err
-        inner: Any = nconf_obj.get("nconf")
-        nconf: dict[str, Any] = cast(
-            dict[str, Any], inner if isinstance(inner, dict) else nconf_obj
-        )
-        body: dict[str, Any] = {
-            key: value
-            for key, value in nconf.items()
-            if key not in INSTALL_NCONF_STRIPPED_KEYS
-        }
-        body["updateFirmware"] = True
-        del nconf, nconf_obj, inner
-
-        sid = self._rest_sid
-        latest = self._cached_latest_firmware()
-        # Open the window before sending: from here on other writes are blocked
-        # and an ambiguous send is handled by version detection.
-        await self.async_begin_install_window(expected_version=latest)
-
-        session = async_get_clientsession(self.hass)
-        url = f"{build_base_url(str(self.entry.data.get(CONF_HOST, '')))}/rest/config/nconf"
-        headers: dict[str, str] = {"Accept": "*/*", "accept-version": "1"}
-        if sid:
-            headers["Cookie"] = f"connect.sid={sid}"
-
-        outcome = "accepted"
+            )
+        if not 200 <= status < 300:
+            raise HomeAssistantError(
+                f"Could not read the controller network config (HTTP {status}); "
+                "nothing was sent"
+            )
         try:
-            async with async_timeout.timeout(DEFAULT_TIMEOUT_SECONDS):
-                async with session.put(url, json=body, headers=headers) as resp:
-                    status = resp.status
+            parsed: Any = json.loads(text) if text else {}
+        except json.JSONDecodeError as err:
+            raise HomeAssistantError(
+                "Controller network config was not valid JSON; nothing was sent"
+            ) from err
+        if not isinstance(parsed, dict):
+            raise HomeAssistantError(
+                "Controller network config was not a JSON object; nothing was sent"
+            )
+        obj = cast(dict[str, Any], parsed)
+        inner: Any = obj.get("nconf")
+        nconf = cast(dict[str, Any], inner if isinstance(inner, dict) else obj)
+        body = cast(dict[str, Any], redact_nconf_for_install(nconf))
+        body["updateFirmware"] = True
+        return body
+
+    async def _async_send_install_put(self, *, sid: str, body: dict[str, Any]) -> str:
+        """Send the install PUT once; classify the outcome; never resend."""
+        url = (
+            f"{build_base_url(str(self.entry.data.get(CONF_HOST, '')))}"
+            "/rest/config/nconf"
+        )
+        headers: dict[str, str] = {
+            "Accept": "*/*",
+            "accept-version": "1",
+            "Cookie": f"connect.sid={sid}",
+        }
+        try:
+            async with _one_shot_session() as session:
+                async with async_timeout.timeout(DEFAULT_TIMEOUT_SECONDS):
+                    async with session.put(url, json=body, headers=headers) as resp:
+                        status = resp.status
+        except aiohttp.ClientConnectorError as err:
+            # The connection was never made, so nothing reached the controller.
+            await self._async_close_install_window(INSTALL_RESULT_REJECTED)
+            raise HomeAssistantError(
+                "Could not connect to the controller; the firmware install was "
+                f"not sent ({err.__class__.__name__})"
+            ) from err
         except (asyncio.TimeoutError, aiohttp.ClientError) as err:
             _LOGGER.warning(
                 "Firmware install request outcome unknown (%s); waiting for the "
                 "controller to report a new version, not resending",
                 err.__class__.__name__,
             )
-            outcome = "possibly_started"
-        else:
-            if 200 <= status < 300:
-                pass
-            elif status >= 500 or status < 200 or 300 <= status < 400:
-                _LOGGER.warning(
-                    "Firmware install request answered HTTP %s; waiting for the "
-                    "controller to report a new version, not resending",
-                    status,
-                )
-                outcome = "possibly_started"
-            else:
-                self._close_install_window(INSTALL_RESULT_REJECTED)
-                if status in (401, 403):
-                    self._rest_sid = None
-                    raise HomeAssistantError(
-                        f"Controller rejected the firmware install session (HTTP {status})"
-                    )
-                if status in (404, 405):
-                    raise HomeAssistantError(
-                        f"Controller does not support the firmware install request (HTTP {status})"
-                    )
-                raise HomeAssistantError(
-                    f"Controller rejected the firmware install request (HTTP {status})"
-                )
+            return "possibly_started"
 
-        # The restart period is measured from when the request returned.
-        self._start_install_clock()
-        return outcome
+        if 200 <= status < 300:
+            return "accepted"
+        if status >= 500 or status < 200 or 300 <= status < 400:
+            _LOGGER.warning(
+                "Firmware install request answered HTTP %s; waiting for the "
+                "controller to report a new version, not resending",
+                status,
+            )
+            return "possibly_started"
+
+        await self._async_close_install_window(INSTALL_RESULT_REJECTED)
+        if status in (401, 403):
+            self._rest_sid = None
+            raise HomeAssistantError(
+                f"Controller rejected the firmware install session (HTTP {status})"
+            )
+        if status in (404, 405):
+            raise HomeAssistantError(
+                f"Controller does not support the firmware install request (HTTP {status})"
+            )
+        raise HomeAssistantError(
+            f"Controller rejected the firmware install request (HTTP {status})"
+        )
 
     def _cached_latest_firmware(self) -> str | None:
         nconf = self._cached_nconf
@@ -3233,8 +3605,8 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Poll the REST API only; every failure is surfaced, never bypassed."""
         try:
             data = await self._async_update_rest_inner()
-            if self._install_active:
-                self._observe_install_poll(data)
+            if self._install_active or self._install_unresolved is not None:
+                await self._async_observe_install_poll(data)
             return data
         except _RestRateLimited as err:
             raise UpdateFailed("Controller rate limited the REST API") from err
