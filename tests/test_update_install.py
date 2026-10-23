@@ -545,6 +545,40 @@ async def test_entity_removal_cancels_the_wait_and_the_listener(
     coord.request.assert_awaited_once()
 
 
+async def test_removal_while_the_request_is_in_flight_creates_no_waiter(
+    hass, enable_custom_integrations
+):
+    ent, coord = await _controller(hass)
+    release = asyncio.Event()
+
+    async def _held() -> str:
+        await release.wait()
+        coord.install_in_progress = True
+        return "accepted"
+
+    coord.request.side_effect = _held
+    task = asyncio.ensure_future(ent.async_install(None, False))
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert not task.done()
+    assert coord.listeners == []
+
+    await ent.async_will_remove_from_hass()
+    release.set()
+    async with asyncio.timeout(1):
+        with pytest.raises(HomeAssistantError, match="entity was removed"):
+            await task
+
+    # Nothing was created on the removed entity, and nothing was resent.
+    assert coord.listeners == []
+    assert ent._install_waiters == []
+    assert ent._install_unsubs == []
+    coord.request.assert_awaited_once()
+    # The install belongs to the coordinator: the window is left open.
+    coord.end_window.assert_not_awaited()
+    assert coord.install_in_progress is True
+
+
 async def test_removal_with_nothing_pending_is_a_no_op(
     hass, enable_custom_integrations
 ):

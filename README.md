@@ -289,7 +289,7 @@ Before you update:
 What happens when you press Update:
 
 - The controller downloads the new AOS itself and restarts. Expect it to be **offline for roughly 5 to 10 minutes**, sometimes longer. Its entities become unavailable during that time and recover on their own, while the Firmware entity stays visible and shows progress.
-- The progress bar is time-based: the controller reports no real progress, so the percentage follows the same timings as its own web UI. Only a changed firmware version counts as success.
+- The progress bar is time-based: the controller reports no real progress, so the percentage follows the same timings as its own web UI. Only a newer firmware version that stays reported through the settling period counts as success.
 - The integration waits up to 20 minutes for the controller to come back on the new version. It never retries the install by itself and never starts one automatically.
 - If the controller does not return on the new version, nothing is retried and a Repairs issue is raised. Check it locally, and follow Neptune's recovery steps (restart with the reset button, wait about five minutes, then check Apex Local; contact Neptune Support if needed).
 - Neptune's guidance is to update AOS first, then wait 5 to 10 minutes before updating any module. Module install is not supported yet.

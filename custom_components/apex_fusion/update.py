@@ -87,6 +87,10 @@ _INSTALL_TIMEOUT_MESSAGE = (
     "The controller did not report a newer firmware version in time; check it "
     "locally (see the Repairs issue)"
 )
+_REMOVED_MESSAGE = (
+    "The update entity was removed while the firmware install was running; "
+    "the install continues on the controller"
+)
 
 
 def _raw_nstat(data: dict[str, Any]) -> dict[str, Any]:
@@ -186,6 +190,7 @@ class ApexUpdateEntity(UpdateEntity):
         self._ref = ref
         self._install_waiters: list[asyncio.Future[None]] = []
         self._install_unsubs: list[Callable[[], None]] = []
+        self._removed = False
 
         ctx = ApexFusionContext.from_entry_and_coordinator(entry, coordinator)
 
@@ -371,6 +376,12 @@ class ApexUpdateEntity(UpdateEntity):
 
         await coordinator.async_request_firmware_install()
 
+        if self._removed:
+            # Removed while the request was in flight: there is nothing left to
+            # settle a waiter, so do not create one. The install carries on with
+            # the coordinator and is not resent.
+            raise HomeAssistantError(_REMOVED_MESSAGE)
+
         # No await between the request returning and the listener below, so the
         # window cannot close unseen.
         closed: asyncio.Future[None] = asyncio.get_running_loop().create_future()
@@ -419,17 +430,13 @@ class ApexUpdateEntity(UpdateEntity):
         The install itself belongs to the coordinator and carries on; only this
         entity's wait for it ends.
         """
+        self._removed = True
         for unsub in list(self._install_unsubs):
             unsub()
         self._install_unsubs.clear()
         for fut in list(self._install_waiters):
             if not fut.done():
-                fut.set_exception(
-                    HomeAssistantError(
-                        "The update entity was removed while the firmware install "
-                        "was running; the install continues on the controller"
-                    )
-                )
+                fut.set_exception(HomeAssistantError(_REMOVED_MESSAGE))
         self._install_waiters.clear()
 
     def version_is_newer(self, latest_version: str, installed_version: str) -> bool:
