@@ -237,12 +237,24 @@ async def test_disclaimer_and_release_url_shown_when_update_available(
     assert attrs["release_url"] == CONTROLLER_RELEASE_URL
 
 
-async def test_disclaimer_also_shown_on_read_only_entry(
-    hass, enable_custom_integrations
+@pytest.mark.parametrize(
+    ("transport", "entry_overrides"),
+    [
+        (TRANSPORT_REST, {CONF_PASSWORD: ""}),
+        (TRANSPORT_REST, {CONF_NO_LOGIN: True}),
+        (TRANSPORT_LEGACY, {}),
+    ],
+)
+async def test_no_disclaimer_or_url_when_install_is_not_offered(
+    hass, enable_custom_integrations, transport, entry_overrides
 ):
-    ent, _coord = await _controller(hass, **{CONF_PASSWORD: ""})
+    ent, _coord = await _controller(
+        hass, _Coordinator(transport=transport), **entry_overrides
+    )
     assert ent.supported_features == UpdateEntityFeature(0)
-    assert ent.release_summary == DISCLAIMER_TEXT
+    assert ent.state == "on"  # the update is still shown, just not installable
+    assert ent.release_summary is None
+    assert ent.release_url is None
 
 
 async def test_no_disclaimer_or_url_when_up_to_date(hass, enable_custom_integrations):
@@ -500,15 +512,30 @@ async def test_install_times_out_with_a_clear_error(
     assert coord.listeners == []
 
 
-async def test_install_propagates_the_coordinators_refusal(
-    hass, enable_custom_integrations
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Controller rejected the request",
+        "Controller rejected the stored credentials (HTTP 401); nothing was sent",
+    ],
+)
+async def test_install_surfaces_a_pre_send_refusal_unchanged(
+    hass, enable_custom_integrations, message
 ):
+    """A request that fails before sending is reported as is, never as started."""
     ent, coord = await _controller(hass)
-    coord.request.side_effect = HomeAssistantError("Controller rejected the request")
-    with pytest.raises(HomeAssistantError, match="rejected"):
+    err = HomeAssistantError(message)
+    coord.request.side_effect = err
+    with pytest.raises(HomeAssistantError) as excinfo:
         await ent.async_install(None, False)
+    assert excinfo.value is err
+    assert str(excinfo.value) == message
+    assert excinfo.value.__cause__ is None
     coord.request.assert_awaited_once()
+    # Nothing waited, and no window or "possibly started" state was assumed.
     assert coord.listeners == []
+    assert coord.install_in_progress is False
+    assert ent.in_progress is False
 
 
 async def test_install_cancellation_removes_the_listener(

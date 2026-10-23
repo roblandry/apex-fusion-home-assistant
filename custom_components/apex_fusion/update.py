@@ -333,7 +333,9 @@ class ApexUpdateEntity(UpdateEntity):
             phase = self._coordinator.install_phase
             if installing and phase in _INSTALL_PHASE_SUMMARY:
                 self._attr_release_summary = _INSTALL_PHASE_SUMMARY[phase]
-            elif self._update_available():
+            elif self._install_blocker() is None and self._update_available():
+                # Only where Update is offered; read-only and legacy entries
+                # cannot install, so the warning would not apply.
                 self._attr_release_summary = FIRMWARE_DISCLAIMER
                 self._attr_release_url = CONTROLLER_RELEASE_URL
 
