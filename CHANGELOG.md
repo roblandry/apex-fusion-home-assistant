@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## v2026.10.22-beta.1
+
+**Take a Home Assistant backup before installing: this release runs a one-time migration that removes orphaned APEX 1.0 devices.**
+
+### CI
+
+- Releases are now cut automatically when a version bump merges (#35)
+- Pin ruff (#32)
+
+### Fixes
+
+- Firmware update entities now show when a newer AOS version is available, even if the controller's "no update" flag is stale. Version comparison ignores the J/L hardware letter (#31)
+- Each controller uses one connection method, chosen deterministically at setup (the newer REST API, detected by its login gate, or the older interface). An outage now shows entities as unavailable instead of switching methods, and the old wipe-on-restart cleanup is removed (#33)
+- Stable device identity: a one-time migration keeps existing entity IDs, history and customizations, and removes the orphaned "APEX 1.0" devices left by the old fallback (#34)
+
 ## v0.1.6
 
 ### CI
