@@ -412,23 +412,31 @@ def find_orphan_controller_device(
     return sharing[0]
 
 
+_TEMP_SUFFIX = "_apex_legacy"
+
+
 def _plan_entity_pairing(
     hass: HomeAssistant,
     entry: ConfigEntry,
     orphan: dr.DeviceEntry,
     live_identifier: str,
-) -> tuple[list[tuple[str, str | None, str | None]], str | None]:
+) -> tuple[list[tuple[str, str, str | None]], str | None]:
     """Pair each orphan entity with its live counterpart.
 
     Returns ``(plan, problem)``. Each plan item is ``(orphan_entity_id,
-    live_entity_id, rename_live_to)``. ``problem`` is set when any entity cannot
-    be paired with certainty, in which case nothing may be removed.
+    live_entity_id, canonical_id)``; ``canonical_id`` is set when the live
+    entity must take over the orphan's id. ``problem`` is set when any entity
+    cannot be paired with certainty (or the pairing would disable a working
+    entity), in which case nothing may be removed.
+
+    An orphan entity id ending in ``_apex_legacy`` is a half-finished transfer
+    from an earlier attempt and is recognised so it can be completed.
     """
     ent_reg = er.async_get(hass)
     orphan_token = next(iter(orphan.identifiers))[1].partition(":")[2]
     old_prefix = f"{_LEGACY_PREFIX}_{orphan_token}_".lower()
     live_prefix = f"{live_identifier.replace(':', '_')}_".lower()
-    plan: list[tuple[str, str | None, str | None]] = []
+    plan: list[tuple[str, str, str | None]] = []
     for reg_entry in er.async_entries_for_device(
         ent_reg, orphan.id, include_disabled_entities=True
     ):
@@ -443,15 +451,41 @@ def _plan_entity_pairing(
         live_entry = ent_reg.async_get(live_id) if live_id else None
         if live_entry is None or live_entry.config_entry_id != entry.entry_id:
             return [], f"{reg_entry.entity_id} has no live counterpart"
+        if reg_entry.disabled_by is None and live_entry.disabled_by is not None:
+            return [], f"live counterpart of {reg_entry.entity_id} is disabled"
         old_id, new_id = reg_entry.entity_id, live_entry.entity_id
-        if re.fullmatch(rf"{re.escape(old_id)}_\d+", new_id):
-            # Orphan holds the canonical id; the live entity must take it over.
-            plan.append((old_id, new_id, old_id))
-        elif re.fullmatch(rf"{re.escape(new_id)}_\d+", old_id):
+        canonical = old_id.removesuffix(_TEMP_SUFFIX)
+        if re.fullmatch(rf"{re.escape(canonical)}_\d+", new_id):
+            # The orphan holds the canonical id; the live entity takes it over.
+            plan.append((old_id, new_id, canonical))
+        elif re.fullmatch(rf"{re.escape(new_id)}_(\d+|apex_legacy)", old_id):
             plan.append((old_id, new_id, None))
         else:
             return [], f"{old_id} and {new_id} are not a suffix pair"
     return plan, None
+
+
+def _transfer_entity_id(
+    ent_reg: er.EntityRegistry, old_id: str, live_id: str, canonical: str
+) -> None:
+    """Give ``canonical`` to the live entity so that no step can lose the id.
+
+    The orphan entity is parked at a temporary id, the live entity is renamed,
+    and only then is the orphan removed. If the live rename fails the orphan is
+    put back, so the canonical id always stays on an entity. A leftover parked
+    entity is recognised by the next setup and the transfer is completed.
+    """
+    parked = old_id
+    if old_id == canonical:
+        parked = f"{canonical}{_TEMP_SUFFIX}"
+        ent_reg.async_update_entity(old_id, new_entity_id=parked)
+    try:
+        ent_reg.async_update_entity(live_id, new_entity_id=canonical)
+    except Exception:
+        if parked != old_id:
+            ent_reg.async_update_entity(parked, new_entity_id=old_id)
+        raise
+    ent_reg.async_remove(parked)
 
 
 def async_remove_orphan_controller_device(
@@ -459,12 +493,11 @@ def async_remove_orphan_controller_device(
 ) -> bool:
     """Remove the old ``AC6:<token>`` controller device when it is provably a dupe.
 
-    Fails closed: if the live identity is unverified, the orphan is ambiguous,
-    or any of its entities cannot be paired with a live entity, nothing is
-    changed (and the reason is logged) so the device can still be deleted by
-    hand. When an orphan owns the canonical entity_id and the live entity holds
-    ``<id>_N``, the orphan entity is removed and the live entity is renamed to
-    the canonical id so recorder history stays attached.
+    Does nothing (and logs why) if the live identity is unverified, the orphan
+    is ambiguous, an entity cannot be paired with a live one, or pairing would
+    hand an id to a disabled entity. If a registry step fails part way, the
+    canonical entity id stays on an entity, the device is kept, and the next
+    setup completes the work.
 
     Returns:
         True if a device was removed.
@@ -481,11 +514,21 @@ def async_remove_orphan_controller_device(
         )
         return False
     ent_reg = er.async_get(hass)
-    for old_id, live_id, rename_to in plan:
-        ent_reg.async_remove(old_id)
-        if rename_to is not None and live_id is not None:
-            ent_reg.async_update_entity(live_id, new_entity_id=rename_to)
-    dr.async_get(hass).async_remove_device(orphan.id)
+    try:
+        for old_id, live_id, canonical in plan:
+            if canonical is None:
+                ent_reg.async_remove(old_id)
+            else:
+                _transfer_entity_id(ent_reg, old_id, live_id, canonical)
+        dr.async_get(hass).async_remove_device(orphan.id)
+    except Exception:  # noqa: BLE001
+        _LOGGER.warning(
+            "Apex entry %s: could not finish removing the old controller device; "
+            "it will be retried on the next start",
+            entry.entry_id,
+            exc_info=True,
+        )
+        return False
     _LOGGER.info(
         "Apex entry %s: removed duplicate controller device %s (%d entities)",
         entry.entry_id,

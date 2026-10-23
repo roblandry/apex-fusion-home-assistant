@@ -40,7 +40,7 @@ from .coordinator import (
 from .migration import (
     CONFIG_ENTRY_VERSION,
     async_remove_orphan_controller_device,
-    is_legacy_orphan_signature,
+    find_orphan_controller_device,
     migrate_v1_to_v2,
 )
 
@@ -269,11 +269,13 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_remove_config_entry_device(
     hass: HomeAssistant, entry: ConfigEntry, device_entry: DeviceEntry
 ) -> bool:
-    """Allow UI deletion only of the old duplicate controller device.
+    """Allow UI deletion only of the verified old duplicate controller device.
 
-    Fails closed: returns True only for a device with the exact old-orphan
-    signature whose identifier is not the entry's live controller. If the live
-    identity cannot be established, nothing is removable.
+    Uses the same verification as the automatic cleanup: the live controller
+    identity must be current-form and registered to this entry, and the device
+    must be the single exact old-orphan signature sharing its serial token. When
+    that cannot be verified (for example a stale or missing persisted identity)
+    removal is refused, which is a deliberate false negative.
 
     Args:
         hass: Home Assistant instance.
@@ -281,7 +283,7 @@ async def async_remove_config_entry_device(
         device_entry: The device the user asked to delete.
 
     Returns:
-        True for a positively identified old orphan, otherwise False.
+        True only for a positively identified old orphan.
     """
     coordinator: Any = hass.data.get(DOMAIN, {}).get(entry.entry_id)
     live = str(
@@ -289,9 +291,10 @@ async def async_remove_config_entry_device(
         or entry.data.get(CONF_SERIAL)
         or ""
     ).strip()
-    if not live or is_legacy_orphan_signature(device_entry, entry.entry_id) is None:
+    if not live:
         return False
-    return (DOMAIN, live) not in device_entry.identifiers
+    orphan = find_orphan_controller_device(hass, entry, live)
+    return orphan is not None and orphan.id == device_entry.id
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

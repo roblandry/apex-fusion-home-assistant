@@ -299,16 +299,15 @@ async def test_migration_does_not_pin_the_old_identity_when_listed_first(
     assert entry.data[CONF_SERIAL] == LIVE
 
 
-async def test_remove_device_allows_only_the_exact_orphan(
+async def test_remove_device_allows_only_the_verified_orphan(
     hass, enable_custom_integrations
 ):
     entry = _entry(hass)
     live, module, orphan = _seed(hass, entry)
-    other_prefix = _device(hass, entry, "OTHER:12345")
 
     # Entry not loaded: the stored identity is used.
     assert await async_remove_config_entry_device(hass, cast(Any, entry), orphan)
-    for refused in (live, module, other_prefix):
+    for refused in (live, module):
         assert not await async_remove_config_entry_device(
             hass, cast(Any, entry), refused
         )
@@ -317,6 +316,180 @@ async def test_remove_device_allows_only_the_exact_orphan(
     fresh = _device(hass, entry, OLD, model="1.0")
     assert await async_remove_config_entry_device(hass, cast(Any, entry), fresh)
     assert not await async_remove_config_entry_device(hass, cast(Any, entry), live)
+
+
+async def test_remove_device_refuses_other_prefix_and_ambiguity(
+    hass, enable_custom_integrations
+):
+    entry = _entry(hass)
+    _live, _module, orphan = _seed(hass, entry)
+    other_prefix = _device(hass, entry, "OTHER:12345")
+
+    assert not await async_remove_config_entry_device(
+        hass, cast(Any, entry), other_prefix
+    )
+    # Same-token ambiguity also refuses the orphan.
+    assert not await async_remove_config_entry_device(hass, cast(Any, entry), orphan)
+
+
+async def test_remove_device_refuses_unrelated_token(hass, enable_custom_integrations):
+    entry = _entry(hass)
+    _seed(hass, entry)
+    unrelated = _device(hass, entry, "AC6:99999", model="1.0")
+
+    assert not await async_remove_config_entry_device(hass, cast(Any, entry), unrelated)
+
+
+async def test_remove_device_refuses_when_live_device_is_absent(
+    hass, enable_custom_integrations
+):
+    entry = _entry(hass)
+    sole = _device(hass, entry, OLD, model="1.0")
+
+    assert not await async_remove_config_entry_device(hass, cast(Any, entry), sole)
+
+
+async def test_unpaired_orphan_stays_removable_from_the_ui_when_loaded(
+    hass, enable_custom_integrations
+):
+    """Owner's manual path: entities with no live pair block the auto-cleanup only."""
+    entry = _entry(hass)
+    live, _module, orphan = _seed(hass, entry)
+    _ent(hass, entry, LIVE_UID, "tank_temp", live)
+    _ent(hass, entry, "ac6_12345_probe_tmp", "tank_legacy", orphan)
+
+    await _setup(hass, entry)
+
+    kept = dr.async_get(hass).async_get(orphan.id)
+    assert kept is not None
+    assert await async_remove_config_entry_device(hass, cast(Any, entry), kept)
+
+
+async def test_disabled_live_counterpart_defers_the_whole_device(
+    hass, enable_custom_integrations
+):
+    entry = _entry(hass)
+    live, _module, orphan = _seed(hass, entry)
+    ent_reg = er.async_get(hass)
+    old_ent = _ent(hass, entry, OLD_UID, "tank_temp", orphan)
+    live_ent = _ent(hass, entry, LIVE_UID, "tank_temp_2", live)
+    ent_reg.async_update_entity(
+        live_ent.entity_id, disabled_by=er.RegistryEntryDisabler.USER
+    )
+
+    await _setup(hass, entry)
+
+    assert OLD in _idents(hass, entry)
+    assert ent_reg.async_get(old_ent.entity_id) is not None
+    assert (
+        ent_reg.async_get_entity_id("sensor", DOMAIN, LIVE_UID) == "sensor.tank_temp_2"
+    )
+
+
+def _fail_update(match):
+    """Wrap EntityRegistry.async_update_entity to fail when ``match`` is true."""
+    original = er.EntityRegistry.async_update_entity
+
+    def wrapper(self, entity_id, **kwargs):
+        if match(entity_id, kwargs.get("new_entity_id")):
+            raise RuntimeError("injected failure")
+        return original(self, entity_id, **kwargs)
+
+    return patch.object(er.EntityRegistry, "async_update_entity", wrapper)
+
+
+async def _canonical_case(hass):
+    entry = _entry(hass)
+    live, _module, orphan = _seed(hass, entry)
+    _ent(hass, entry, OLD_UID, "tank_temp", orphan)
+    _ent(hass, entry, LIVE_UID, "tank_temp_2", live)
+    return entry
+
+
+async def _assert_recovers(hass, entry):
+    """Next clean setup finishes the transfer."""
+    with patch(
+        "custom_components.apex_fusion.coordinator."
+        "ApexNeptuneDataUpdateCoordinator._async_update_rest",
+        new=AsyncMock(return_value=_payload()),
+    ):
+        assert await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done()
+    ent_reg = er.async_get(hass)
+    assert OLD not in _idents(hass, entry)
+    assert ent_reg.async_get_entity_id("sensor", DOMAIN, LIVE_UID) == "sensor.tank_temp"
+    assert ent_reg.async_get("sensor.tank_temp_2") is None
+    assert ent_reg.async_get_entity_id("sensor", DOMAIN, OLD_UID) is None
+
+
+async def test_failure_parking_the_orphan_keeps_canonical_and_recovers(
+    hass, enable_custom_integrations
+):
+    entry = await _canonical_case(hass)
+    with _fail_update(lambda eid, new: bool(new and new.endswith("_apex_legacy"))):
+        await _setup(hass, entry)
+
+    ent_reg = er.async_get(hass)
+    assert OLD in _idents(hass, entry)
+    assert ent_reg.async_get_entity_id("sensor", DOMAIN, OLD_UID) == "sensor.tank_temp"
+    await _assert_recovers(hass, entry)
+
+
+async def test_failure_renaming_the_live_entity_rolls_back_and_recovers(
+    hass, enable_custom_integrations
+):
+    entry = await _canonical_case(hass)
+    with _fail_update(
+        lambda eid, new: eid == "sensor.tank_temp_2" and new == "sensor.tank_temp"
+    ):
+        await _setup(hass, entry)
+
+    ent_reg = er.async_get(hass)
+    assert OLD in _idents(hass, entry)
+    assert ent_reg.async_get_entity_id("sensor", DOMAIN, OLD_UID) == "sensor.tank_temp"
+    assert (
+        ent_reg.async_get_entity_id("sensor", DOMAIN, LIVE_UID) == "sensor.tank_temp_2"
+    )
+    await _assert_recovers(hass, entry)
+
+
+async def test_failure_in_rollback_leaves_a_parked_entity_that_recovers(
+    hass, enable_custom_integrations
+):
+    entry = await _canonical_case(hass)
+    with _fail_update(
+        lambda eid, new: (eid == "sensor.tank_temp_2" and new == "sensor.tank_temp")
+        or (eid == "sensor.tank_temp_apex_legacy" and new == "sensor.tank_temp")
+    ):
+        await _setup(hass, entry)
+
+    ent_reg = er.async_get(hass)
+    assert OLD in _idents(hass, entry)
+    assert (
+        ent_reg.async_get_entity_id("sensor", DOMAIN, OLD_UID)
+        == "sensor.tank_temp_apex_legacy"
+    )
+    await _assert_recovers(hass, entry)
+
+
+async def test_failure_removing_the_parked_orphan_recovers(
+    hass, enable_custom_integrations
+):
+    entry = await _canonical_case(hass)
+    original = er.EntityRegistry.async_remove
+
+    def failing_remove(self, entity_id):
+        if entity_id == "sensor.tank_temp_apex_legacy":
+            raise RuntimeError("injected failure")
+        return original(self, entity_id)
+
+    with patch.object(er.EntityRegistry, "async_remove", failing_remove):
+        await _setup(hass, entry)
+
+    ent_reg = er.async_get(hass)
+    assert OLD in _idents(hass, entry)
+    assert ent_reg.async_get_entity_id("sensor", DOMAIN, LIVE_UID) == "sensor.tank_temp"
+    await _assert_recovers(hass, entry)
 
 
 async def test_remove_device_fails_closed_without_identity(
