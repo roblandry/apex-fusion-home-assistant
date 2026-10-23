@@ -17,7 +17,7 @@ All notable changes to this project will be documented in this file.
 ### Fixes
 
 - Module firmware updates are now detected from the controller's status, excluding module types the controller never updates (#39)
-- Leftover controller devices from the v2 migration are cleaned up. Orphans with no entities are removed automatically on restart; orphans that still hold old entities are kept and can now be deleted from the device page with the Delete button (#38)
+- Leftover controller devices from the v2 migration are cleaned up. Verified legacy duplicates of a controller that hold no entities are removed when the integration starts; verified duplicates that still hold old entities are kept and can be deleted from their device page with the Delete button. Ambiguous or unverified devices are left untouched (#38)
 
 ### Known limitation
 
