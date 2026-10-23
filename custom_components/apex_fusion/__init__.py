@@ -39,7 +39,8 @@ from .coordinator import (
 )
 from .migration import (
     CONFIG_ENTRY_VERSION,
-    async_remove_twin_controller_devices,
+    async_remove_orphan_controller_device,
+    is_legacy_orphan_signature,
     migrate_v1_to_v2,
 )
 
@@ -232,10 +233,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await hass.config_entries.async_forward_entry_setups(entry, platforms)
 
-    # Drop old-form controller devices (e.g. ``AC6:<serial>`` next to
-    # ``AC6J:<serial>``) left behind by earlier releases. Done on every setup,
-    # not only on a version bump, so entries already at version 2 are cleaned.
-    async_remove_twin_controller_devices(hass, entry, coordinator.device_identifier)
+    # Drop the old ``AC6:<serial>`` controller device left behind by earlier
+    # releases, only when provably a duplicate. Runs on every setup (not just a
+    # version bump) so entries already at version 2 are cleaned and a skipped
+    # case is retried once the live entities exist.
+    async_remove_orphan_controller_device(hass, entry, coordinator.device_identifier)
 
     # Track which platforms were actually forwarded so unload can avoid
     # attempting to unload platforms that were never set up.
@@ -267,7 +269,11 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_remove_config_entry_device(
     hass: HomeAssistant, entry: ConfigEntry, device_entry: DeviceEntry
 ) -> bool:
-    """Allow deleting a device from the UI unless it is currently provided.
+    """Allow UI deletion only of the old duplicate controller device.
+
+    Fails closed: returns True only for a device with the exact old-orphan
+    signature whose identifier is not the entry's live controller. If the live
+    identity cannot be established, nothing is removable.
 
     Args:
         hass: Home Assistant instance.
@@ -275,22 +281,17 @@ async def async_remove_config_entry_device(
         device_entry: The device the user asked to delete.
 
     Returns:
-        False for the live controller and its modules; True for anything else
-        (for example an old duplicate controller device).
+        True for a positively identified old orphan, otherwise False.
     """
     coordinator: Any = hass.data.get(DOMAIN, {}).get(entry.entry_id)
     live = str(
         getattr(coordinator, "device_identifier", None)
         or entry.data.get(CONF_SERIAL)
-        or entry.unique_id
         or ""
     ).strip()
-    if not live:
-        return True
-    return not any(
-        domain == DOMAIN and (ident == live or ident.startswith(f"{live}_module_"))
-        for domain, ident in device_entry.identifiers
-    )
+    if not live or is_legacy_orphan_signature(device_entry, entry.entry_id) is None:
+        return False
+    return (DOMAIN, live) not in device_entry.identifiers
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

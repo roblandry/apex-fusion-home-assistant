@@ -19,6 +19,7 @@ and re-running it is a no-op.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -121,14 +122,18 @@ def _resolve_serial(entry: ConfigEntry, devices: list[dr.DeviceEntry]) -> str | 
     unique_id = str(entry.unique_id or "").strip()
     if unique_id and unique_id.lower() != host:
         return unique_id
-    for device in devices:
-        for domain, identifier in device.identifiers:
-            if (
-                domain == DOMAIN
-                and "_module_" not in identifier
-                and _canonical_device_identifier(entry, identifier, "x") == identifier
-            ):
-                return identifier
+    candidates = sorted(
+        identifier
+        for device in devices
+        for domain, identifier in device.identifiers
+        if domain == DOMAIN
+        and "_module_" not in identifier
+        and _canonical_device_identifier(entry, identifier, "x") == identifier
+    )
+    # Never pin the old ``AC6:<token>`` form when a current one exists.
+    current = [c for c in candidates if _CURRENT_IDENTIFIER.match(c)]
+    if current or candidates:
+        return (current or candidates)[0]
     # A controller that never reported a serial keeps its original unique_id.
     return unique_id or None
 
@@ -338,98 +343,153 @@ async def migrate_v1_to_v2(
     return plan
 
 
-def _identity_token(identifier: str) -> str | None:
-    """Return the part of a controller identifier after the hardware prefix.
+# The old duplicate controller device: literal ``AC6`` prefix, model ``1.0``.
+_LEGACY_PREFIX = "AC6"
+_LEGACY_ORPHAN_MODEL = "1.0"
+_CURRENT_IDENTIFIER = re.compile(r"^AC6[A-Z]:(?P<token>[^:]+)$")
 
-    ``AC6J:12345`` and ``AC6:12345`` are the same controller reported by two
-    transports; both share the token ``12345``.
+
+def _live_token(live_identifier: str) -> str | None:
+    """Return the serial token of a current-form (``AC6J:``/``AC6L:``) identifier."""
+    match = _CURRENT_IDENTIFIER.match(live_identifier)
+    return match.group("token") if match else None
+
+
+def is_legacy_orphan_signature(device: dr.DeviceEntry, entry_id: str) -> str | None:
+    """Return the serial token if the device has the exact old-orphan signature.
+
+    The signature is: one identifier, ``(DOMAIN, "AC6:<token>")``, model ``1.0``,
+    no ``via_device`` and held by this config entry alone.
     """
-    prefix, sep, token = identifier.partition(":")
-    if not (sep and prefix):
+    if (
+        device.via_device_id is not None
+        or device.config_entries != {entry_id}
+        or str(device.model or "") != _LEGACY_ORPHAN_MODEL
+        or len(device.identifiers) != 1
+    ):
         return None
-    return token.strip() or None
+    domain, identifier = next(iter(device.identifiers))
+    prefix, sep, token = identifier.partition(":")
+    if domain != DOMAIN or not sep or prefix != _LEGACY_PREFIX or not token:
+        return None
+    return token
 
 
-def find_twin_controller_devices(
+def find_orphan_controller_device(
     hass: HomeAssistant, entry: ConfigEntry, live_identifier: str
-) -> list[dr.DeviceEntry]:
-    """Return old controller devices that duplicate the live one.
+) -> dr.DeviceEntry | None:
+    """Return the one positively identified old controller device, if any.
 
-    A twin is a top-level (no ``via_device``) device of this entry whose only
-    identifier is ``<other hardware prefix>:<same serial token>`` as the live
-    controller. Module devices, devices shared with other entries and devices
-    carrying any other identifier are never returned.
-
-    Args:
-        hass: Home Assistant instance.
-        entry: The config entry being set up.
-        live_identifier: The controller identifier the current code registers.
-
-    Returns:
-        The twin devices (empty when the live identifier has no serial token).
+    Requires a verified current-form live identifier that is the entry's
+    persisted identity, a registered live device, and exactly one other
+    top-level controller-like device sharing the serial token, which must have
+    the exact old-orphan signature. Anything else returns ``None``.
     """
-    token = _identity_token(live_identifier)
-    if token is None:
-        return []
+    token = _live_token(live_identifier)
+    if token is None or str(entry.data.get(CONF_SERIAL) or "") != live_identifier:
+        return None
     dev_reg = dr.async_get(hass)
-    if dev_reg.async_get_device(identifiers={(DOMAIN, live_identifier)}) is None:
-        return []
-    twins: list[dr.DeviceEntry] = []
+    live = dev_reg.async_get_device(identifiers={(DOMAIN, live_identifier)})
+    if live is None or entry.entry_id not in live.config_entries:
+        return None
+    sharing: list[dr.DeviceEntry] = []
     for device in dr.async_entries_for_config_entry(dev_reg, entry.entry_id):
-        if device.via_device_id is not None or device.config_entries != {
-            entry.entry_id
-        }:
+        if device.id == live.id or device.via_device_id is not None:
             continue
-        if len(device.identifiers) != 1:
-            continue
-        domain, identifier = next(iter(device.identifiers))
-        if (
-            domain == DOMAIN
-            and identifier != live_identifier
-            and "_module_" not in identifier
-            and _identity_token(identifier) == token
-        ):
-            twins.append(device)
-    return twins
+        for domain, identifier in device.identifiers:
+            if (
+                domain == DOMAIN
+                and "_module_" not in identifier
+                and identifier.partition(":")[2] == token
+            ):
+                sharing.append(device)
+                break
+    if (
+        len(sharing) != 1
+        or is_legacy_orphan_signature(sharing[0], entry.entry_id) != token
+    ):
+        return None
+    return sharing[0]
 
 
-def async_remove_twin_controller_devices(
-    hass: HomeAssistant, entry: ConfigEntry, live_identifier: str
-) -> list[str]:
-    """Remove old controller devices (and their entities) that twin the live one.
+def _plan_entity_pairing(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    orphan: dr.DeviceEntry,
+    live_identifier: str,
+) -> tuple[list[tuple[str, str | None, str | None]], str | None]:
+    """Pair each orphan entity with its live counterpart.
 
-    Runs on every setup. It is idempotent: once the twins are gone there is
-    nothing left to match. Entities still attached to a twin are not produced
-    by the current code (it only registers entities under ``live_identifier``),
-    so they are removed with it; entities of other config entries are never
-    touched, and a twin holding one of them is left in place.
-
-    Args:
-        hass: Home Assistant instance.
-        entry: The config entry being set up.
-        live_identifier: The controller identifier the current code registers.
-
-    Returns:
-        The identifiers of the removed devices.
+    Returns ``(plan, problem)``. Each plan item is ``(orphan_entity_id,
+    live_entity_id, rename_live_to)``. ``problem`` is set when any entity cannot
+    be paired with certainty, in which case nothing may be removed.
     """
     ent_reg = er.async_get(hass)
-    dev_reg = dr.async_get(hass)
-    removed: list[str] = []
-    for device in find_twin_controller_devices(hass, entry, live_identifier):
-        attached = er.async_entries_for_device(
-            ent_reg, device.id, include_disabled_entities=True
+    orphan_token = next(iter(orphan.identifiers))[1].partition(":")[2]
+    old_prefix = f"{_LEGACY_PREFIX}_{orphan_token}_".lower()
+    live_prefix = f"{live_identifier.replace(':', '_')}_".lower()
+    plan: list[tuple[str, str | None, str | None]] = []
+    for reg_entry in er.async_entries_for_device(
+        ent_reg, orphan.id, include_disabled_entities=True
+    ):
+        if reg_entry.config_entry_id != entry.entry_id:
+            return [], f"{reg_entry.entity_id} belongs to another config entry"
+        if not reg_entry.unique_id.startswith(old_prefix):
+            return [], f"{reg_entry.entity_id} has an unrecognised unique_id"
+        key = reg_entry.unique_id[len(old_prefix) :]
+        live_id = ent_reg.async_get_entity_id(
+            reg_entry.domain, reg_entry.platform, f"{live_prefix}{key}"
         )
-        if any(e.config_entry_id != entry.entry_id for e in attached):
-            continue
-        for reg_entry in attached:
-            ent_reg.async_remove(reg_entry.entity_id)
-        dev_reg.async_remove_device(device.id)
-        removed.append(next(iter(device.identifiers))[1])
-    if removed:
+        live_entry = ent_reg.async_get(live_id) if live_id else None
+        if live_entry is None or live_entry.config_entry_id != entry.entry_id:
+            return [], f"{reg_entry.entity_id} has no live counterpart"
+        old_id, new_id = reg_entry.entity_id, live_entry.entity_id
+        if re.fullmatch(rf"{re.escape(old_id)}_\d+", new_id):
+            # Orphan holds the canonical id; the live entity must take it over.
+            plan.append((old_id, new_id, old_id))
+        elif re.fullmatch(rf"{re.escape(new_id)}_\d+", old_id):
+            plan.append((old_id, new_id, None))
+        else:
+            return [], f"{old_id} and {new_id} are not a suffix pair"
+    return plan, None
+
+
+def async_remove_orphan_controller_device(
+    hass: HomeAssistant, entry: ConfigEntry, live_identifier: str
+) -> bool:
+    """Remove the old ``AC6:<token>`` controller device when it is provably a dupe.
+
+    Fails closed: if the live identity is unverified, the orphan is ambiguous,
+    or any of its entities cannot be paired with a live entity, nothing is
+    changed (and the reason is logged) so the device can still be deleted by
+    hand. When an orphan owns the canonical entity_id and the live entity holds
+    ``<id>_N``, the orphan entity is removed and the live entity is renamed to
+    the canonical id so recorder history stays attached.
+
+    Returns:
+        True if a device was removed.
+    """
+    orphan = find_orphan_controller_device(hass, entry, live_identifier)
+    if orphan is None:
+        return False
+    plan, problem = _plan_entity_pairing(hass, entry, orphan, live_identifier)
+    if problem is not None:
         _LOGGER.info(
-            "Apex entry %s: removed %d duplicate controller device(s): %s",
+            "Apex entry %s: leaving old controller device in place (%s)",
             entry.entry_id,
-            len(removed),
-            ", ".join(removed),
+            problem,
         )
-    return removed
+        return False
+    ent_reg = er.async_get(hass)
+    for old_id, live_id, rename_to in plan:
+        ent_reg.async_remove(old_id)
+        if rename_to is not None and live_id is not None:
+            ent_reg.async_update_entity(live_id, new_entity_id=rename_to)
+    dr.async_get(hass).async_remove_device(orphan.id)
+    _LOGGER.info(
+        "Apex entry %s: removed duplicate controller device %s (%d entities)",
+        entry.entry_id,
+        next(iter(orphan.identifiers))[1],
+        len(plan),
+    )
+    return True
