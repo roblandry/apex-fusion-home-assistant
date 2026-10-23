@@ -1760,7 +1760,7 @@ async def test_expired_marker_with_unchanged_version_raises_repair_issue(
     assert ctl.calls_for("PUT", "/rest/config/nconf") == []
 
 
-async def test_expired_marker_with_new_version_resolves_quietly(
+async def test_expired_marker_with_new_version_is_not_a_verified_success(
     hass, enable_custom_integrations, ctl, freezer
 ):
     coord = await _polled(hass, ctl)
@@ -1773,7 +1773,7 @@ async def test_expired_marker_with_new_version_resolves_quietly(
     fresh = _coordinator_for(hass, entry)
     await fresh.async_restore_install_window()
     await fresh.async_refresh()
-    assert _issue(hass, fresh) is None
+    assert _issue(hass, fresh) is not None
     assert _marker_key(fresh) not in _storage(hass)
     assert fresh.install_in_progress is False
 
@@ -2299,7 +2299,7 @@ async def test_rollback_then_newer_version_still_succeeds(
 
 
 async def test_expired_marker_result_is_recorded(
-    hass, enable_custom_integrations, ctl, freezer
+    hass, enable_custom_integrations, ctl, freezer, caplog
 ):
     coord = await _polled(hass, ctl)
     entry = coord.entry
@@ -2309,18 +2309,98 @@ async def test_expired_marker_result_is_recorded(
     ctl.software = NEW
     fresh = _coordinator_for(hass, entry)
     await fresh.async_restore_install_window()
-    await fresh.async_refresh()
-    assert fresh.last_install_result == INSTALL_RESULT_SUCCESS
+    with caplog.at_level(logging.INFO):
+        await fresh.async_refresh()
+    # The hard cap passed before anything could be observed: never a success,
+    # even though the controller now reports a newer version.
+    assert fresh.last_install_result == INSTALL_RESULT_TIMEOUT
     assert fresh.last_install_version == NEW
+    assert _issue(hass, fresh) is not None
+    assert _marker_key(fresh) not in _storage(hass)
+    assert any(
+        "could not be confirmed" in r.getMessage() and r.levelno == logging.INFO
+        for r in caplog.records
+    )
+    assert not any(r.levelno >= logging.ERROR for r in caplog.records)
 
-    # A rolled-back version at an expired marker is not success.
-    await fresh.async_begin_install_window()
-    await fresh.async_shutdown()
+
+@pytest.mark.parametrize("seen_version", [OLD, "5.14J_0001", "garbage"])
+async def test_expired_marker_with_older_or_unchanged_version_is_a_timeout(
+    hass, enable_custom_integrations, ctl, freezer, seen_version
+):
+    coord = await _polled(hass, ctl)
+    entry = coord.entry
+    await coord.async_begin_install_window()
+    await coord.async_shutdown()
     freezer.tick(timedelta(minutes=25))
+    ctl.software = seen_version
+    fresh = _coordinator_for(hass, entry)
+    await fresh.async_restore_install_window()
+    await fresh.async_refresh()
+    assert fresh.last_install_result == INSTALL_RESULT_TIMEOUT
+    assert fresh.last_install_version is None
+    assert _issue(hass, fresh) is not None
+    assert _marker_key(fresh) not in _storage(hass)
+
+
+@pytest.mark.parametrize("rollback", [OLD, "5.14J_0001", "garbage"])
+async def test_rollback_after_newer_version_withdraws_the_success_witness(
+    hass, enable_custom_integrations, ctl, freezer, caplog, rollback
+):
+    coord = await _polled(hass, ctl)
+    coord.update_interval = None
+    await coord.async_begin_install_window()
+    await _advance(hass, freezer, 130)
+    ctl.software = NEW
+    await coord.async_refresh()
+    assert coord._install_version_changed is True
+
+    # Rolled back before the soak ends: the earlier observation no longer stands.
+    ctl.software = rollback
+    with caplog.at_level(logging.WARNING):
+        await coord.async_refresh()
+    assert coord._install_version_changed is False
+    assert coord._install_observed_version is None
+    assert any("withdrawing" in r.getMessage() for r in caplog.records)
+
+    # The soak from the first observation would be over by now; it must not count.
+    await _advance(hass, freezer, 125)
+    await coord.async_refresh()
+    assert coord.install_in_progress is True
+    assert coord.last_install_result is None
+
+    # Nothing newer is ever seen again: the hard cap decides.
+    await _advance(hass, freezer, 1000)
+    assert coord.install_in_progress is False
+    assert coord.last_install_result == INSTALL_RESULT_TIMEOUT
+    assert coord.last_install_version is None
+    assert _issue(hass, coord) is not None
+
+
+async def test_newer_rollback_newer_needs_a_fresh_soak(
+    hass, enable_custom_integrations, ctl, freezer
+):
+    coord = await _polled(hass, ctl)
+    coord.update_interval = None
+    await coord.async_begin_install_window()
+    await _advance(hass, freezer, 130)
+    ctl.software = NEW
+    await coord.async_refresh()
     ctl.software = "5.14J_0001"
-    again = _coordinator_for(hass, entry)
-    await again.async_restore_install_window()
-    await again.async_refresh()
-    assert again.last_install_result == INSTALL_RESULT_TIMEOUT
-    assert again.last_install_version is None
-    assert _issue(hass, again) is not None
+    await coord.async_refresh()
+    await _advance(hass, freezer, 125)
+    assert coord.install_in_progress is True
+
+    # Newer again: the soak restarts from this observation, not from the
+    # reconnect that preceded the rollback.
+    ctl.software = NEW
+    await coord.async_refresh()
+    assert coord._install_version_changed is True
+    await _advance(hass, freezer, 60)
+    assert coord.install_in_progress is True
+    assert coord.last_install_result is None
+
+    await _advance(hass, freezer, 65)
+    assert coord.install_in_progress is False
+    assert coord.last_install_result == INSTALL_RESULT_SUCCESS
+    assert coord.last_install_version == NEW

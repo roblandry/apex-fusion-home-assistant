@@ -2211,6 +2211,8 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._install_reconnected_at: float | None = None
         self._install_version_changed: bool = False
         self._install_observed_version: str | None = None
+        self._install_soak_restart: bool = False
+        self._install_soak_from: float | None = None
         self._rollback_logged: bool = False
         self._last_install_result: str | None = None
         self._last_install_version: str | None = None
@@ -3210,6 +3212,8 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._install_reconnected_at = None
         self._install_version_changed = False
         self._install_observed_version = None
+        self._install_soak_restart = False
+        self._install_soak_from = None
         self._rollback_logged = False
         self._last_install_result = None
         self._last_install_version = None
@@ -3312,6 +3316,8 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._install_reconnected_at = None
         self._install_version_changed = False
         self._install_observed_version = None
+        self._install_soak_restart = False
+        self._install_soak_from = None
         self._rollback_logged = False
         self._last_install_result = None
         self._last_install_version = None
@@ -3399,7 +3405,7 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Do not carry a pre-reboot session into the new firmware.
             self._rest_sid = None
 
-        if version and version != self._install_from_version:
+        if version:
             if firmware_is_newer(version, self._install_from_version):
                 if not self._install_version_changed:
                     # Remember it, but keep the window (and its write block)
@@ -3407,6 +3413,11 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     # reconnect while the controller is still loading its pages.
                     self._install_version_changed = True
                     self._install_observed_version = version
+                    if self._install_soak_restart:
+                        # The witness was withdrawn by a rollback: the soak
+                        # counts from this fresh observation.
+                        self._install_soak_restart = False
+                        self._install_soak_from = now
                     expected = self._install_expected_version
                     if expected and version != expected:
                         _LOGGER.warning(
@@ -3415,27 +3426,47 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             version,
                             expected,
                         )
-            elif not self._rollback_logged:
-                # A different but not newer (or unparseable) version is never
-                # success. Keep waiting; the hard cap decides.
-                self._rollback_logged = True
-                _LOGGER.warning(
-                    "Controller reports firmware %s, which is not newer than the "
-                    "pre-install %s; not treating the install as successful",
-                    version,
-                    self._install_from_version,
-                )
+            else:
+                # Not newer (a rollback, the old version, or unparseable) is
+                # never success. Any earlier newer observation no longer
+                # stands: only the latest observed version counts. Keep
+                # waiting; the hard cap decides.
+                if self._install_version_changed:
+                    self._install_version_changed = False
+                    self._install_observed_version = None
+                    self._install_soak_from = None
+                    self._install_soak_restart = True
+                    _LOGGER.warning(
+                        "Controller now reports firmware %s, which is not newer "
+                        "than the pre-install %s; withdrawing the earlier "
+                        "observation of a newer version",
+                        version,
+                        self._install_from_version,
+                    )
+                elif version != self._install_from_version and (
+                    not self._rollback_logged
+                ):
+                    self._rollback_logged = True
+                    _LOGGER.warning(
+                        "Controller reports firmware %s, which is not newer than "
+                        "the pre-install %s; not treating the install as "
+                        "successful",
+                        version,
+                        self._install_from_version,
+                    )
         await self._async_maybe_complete_install()
 
     async def _async_maybe_complete_install(self) -> None:
-        """Close the window once the version changed and the web pages soaked."""
+        """Close the window once the latest version is newer and soaked."""
         reconnected = self._install_reconnected_at
         if (
             not self._install_active
             or not self._install_version_changed
             or reconnected is None
-            or time.monotonic() - reconnected < INSTALL_WEB_PAGES_SECONDS
         ):
+            return
+        soak_from = max(reconnected, self._install_soak_from or reconnected)
+        if time.monotonic() - soak_from < INSTALL_WEB_PAGES_SECONDS:
             return
         await self._async_close_install_window(INSTALL_RESULT_SUCCESS)
         self.entry.async_create_background_task(
@@ -3450,14 +3481,24 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return
         self._install_unresolved = None
         generation = self._install_generation
-        if firmware_is_newer(version, marker[2]):
-            self._last_install_result = INSTALL_RESULT_SUCCESS
+        # The hard cap has already passed, so a verified success (a newer
+        # version plus a full soak inside the window) is impossible: an
+        # expired marker always resolves as a timeout.
+        self._last_install_result = INSTALL_RESULT_TIMEOUT
+        newer = firmware_is_newer(version, marker[2])
+        if newer:
             self._last_install_version = version
-            ir.async_delete_issue(self.hass, DOMAIN, self._install_issue_id)
+            _LOGGER.info(
+                "Controller now reports firmware %s, newer than the pre-install "
+                "%s, but the install could not be confirmed within the %d minute "
+                "window",
+                version,
+                marker[2],
+                int(INSTALL_WINDOW_MAX_SECONDS // 60),
+            )
         else:
-            self._last_install_result = INSTALL_RESULT_TIMEOUT
             self._last_install_version = None
-            self._report_install_unconfirmed()
+        self._report_install_unconfirmed(log_error=not newer)
         await self._async_clear_install_marker(generation)
 
     async def _async_refresh_config_after_install(self) -> None:
@@ -3469,12 +3510,13 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 _safe_str(err),
             )
 
-    def _report_install_unconfirmed(self) -> None:
-        _LOGGER.error(
-            "Controller did not report a new firmware version within %d "
-            "minutes; the install is not retried",
-            int(INSTALL_WINDOW_MAX_SECONDS // 60),
-        )
+    def _report_install_unconfirmed(self, *, log_error: bool = True) -> None:
+        if log_error:
+            _LOGGER.error(
+                "Controller did not report a new firmware version within %d "
+                "minutes; the install is not retried",
+                int(INSTALL_WINDOW_MAX_SECONDS // 60),
+            )
         ir.async_create_issue(
             self.hass,
             DOMAIN,
@@ -3502,6 +3544,8 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._install_reconnected_at = None
         self._install_version_changed = False
         self._install_observed_version = None
+        self._install_soak_restart = False
+        self._install_soak_from = None
         self._install_from_version = None
         self._install_expected_version = None
         if result == INSTALL_RESULT_TIMEOUT:
