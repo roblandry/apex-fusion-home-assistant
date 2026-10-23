@@ -3143,14 +3143,41 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.async_update_listeners()
 
     async def _async_save_install_marker(self, marker: dict[str, Any]) -> None:
+        """Persist the marker and prove it reached storage, or raise.
+
+        ``Store.async_save`` is not proof of a write: HA logs and swallows
+        write/serialization errors, and returns without writing while stopping.
+        So the marker is read back through a fresh ``Store`` (no pending-write
+        or cache state shared with the one that wrote it) and must equal what
+        was written. Anything else fails closed: the install is not started.
+        """
+        failure = HomeAssistantError(
+            "Could not record the install attempt; not starting the update"
+        )
         async with self._marker_lock:
+            if not self.hass.is_running:
+                raise failure
             try:
                 await self._install_store.async_save(marker)
+                stored: Any = await _install_store_for(
+                    self.hass, self.entry.entry_id
+                ).async_load()
             except Exception as err:  # noqa: BLE001
-                raise HomeAssistantError(
-                    "Could not record the firmware install on disk; not starting it "
-                    f"({err.__class__.__name__})"
-                ) from err
+                await self._async_remove_marker_quietly()
+                raise failure from err
+            if stored != marker:
+                await self._async_remove_marker_quietly()
+                raise failure
+
+    async def _async_remove_marker_quietly(self) -> None:
+        """Best-effort removal of a marker for an install that never started."""
+        try:
+            await self._install_store.async_remove()
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug(
+                "Could not remove the unused install marker (%s)",
+                err.__class__.__name__,
+            )
 
     async def _async_clear_install_marker(self, generation: int) -> None:
         """Remove the persisted marker unless a newer attempt replaced it."""

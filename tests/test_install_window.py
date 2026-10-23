@@ -1412,6 +1412,138 @@ async def test_marker_save_failure_aborts_before_anything_is_sent(
     assert coord.install_in_progress is False
 
 
+async def test_swallowed_store_write_error_fails_closed_with_zero_puts(
+    hass, enable_custom_integrations, ctl
+):
+    """HA's Store logs and swallows WriteError; the read-back must catch it."""
+    from homeassistant.helpers.storage import Store
+    from homeassistant.util.file import WriteError
+
+    coord = await _polled(hass, ctl)
+
+    async def _failing_write(_store: Any, _data: Any) -> None:
+        raise WriteError("disk full")
+
+    with patch.object(Store, "_async_write_data", _failing_write):
+        with pytest.raises(HomeAssistantError, match="not starting the update"):
+            await coord.async_request_firmware_install()
+
+    assert ctl.calls_for("PUT", "/rest/config/nconf") == []
+    assert coord.install_in_progress is False
+    assert _marker_key(coord) not in _storage(hass)
+
+
+async def test_stale_marker_on_disk_does_not_confirm_a_failed_write(
+    hass, enable_custom_integrations, ctl
+):
+    from homeassistant.helpers.storage import Store
+    from homeassistant.util.file import WriteError
+
+    coord = await _polled(hass, ctl)
+    _storage(hass)[_marker_key(coord)] = {
+        "version": 1,
+        "minor_version": 1,
+        "key": _marker_key(coord),
+        "data": {
+            "entry_id": coord.entry.entry_id,
+            "started_at": 1.0,
+            "expires_at": 1201.0,
+            "from_version": OLD,
+            "expected_version": NEW,
+        },
+    }
+
+    async def _failing_write(_store: Any, _data: Any) -> None:
+        raise WriteError("read-only filesystem")
+
+    with patch.object(Store, "_async_write_data", _failing_write):
+        with pytest.raises(HomeAssistantError, match="not starting the update"):
+            await coord.async_request_firmware_install()
+    assert ctl.calls_for("PUT", "/rest/config/nconf") == []
+    assert coord.install_in_progress is False
+
+
+async def test_no_install_while_home_assistant_is_stopping(
+    hass, enable_custom_integrations, ctl
+):
+    from homeassistant.core import CoreState
+
+    coord = await _polled(hass, ctl)
+    save = AsyncMock()
+    coord._install_store.async_save = save
+    hass.set_state(CoreState.stopping)
+    try:
+        with pytest.raises(HomeAssistantError, match="not starting the update"):
+            await coord.async_request_firmware_install()
+        with pytest.raises(HomeAssistantError, match="not starting the update"):
+            await coord.async_begin_install_window()
+    finally:
+        hass.set_state(CoreState.running)
+    save.assert_not_called()
+    assert ctl.calls_for("PUT", "/rest/config/nconf") == []
+    assert coord.install_in_progress is False
+
+
+async def test_real_store_save_deferred_while_stopping_is_not_confirmed(
+    hass, enable_custom_integrations, ctl
+):
+    """Even if the running check were bypassed, a deferred save is not durable."""
+    from homeassistant.core import CoreState
+
+    coord = await _polled(hass, ctl)
+    marker = {
+        "entry_id": coord.entry.entry_id,
+        "started_at": 5.0,
+        "expires_at": 1205.0,
+        "from_version": OLD,
+        "expected_version": None,
+    }
+    hass.set_state(CoreState.stopping)
+    try:
+        # Bypass the is_running guard: the read-back alone must refuse.
+        with patch.object(type(hass), "is_running", True):
+            with pytest.raises(HomeAssistantError, match="not starting the update"):
+                await coord._async_save_install_marker(marker)
+    finally:
+        hass.set_state(CoreState.running)
+    assert _marker_key(coord) not in _storage(hass)
+
+
+async def test_marker_read_back_error_fails_closed_and_cleans_up(
+    hass, enable_custom_integrations, ctl
+):
+    from homeassistant.helpers.storage import Store
+
+    coord = await _polled(hass, ctl)
+
+    async def _boom(_store: Any) -> Any:
+        raise HomeAssistantError("unreadable")
+
+    with patch.object(Store, "async_load", _boom):
+        with pytest.raises(HomeAssistantError, match="not starting the update"):
+            await coord.async_request_firmware_install()
+    assert ctl.calls_for("PUT", "/rest/config/nconf") == []
+    # The marker that was written for an install that never started is removed.
+    assert _marker_key(coord) not in _storage(hass)
+
+
+async def test_unused_marker_cleanup_failure_is_swallowed(
+    hass, enable_custom_integrations, ctl
+):
+    from homeassistant.helpers.storage import Store
+
+    coord = await _polled(hass, ctl)
+    coord._install_store.async_remove = AsyncMock(side_effect=OSError("ro"))
+
+    async def _boom(_store: Any) -> Any:
+        raise HomeAssistantError("unreadable")
+
+    with patch.object(Store, "async_load", _boom):
+        with pytest.raises(HomeAssistantError, match="not starting the update"):
+            await coord.async_request_firmware_install()
+    assert ctl.calls_for("PUT", "/rest/config/nconf") == []
+
+
 async def test_marker_remove_failure_is_logged_not_raised(
     hass, enable_custom_integrations, ctl, caplog
 ):
