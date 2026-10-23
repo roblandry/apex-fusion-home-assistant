@@ -2404,3 +2404,64 @@ async def test_newer_rollback_newer_needs_a_fresh_soak(
     assert coord.install_in_progress is False
     assert coord.last_install_result == INSTALL_RESULT_SUCCESS
     assert coord.last_install_version == NEW
+
+
+@pytest.mark.parametrize("missing", ["", None])
+async def test_poll_without_a_version_withdraws_the_success_witness(
+    hass, enable_custom_integrations, ctl, freezer, caplog, missing
+):
+    coord = await _polled(hass, ctl)
+    coord.update_interval = None
+    await coord.async_begin_install_window()
+    await _advance(hass, freezer, 130)
+    ctl.software = NEW
+    await coord.async_refresh()
+    assert coord._install_version_changed is True
+
+    # A good poll that reports no version is a non-newer latest observation.
+    ctl.software = missing
+    with caplog.at_level(logging.WARNING):
+        await coord.async_refresh()
+    assert coord._install_version_changed is False
+    assert coord._install_observed_version is None
+    assert coord._install_soak_from is None
+    assert any("withdrawing" in r.getMessage() for r in caplog.records)
+
+    # The soak from the first observation would be over by now; it must not count.
+    await _advance(hass, freezer, 125)
+    await coord.async_refresh()
+    assert coord.install_in_progress is True
+    assert coord.last_install_result is None
+
+    # Nothing newer is ever seen again: the hard cap decides.
+    await _advance(hass, freezer, 1000)
+    assert coord.install_in_progress is False
+    assert coord.last_install_result == INSTALL_RESULT_TIMEOUT
+    assert coord.last_install_version is None
+
+
+async def test_newer_empty_newer_needs_a_fresh_soak(
+    hass, enable_custom_integrations, ctl, freezer
+):
+    coord = await _polled(hass, ctl)
+    coord.update_interval = None
+    await coord.async_begin_install_window()
+    await _advance(hass, freezer, 130)
+    ctl.software = NEW
+    await coord.async_refresh()
+    ctl.software = ""
+    await coord.async_refresh()
+    await _advance(hass, freezer, 125)
+    assert coord.install_in_progress is True
+
+    ctl.software = NEW
+    await coord.async_refresh()
+    assert coord._install_version_changed is True
+    await _advance(hass, freezer, 60)
+    assert coord.install_in_progress is True
+    assert coord.last_install_result is None
+
+    await _advance(hass, freezer, 65)
+    assert coord.install_in_progress is False
+    assert coord.last_install_result == INSTALL_RESULT_SUCCESS
+    assert coord.last_install_version == NEW

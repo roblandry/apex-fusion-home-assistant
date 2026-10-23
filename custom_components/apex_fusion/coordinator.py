@@ -3405,55 +3405,56 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Do not carry a pre-reboot session into the new firmware.
             self._rest_sid = None
 
-        if version:
-            if firmware_is_newer(version, self._install_from_version):
-                if not self._install_version_changed:
-                    # Remember it, but keep the window (and its write block)
-                    # open through the web-pages soak: the version may flip at
-                    # reconnect while the controller is still loading its pages.
-                    self._install_version_changed = True
-                    self._install_observed_version = version
-                    if self._install_soak_restart:
-                        # The witness was withdrawn by a rollback: the soak
-                        # counts from this fresh observation.
-                        self._install_soak_restart = False
-                        self._install_soak_from = now
-                    expected = self._install_expected_version
-                    if expected and version != expected:
-                        _LOGGER.warning(
-                            "Controller reports firmware %s after the install, "
-                            "not the expected %s",
-                            version,
-                            expected,
-                        )
-            else:
-                # Not newer (a rollback, the old version, or unparseable) is
-                # never success. Any earlier newer observation no longer
-                # stands: only the latest observed version counts. Keep
-                # waiting; the hard cap decides.
-                if self._install_version_changed:
-                    self._install_version_changed = False
-                    self._install_observed_version = None
-                    self._install_soak_from = None
-                    self._install_soak_restart = True
+        if version and firmware_is_newer(version, self._install_from_version):
+            if not self._install_version_changed:
+                # Remember it, but keep the window (and its write block)
+                # open through the web-pages soak: the version may flip at
+                # reconnect while the controller is still loading its pages.
+                self._install_version_changed = True
+                self._install_observed_version = version
+                if self._install_soak_restart:
+                    # The witness was withdrawn (a rollback or a poll with no
+                    # version): the soak counts from this fresh observation.
+                    self._install_soak_restart = False
+                    self._install_soak_from = now
+                expected = self._install_expected_version
+                if expected and version != expected:
                     _LOGGER.warning(
-                        "Controller now reports firmware %s, which is not newer "
-                        "than the pre-install %s; withdrawing the earlier "
-                        "observation of a newer version",
+                        "Controller reports firmware %s after the install, "
+                        "not the expected %s",
                         version,
-                        self._install_from_version,
+                        expected,
                     )
-                elif version != self._install_from_version and (
-                    not self._rollback_logged
-                ):
-                    self._rollback_logged = True
-                    _LOGGER.warning(
-                        "Controller reports firmware %s, which is not newer than "
-                        "the pre-install %s; not treating the install as "
-                        "successful",
-                        version,
-                        self._install_from_version,
-                    )
+        else:
+            # Not newer (a rollback, the old version, unparseable, or no
+            # version reported at all) is never success. Any earlier newer
+            # observation no longer stands: only the latest observation
+            # counts. Keep waiting; the hard cap decides.
+            if self._install_version_changed:
+                self._install_version_changed = False
+                self._install_observed_version = None
+                self._install_soak_from = None
+                self._install_soak_restart = True
+                _LOGGER.warning(
+                    "Controller now reports firmware %s, which is not newer "
+                    "than the pre-install %s; withdrawing the earlier "
+                    "observation of a newer version",
+                    version or "(none)",
+                    self._install_from_version,
+                )
+            elif (
+                version
+                and version != self._install_from_version
+                and not self._rollback_logged
+            ):
+                self._rollback_logged = True
+                _LOGGER.warning(
+                    "Controller reports firmware %s, which is not newer than "
+                    "the pre-install %s; not treating the install as "
+                    "successful",
+                    version,
+                    self._install_from_version,
+                )
         await self._async_maybe_complete_install()
 
     async def _async_maybe_complete_install(self) -> None:
