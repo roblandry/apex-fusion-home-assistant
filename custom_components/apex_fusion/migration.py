@@ -336,3 +336,100 @@ async def migrate_v1_to_v2(
     await apply_plan(hass, entry, plan)
     hass.config_entries.async_update_entry(entry, data=data, version=2)
     return plan
+
+
+def _identity_token(identifier: str) -> str | None:
+    """Return the part of a controller identifier after the hardware prefix.
+
+    ``AC6J:12345`` and ``AC6:12345`` are the same controller reported by two
+    transports; both share the token ``12345``.
+    """
+    prefix, sep, token = identifier.partition(":")
+    if not (sep and prefix):
+        return None
+    return token.strip() or None
+
+
+def find_twin_controller_devices(
+    hass: HomeAssistant, entry: ConfigEntry, live_identifier: str
+) -> list[dr.DeviceEntry]:
+    """Return old controller devices that duplicate the live one.
+
+    A twin is a top-level (no ``via_device``) device of this entry whose only
+    identifier is ``<other hardware prefix>:<same serial token>`` as the live
+    controller. Module devices, devices shared with other entries and devices
+    carrying any other identifier are never returned.
+
+    Args:
+        hass: Home Assistant instance.
+        entry: The config entry being set up.
+        live_identifier: The controller identifier the current code registers.
+
+    Returns:
+        The twin devices (empty when the live identifier has no serial token).
+    """
+    token = _identity_token(live_identifier)
+    if token is None:
+        return []
+    dev_reg = dr.async_get(hass)
+    if dev_reg.async_get_device(identifiers={(DOMAIN, live_identifier)}) is None:
+        return []
+    twins: list[dr.DeviceEntry] = []
+    for device in dr.async_entries_for_config_entry(dev_reg, entry.entry_id):
+        if device.via_device_id is not None or device.config_entries != {
+            entry.entry_id
+        }:
+            continue
+        if len(device.identifiers) != 1:
+            continue
+        domain, identifier = next(iter(device.identifiers))
+        if (
+            domain == DOMAIN
+            and identifier != live_identifier
+            and "_module_" not in identifier
+            and _identity_token(identifier) == token
+        ):
+            twins.append(device)
+    return twins
+
+
+def async_remove_twin_controller_devices(
+    hass: HomeAssistant, entry: ConfigEntry, live_identifier: str
+) -> list[str]:
+    """Remove old controller devices (and their entities) that twin the live one.
+
+    Runs on every setup. It is idempotent: once the twins are gone there is
+    nothing left to match. Entities still attached to a twin are not produced
+    by the current code (it only registers entities under ``live_identifier``),
+    so they are removed with it; entities of other config entries are never
+    touched, and a twin holding one of them is left in place.
+
+    Args:
+        hass: Home Assistant instance.
+        entry: The config entry being set up.
+        live_identifier: The controller identifier the current code registers.
+
+    Returns:
+        The identifiers of the removed devices.
+    """
+    ent_reg = er.async_get(hass)
+    dev_reg = dr.async_get(hass)
+    removed: list[str] = []
+    for device in find_twin_controller_devices(hass, entry, live_identifier):
+        attached = er.async_entries_for_device(
+            ent_reg, device.id, include_disabled_entities=True
+        )
+        if any(e.config_entry_id != entry.entry_id for e in attached):
+            continue
+        for reg_entry in attached:
+            ent_reg.async_remove(reg_entry.entity_id)
+        dev_reg.async_remove_device(device.id)
+        removed.append(next(iter(device.identifiers))[1])
+    if removed:
+        _LOGGER.info(
+            "Apex entry %s: removed %d duplicate controller device(s): %s",
+            entry.entry_id,
+            len(removed),
+            ", ".join(removed),
+        )
+    return removed

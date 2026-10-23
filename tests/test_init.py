@@ -307,6 +307,7 @@ async def test_setup_never_purges_registry_when_source_changes(
     coordinator = AsyncMock()
     coordinator.async_config_entry_first_refresh = AsyncMock(return_value=None)
     coordinator.data = {"meta": {"serial": "SER123", "source": "rest"}}
+    coordinator.device_identifier = "SER123"
 
     with (
         patch(
@@ -333,6 +334,7 @@ async def _setup_with_stub_coordinator(hass, entry):
     coordinator = AsyncMock()
     coordinator.async_config_entry_first_refresh = AsyncMock(return_value=None)
     coordinator.data = {"meta": {"serial": "SER123"}}
+    coordinator.device_identifier = "SER123"
     with (
         patch(
             "custom_components.apex_fusion.ApexNeptuneDataUpdateCoordinator",
@@ -830,6 +832,7 @@ async def test_async_setup_entry_updates_unique_id_to_serial(
 
     coordinator = AsyncMock()
     coordinator.data = {"meta": {"serial": "SER123"}}
+    coordinator.device_identifier = "SER123"
     coordinator.async_config_entry_first_refresh = AsyncMock(return_value=None)
     coordinator.device_identifier = "SER123"
 
@@ -876,6 +879,7 @@ async def test_async_setup_entry_duplicate_serial_logs_warning(
 
     coordinator = AsyncMock()
     coordinator.data = {"meta": {"serial": "SER123"}}
+    coordinator.device_identifier = "SER123"
     coordinator.async_config_entry_first_refresh = AsyncMock(return_value=None)
     coordinator.device_identifier = "SER123"
 
@@ -960,6 +964,7 @@ async def test_setup_pins_legacy_format_from_first_refresh(
     coordinator = AsyncMock()
     coordinator.async_config_entry_first_refresh = AsyncMock(return_value=None)
     coordinator.data = {"meta": {"serial": "SER123", "source": source}}
+    coordinator.device_identifier = "SER123"
     with (
         patch(
             "custom_components.apex_fusion.ApexNeptuneDataUpdateCoordinator",

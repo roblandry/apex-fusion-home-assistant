@@ -13,6 +13,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.helpers.device_registry import DeviceEntry
 
 from .config_flow import CannotConnect, InvalidAuth, async_validate_input
 from .const import (
@@ -36,7 +37,11 @@ from .coordinator import (
     legacy_format_from_entry_data,
     transport_from_entry_data,
 )
-from .migration import CONFIG_ENTRY_VERSION, migrate_v1_to_v2
+from .migration import (
+    CONFIG_ENTRY_VERSION,
+    async_remove_twin_controller_devices,
+    migrate_v1_to_v2,
+)
 
 _LOGGER = logging.getLogger(LOGGER_NAME)
 
@@ -227,6 +232,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await hass.config_entries.async_forward_entry_setups(entry, platforms)
 
+    # Drop old-form controller devices (e.g. ``AC6:<serial>`` next to
+    # ``AC6J:<serial>``) left behind by earlier releases. Done on every setup,
+    # not only on a version bump, so entries already at version 2 are cleaned.
+    async_remove_twin_controller_devices(hass, entry, coordinator.device_identifier)
+
     # Track which platforms were actually forwarded so unload can avoid
     # attempting to unload platforms that were never set up.
     hass.data.setdefault(DOMAIN, {}).setdefault(_DOMAIN_LOADED_PLATFORMS_KEY, {})[
@@ -252,6 +262,35 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if entry.version < 2:
         await migrate_v1_to_v2(hass, entry)
     return True
+
+
+async def async_remove_config_entry_device(
+    hass: HomeAssistant, entry: ConfigEntry, device_entry: DeviceEntry
+) -> bool:
+    """Allow deleting a device from the UI unless it is currently provided.
+
+    Args:
+        hass: Home Assistant instance.
+        entry: The config entry.
+        device_entry: The device the user asked to delete.
+
+    Returns:
+        False for the live controller and its modules; True for anything else
+        (for example an old duplicate controller device).
+    """
+    coordinator: Any = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    live = str(
+        getattr(coordinator, "device_identifier", None)
+        or entry.data.get(CONF_SERIAL)
+        or entry.unique_id
+        or ""
+    ).strip()
+    if not live:
+        return True
+    return not any(
+        domain == DOMAIN and (ident == live or ident.startswith(f"{live}_module_"))
+        for domain, ident in device_entry.identifiers
+    )
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
