@@ -44,5 +44,11 @@
       "invalid_auth": "Invalid authentication",
       "unknown": "Unexpected error"
     }
+  },
+  "issues": {
+    "firmware_install_unconfirmed": {
+      "title": "Apex firmware install not confirmed",
+      "description": "Home Assistant asked {name} to install new firmware, but the controller did not report a new firmware version within 20 minutes. The install was not retried. Check the controller locally (its status LED and its web UI), follow Neptune's recovery steps if it is unresponsive, then reload this integration."
+    }
   }
 }

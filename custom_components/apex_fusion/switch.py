@@ -213,6 +213,10 @@ class ApexFeedModeSwitch(SwitchEntity):
         except FileNotFoundError:
             await _legacy_post_status_cgi()
         except HomeAssistantError as err:
+            if self._coordinator.install_in_progress:
+                # Writes are blocked during a firmware install; the CGI fallback
+                # would be a write to a rebooting controller.
+                raise
             # If REST failed due to auth/rate-limit/transient issues, try the CGI endpoint.
             _LOGGER.debug("REST feed control failed; trying CGI endpoint: %s", err)
             await _legacy_post_status_cgi()

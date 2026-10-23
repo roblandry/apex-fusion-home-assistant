@@ -23,6 +23,7 @@ from custom_components.apex_fusion.const import (
 class _CoordinatorStub:
     data: dict[str, Any]
     last_update_success: bool = True
+    install_in_progress: bool = False
     device_identifier: str = "TEST"
     async_request_refresh: AsyncMock = AsyncMock()
     async_rest_put_json: AsyncMock = AsyncMock()
@@ -394,3 +395,44 @@ async def test_switch_listener_updates_state_and_unsubscribes(
     coordinator.data["feed"] = {"name": 0}
     coordinator.fire_update()
     assert write.called is False
+
+
+async def test_switch_feed_no_cgi_fallback_during_firmware_install(
+    hass, enable_custom_integrations, monkeypatch
+):
+    """A blocked REST write must not fall back to a CGI write mid-install."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_HOST: "192.0.2.10", CONF_USERNAME: "admin", CONF_PASSWORD: "pw"},
+        unique_id="192.0.2.10",
+        title="Apex (192.0.2.10)",
+    )
+    entry.add_to_hass(hass)
+
+    coordinator = _CoordinatorStub(
+        data={"meta": {"serial": "ABC"}, "feed": {"name": 0}},
+        install_in_progress=True,
+    )
+    coordinator.async_rest_put_json = AsyncMock(
+        side_effect=HomeAssistantError("A firmware install is in progress")
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
+    session = _Session()
+    monkeypatch.setattr(
+        "custom_components.apex_fusion.switch.async_get_clientsession",
+        lambda _h: session,
+    )
+
+    from custom_components.apex_fusion.switch import ApexFeedModeSwitch, _FeedRef
+
+    ent = ApexFeedModeSwitch(
+        hass,
+        cast(Any, coordinator),
+        cast(Any, entry),
+        ref=_FeedRef(did="1", name="Feed A"),
+    )
+
+    with pytest.raises(HomeAssistantError, match="firmware install"):
+        await ent.async_turn_on()
+    assert session.post_calls == []

@@ -60,6 +60,44 @@ DEFAULT_STATUS_PATH: Final = "/cgi-bin/status.xml"
 DEFAULT_SCAN_INTERVAL: Final = timedelta(seconds=30)
 DEFAULT_TIMEOUT_SECONDS: Final[int] = 10
 
+# Firmware install window.
+#
+# The controller reboots while it installs a new AOS, and its own web UI tracks
+# the install with fixed timers only (it reads no progress from the controller).
+# The coordinator mirrors that: elapsed time since the install request returned
+# drives the reported phase and percentage, and a changed software version is the
+# only evidence of success.
+INSTALL_PHASE_RESTARTING: Final = "restarting"
+INSTALL_PHASE_RECONNECTING: Final = "reconnecting"
+INSTALL_PHASE_WEB_PAGES: Final = "web_pages"
+
+INSTALL_RESULT_SUCCESS: Final = "success"
+INSTALL_RESULT_TIMEOUT: Final = "timeout"
+INSTALL_RESULT_REJECTED: Final = "rejected"
+
+# restarting: 0 -> 40 % over 120 s.
+INSTALL_RESTART_SECONDS: Final = 120.0
+INSTALL_RESTART_PERCENT: Final = 40
+# reconnecting: holds at 40 %, creeping to at most 49 % over the next 60 s.
+INSTALL_RECONNECT_CREEP_SECONDS: Final = 60.0
+INSTALL_RECONNECT_CREEP_PERCENT: Final = 9
+# web_pages: 50 -> 99 % over 120 s; 100 % is never reported.
+INSTALL_WEB_PAGES_SECONDS: Final = 120.0
+INSTALL_WEB_PAGES_START_PERCENT: Final = 50
+INSTALL_WEB_PAGES_SPAN_PERCENT: Final = 49
+# The controller UI declares failure at this point; we only log a warning.
+INSTALL_UI_FAIL_WARNING_SECONDS: Final = 184.0
+# Hard cap: after this the window is closed and a Repairs issue is raised.
+INSTALL_WINDOW_MAX_SECONDS: Final = 20 * 60.0
+INSTALL_PROGRESS_TICK: Final = timedelta(seconds=5)
+# Longest REST backoff honoured while the controller is expected to be rebooting.
+INSTALL_REST_BACKOFF_CAP_SECONDS: Final = 30.0
+
+# nconf fields never sent back to the controller with the install request.
+INSTALL_NCONF_STRIPPED_KEYS: Final = frozenset(
+    {"password", "emailPassword", "wifiAPPassword", "ssid"}
+)
+
 PLATFORMS: Final[list[Platform]] = [
     Platform.SENSOR,
     Platform.SELECT,
