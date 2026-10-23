@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 ## v2026.10.23-beta.1
 
-**Before you update**
+### Before you update
 
 - Take a Home Assistant backup before installing this release.
 - Before installing any controller firmware, read Neptune's release notes for that version and save your Apex configuration.
