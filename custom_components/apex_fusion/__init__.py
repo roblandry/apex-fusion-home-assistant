@@ -13,6 +13,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.helpers.device_registry import DeviceEntry
 
 from .config_flow import CannotConnect, InvalidAuth, async_validate_input
 from .const import (
@@ -36,7 +37,12 @@ from .coordinator import (
     legacy_format_from_entry_data,
     transport_from_entry_data,
 )
-from .migration import CONFIG_ENTRY_VERSION, migrate_v1_to_v2
+from .migration import (
+    CONFIG_ENTRY_VERSION,
+    async_remove_orphan_controller_device,
+    find_orphan_controller_device,
+    migrate_v1_to_v2,
+)
 
 _LOGGER = logging.getLogger(LOGGER_NAME)
 
@@ -227,6 +233,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await hass.config_entries.async_forward_entry_setups(entry, platforms)
 
+    # Drop the old ``AC6:<serial>`` controller device left behind by earlier
+    # releases, only when provably a duplicate. Runs on every setup (not just a
+    # version bump) so entries already at version 2 are cleaned and a skipped
+    # case is retried once the live entities exist.
+    async_remove_orphan_controller_device(hass, entry, coordinator.device_identifier)
+
     # Track which platforms were actually forwarded so unload can avoid
     # attempting to unload platforms that were never set up.
     hass.data.setdefault(DOMAIN, {}).setdefault(_DOMAIN_LOADED_PLATFORMS_KEY, {})[
@@ -252,6 +264,37 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if entry.version < 2:
         await migrate_v1_to_v2(hass, entry)
     return True
+
+
+async def async_remove_config_entry_device(
+    hass: HomeAssistant, entry: ConfigEntry, device_entry: DeviceEntry
+) -> bool:
+    """Allow UI deletion only of the verified old duplicate controller device.
+
+    Uses the same verification as the automatic cleanup: the live controller
+    identity must be current-form and registered to this entry, and the device
+    must be the single exact old-orphan signature sharing its serial token. When
+    that cannot be verified (for example a stale or missing persisted identity)
+    removal is refused, which is a deliberate false negative.
+
+    Args:
+        hass: Home Assistant instance.
+        entry: The config entry.
+        device_entry: The device the user asked to delete.
+
+    Returns:
+        True only for a positively identified old orphan.
+    """
+    coordinator: Any = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    live = str(
+        getattr(coordinator, "device_identifier", None)
+        or entry.data.get(CONF_SERIAL)
+        or ""
+    ).strip()
+    if not live:
+        return False
+    orphan = find_orphan_controller_device(hass, entry, live)
+    return orphan is not None and orphan.id == device_entry.id
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

@@ -19,6 +19,7 @@ and re-running it is a no-op.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -121,14 +122,18 @@ def _resolve_serial(entry: ConfigEntry, devices: list[dr.DeviceEntry]) -> str | 
     unique_id = str(entry.unique_id or "").strip()
     if unique_id and unique_id.lower() != host:
         return unique_id
-    for device in devices:
-        for domain, identifier in device.identifiers:
-            if (
-                domain == DOMAIN
-                and "_module_" not in identifier
-                and _canonical_device_identifier(entry, identifier, "x") == identifier
-            ):
-                return identifier
+    candidates = sorted(
+        identifier
+        for device in devices
+        for domain, identifier in device.identifiers
+        if domain == DOMAIN
+        and "_module_" not in identifier
+        and _canonical_device_identifier(entry, identifier, "x") == identifier
+    )
+    # Never pin the old ``AC6:<token>`` form when a current one exists.
+    current = [c for c in candidates if _CURRENT_IDENTIFIER.match(c)]
+    if current or candidates:
+        return (current or candidates)[0]
     # A controller that never reported a serial keeps its original unique_id.
     return unique_id or None
 
@@ -336,3 +341,106 @@ async def migrate_v1_to_v2(
     await apply_plan(hass, entry, plan)
     hass.config_entries.async_update_entry(entry, data=data, version=2)
     return plan
+
+
+# The old duplicate controller device: literal ``AC6`` prefix, model ``1.0``.
+_LEGACY_PREFIX = "AC6"
+_LEGACY_ORPHAN_MODEL = "1.0"
+_CURRENT_IDENTIFIER = re.compile(r"^AC6[A-Z]:(?P<token>[^:]+)$")
+
+
+def _live_token(live_identifier: str) -> str | None:
+    """Return the serial token of a current-form (``AC6J:``/``AC6L:``) identifier."""
+    match = _CURRENT_IDENTIFIER.match(live_identifier)
+    return match.group("token") if match else None
+
+
+def is_legacy_orphan_signature(device: dr.DeviceEntry, entry_id: str) -> str | None:
+    """Return the serial token if the device has the exact old-orphan signature.
+
+    The signature is: one identifier, ``(DOMAIN, "AC6:<token>")``, model ``1.0``,
+    no ``via_device`` and held by this config entry alone.
+    """
+    if (
+        device.via_device_id is not None
+        or device.config_entries != {entry_id}
+        or str(device.model or "") != _LEGACY_ORPHAN_MODEL
+        or len(device.identifiers) != 1
+    ):
+        return None
+    domain, identifier = next(iter(device.identifiers))
+    prefix, sep, token = identifier.partition(":")
+    if domain != DOMAIN or not sep or prefix != _LEGACY_PREFIX or not token:
+        return None
+    return token
+
+
+def find_orphan_controller_device(
+    hass: HomeAssistant, entry: ConfigEntry, live_identifier: str
+) -> dr.DeviceEntry | None:
+    """Return the one positively identified old controller device, if any.
+
+    Requires a verified current-form live identifier that is the entry's
+    persisted identity, a registered live device, and exactly one other
+    top-level controller-like device sharing the serial token, which must have
+    the exact old-orphan signature. Anything else returns ``None``.
+    """
+    token = _live_token(live_identifier)
+    if token is None or str(entry.data.get(CONF_SERIAL) or "") != live_identifier:
+        return None
+    dev_reg = dr.async_get(hass)
+    live = dev_reg.async_get_device(identifiers={(DOMAIN, live_identifier)})
+    if live is None or entry.entry_id not in live.config_entries:
+        return None
+    sharing: list[dr.DeviceEntry] = []
+    for device in dr.async_entries_for_config_entry(dev_reg, entry.entry_id):
+        if device.id == live.id or device.via_device_id is not None:
+            continue
+        for domain, identifier in device.identifiers:
+            if (
+                domain == DOMAIN
+                and "_module_" not in identifier
+                and identifier.partition(":")[2] == token
+            ):
+                sharing.append(device)
+                break
+    if (
+        len(sharing) != 1
+        or is_legacy_orphan_signature(sharing[0], entry.entry_id) != token
+    ):
+        return None
+    return sharing[0]
+
+
+def async_remove_orphan_controller_device(
+    hass: HomeAssistant, entry: ConfigEntry, live_identifier: str
+) -> bool:
+    """Remove the old ``AC6:<token>`` controller device when it is a bare duplicate.
+
+    Only a device that passes ``find_orphan_controller_device`` and has no
+    entities in the entity registry (any entry, including disabled ones) is
+    removed. An orphan that still holds entities is left untouched, with its
+    entities, so it can be deleted from the device page instead.
+
+    Returns:
+        True if a device was removed.
+    """
+    orphan = find_orphan_controller_device(hass, entry, live_identifier)
+    if orphan is None:
+        return False
+    if er.async_entries_for_device(
+        er.async_get(hass), orphan.id, include_disabled_entities=True
+    ):
+        _LOGGER.info(
+            "Apex entry %s: old controller device still holds entities; "
+            "it can be removed from its device page",
+            entry.entry_id,
+        )
+        return False
+    dr.async_get(hass).async_remove_device(orphan.id)
+    _LOGGER.info(
+        "Apex entry %s: removed duplicate controller device %s",
+        entry.entry_id,
+        next(iter(orphan.identifiers))[1],
+    )
+    return True
