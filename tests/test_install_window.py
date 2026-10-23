@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import logging
+import os
 import socket
+import stat
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, AsyncGenerator, cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import aiohttp
 import pytest
@@ -328,7 +331,7 @@ async def _polled(hass: Any, ctl: _Controller) -> ApexNeptuneDataUpdateCoordinat
 async def _advance(hass: Any, freezer: Any, seconds: float) -> None:
     freezer.tick(timedelta(seconds=seconds))
     async_fire_time_changed(hass)
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
 
 
 async def _spin(times: int = 10) -> None:
@@ -1367,15 +1370,57 @@ async def test_nconf_read_transport_error_sends_nothing(
 # ---------------------------------------------------------------------------
 
 
-def _storage(hass: Any) -> dict[str, Any]:
-    return hass.data["hass_storage_for_tests"]
+class _MarkerFiles:
+    """Dict-like view of the install-marker files in this test's config dir."""
+
+    def __init__(self, hass: Any) -> None:
+        self._hass = hass
+
+    def _path(self, key: str) -> str:
+        return cast(str, self._hass.config.path(".storage", key))
+
+    def __contains__(self, key: object) -> bool:
+        return os.path.exists(self._path(cast(str, key)))
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self[key] if key in self else default
+
+    def __getitem__(self, key: str) -> Any:
+        with open(self._path(key), encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        os.makedirs(os.path.dirname(self._path(key)), exist_ok=True)
+        with open(self._path(key), "w", encoding="utf-8") as handle:
+            handle.write(value if isinstance(value, str) else json.dumps(value))
+
+
+def _storage(hass: Any) -> _MarkerFiles:
+    return _MarkerFiles(hass)
 
 
 @pytest.fixture(autouse=True)
-def _expose_storage(hass_storage, hass):
-    hass.data["hass_storage_for_tests"] = hass_storage
+def _isolated_config_dir(hass, tmp_path):
+    """Real marker files, in a per-test directory."""
+    hass.config.config_dir = str(tmp_path)
     yield
-    hass.data.pop("hass_storage_for_tests", None)
+
+
+def _marker_envelope(coord: ApexNeptuneDataUpdateCoordinator, **data: Any) -> Any:
+    return {
+        "version": 1,
+        "minor_version": 1,
+        "key": _marker_key(coord),
+        "data": {
+            "entry_id": coord.entry.entry_id,
+            "attempt_id": "0000000000000000",
+            "started_at": 1.0,
+            "expires_at": 1201.0,
+            "from_version": OLD,
+            "expected_version": NEW,
+            **data,
+        },
+    }
 
 
 async def test_marker_is_persisted_before_the_put_is_sent(
@@ -1398,70 +1443,88 @@ async def test_marker_is_persisted_before_the_put_is_sent(
     assert marker["expires_at"] - marker["started_at"] == 1200
     for secret in SECRET_VALUES:
         assert secret not in json.dumps(seen)
+    # Owner-only file under .storage, written by the atomic writer.
+    mode = os.stat(hass.config.path(".storage", _marker_key(coord))).st_mode
+    assert mode & 0o077 == 0
     await coord.async_end_install_window(INSTALL_RESULT_SUCCESS)
     assert _marker_key(coord) not in _storage(hass)
 
 
-async def test_marker_save_failure_aborts_before_anything_is_sent(
+async def test_marker_is_written_with_the_atomic_fsynced_writer(
     hass, enable_custom_integrations, ctl
 ):
+    from homeassistant.util.file import write_utf8_file_atomic
+
     coord = await _polled(hass, ctl)
-    coord._install_store.async_save = AsyncMock(side_effect=OSError("disk full"))
-    with pytest.raises(HomeAssistantError, match="Could not record"):
-        await coord.async_request_firmware_install()
-    assert ctl.calls_for("PUT", "/rest/config/nconf") == []
-    assert coord.install_in_progress is False
+    with patch(
+        "custom_components.apex_fusion.coordinator.write_utf8_file_atomic",
+        wraps=write_utf8_file_atomic,
+    ) as writer:
+        await coord.async_begin_install_window()
+    writer.assert_called_once()
+    assert writer.call_args.kwargs == {"private": True}
+    assert writer.call_args.args[0] == hass.config.path(".storage", _marker_key(coord))
+    await coord.async_end_install_window(INSTALL_RESULT_REJECTED)
 
 
-async def test_swallowed_store_write_error_fails_closed_with_zero_puts(
+async def test_marker_writer_failure_aborts_before_anything_is_sent(
     hass, enable_custom_integrations, ctl
 ):
-    """HA's Store logs and swallows WriteError; the read-back must catch it."""
-    from homeassistant.helpers.storage import Store
     from homeassistant.util.file import WriteError
 
     coord = await _polled(hass, ctl)
+    with patch(
+        "custom_components.apex_fusion.coordinator.write_utf8_file_atomic",
+        side_effect=WriteError("disk full"),
+    ):
+        with pytest.raises(HomeAssistantError, match="not starting the update"):
+            await coord.async_request_firmware_install()
+    assert ctl.calls_for("PUT", "/rest/config/nconf") == []
+    assert coord.install_in_progress is False
+    assert _marker_key(coord) not in _storage(hass)
 
-    async def _failing_write(_store: Any, _data: Any) -> None:
-        raise WriteError("disk full")
 
-    with patch.object(Store, "_async_write_data", _failing_write):
+@pytest.mark.parametrize("failing", ["file", "directory"])
+async def test_real_file_fsync_failure_fails_closed_with_zero_puts(
+    hass, enable_custom_integrations, ctl, failing
+):
+    """No mock of the store: the real atomic writer hits a real fsync error.
+
+    The directory case fails *after* the rename, so the file is already in
+    place with the new content; the attempt must still be refused and the file
+    removed.
+    """
+    import atomicwrites
+
+    coord = await _polled(hass, ctl)
+    real_fsync = atomicwrites._proper_fsync
+
+    def _fsync(fd: int) -> None:
+        if stat.S_ISDIR(os.fstat(fd).st_mode) == (failing == "directory"):
+            raise OSError(errno.EIO, "fsync failed")
+        real_fsync(fd)
+
+    with patch.object(atomicwrites, "_proper_fsync", _fsync):
         with pytest.raises(HomeAssistantError, match="not starting the update"):
             await coord.async_request_firmware_install()
 
     assert ctl.calls_for("PUT", "/rest/config/nconf") == []
     assert coord.install_in_progress is False
     assert _marker_key(coord) not in _storage(hass)
+    # Nothing left behind in .storage (no temp file either).
+    leftovers = os.listdir(hass.config.path(".storage"))
+    assert [name for name in leftovers if "install" in name] == []
 
 
-async def test_stale_marker_on_disk_does_not_confirm_a_failed_write(
+async def test_real_file_write_succeeds_when_fsync_works(
     hass, enable_custom_integrations, ctl
 ):
-    from homeassistant.helpers.storage import Store
-    from homeassistant.util.file import WriteError
-
     coord = await _polled(hass, ctl)
-    _storage(hass)[_marker_key(coord)] = {
-        "version": 1,
-        "minor_version": 1,
-        "key": _marker_key(coord),
-        "data": {
-            "entry_id": coord.entry.entry_id,
-            "started_at": 1.0,
-            "expires_at": 1201.0,
-            "from_version": OLD,
-            "expected_version": NEW,
-        },
-    }
-
-    async def _failing_write(_store: Any, _data: Any) -> None:
-        raise WriteError("read-only filesystem")
-
-    with patch.object(Store, "_async_write_data", _failing_write):
-        with pytest.raises(HomeAssistantError, match="not starting the update"):
-            await coord.async_request_firmware_install()
-    assert ctl.calls_for("PUT", "/rest/config/nconf") == []
-    assert coord.install_in_progress is False
+    await coord.async_request_firmware_install()
+    stored = _storage(hass)[_marker_key(coord)]
+    assert stored["data"]["from_version"] == OLD
+    assert len(ctl.calls_for("PUT", "/rest/config/nconf")) == 1
+    await coord.async_end_install_window(INSTALL_RESULT_REJECTED)
 
 
 async def test_no_install_while_home_assistant_is_stopping(
@@ -1470,57 +1533,30 @@ async def test_no_install_while_home_assistant_is_stopping(
     from homeassistant.core import CoreState
 
     coord = await _polled(hass, ctl)
-    save = AsyncMock()
-    coord._install_store.async_save = save
     hass.set_state(CoreState.stopping)
     try:
-        with pytest.raises(HomeAssistantError, match="not starting the update"):
-            await coord.async_request_firmware_install()
-        with pytest.raises(HomeAssistantError, match="not starting the update"):
-            await coord.async_begin_install_window()
+        with patch(
+            "custom_components.apex_fusion.coordinator.write_utf8_file_atomic"
+        ) as writer:
+            with pytest.raises(HomeAssistantError, match="not starting the update"):
+                await coord.async_request_firmware_install()
+            with pytest.raises(HomeAssistantError, match="not starting the update"):
+                await coord.async_begin_install_window()
     finally:
         hass.set_state(CoreState.running)
-    save.assert_not_called()
+    writer.assert_not_called()
     assert ctl.calls_for("PUT", "/rest/config/nconf") == []
     assert coord.install_in_progress is False
 
 
-async def test_real_store_save_deferred_while_stopping_is_not_confirmed(
+async def test_read_back_error_fails_closed_and_cleans_up(
     hass, enable_custom_integrations, ctl
 ):
-    """Even if the running check were bypassed, a deferred save is not durable."""
-    from homeassistant.core import CoreState
-
     coord = await _polled(hass, ctl)
-    marker = {
-        "entry_id": coord.entry.entry_id,
-        "started_at": 5.0,
-        "expires_at": 1205.0,
-        "from_version": OLD,
-        "expected_version": None,
-    }
-    hass.set_state(CoreState.stopping)
-    try:
-        # Bypass the is_running guard: the read-back alone must refuse.
-        with patch.object(type(hass), "is_running", True):
-            with pytest.raises(HomeAssistantError, match="not starting the update"):
-                await coord._async_save_install_marker(marker)
-    finally:
-        hass.set_state(CoreState.running)
-    assert _marker_key(coord) not in _storage(hass)
-
-
-async def test_marker_read_back_error_fails_closed_and_cleans_up(
-    hass, enable_custom_integrations, ctl
-):
-    from homeassistant.helpers.storage import Store
-
-    coord = await _polled(hass, ctl)
-
-    async def _boom(_store: Any) -> Any:
-        raise HomeAssistantError("unreadable")
-
-    with patch.object(Store, "async_load", _boom):
+    with patch(
+        "custom_components.apex_fusion.coordinator.json.load",
+        side_effect=ValueError("unreadable"),
+    ):
         with pytest.raises(HomeAssistantError, match="not starting the update"):
             await coord.async_request_firmware_install()
     assert ctl.calls_for("PUT", "/rest/config/nconf") == []
@@ -1531,29 +1567,23 @@ async def test_marker_read_back_error_fails_closed_and_cleans_up(
 async def test_unused_marker_cleanup_failure_is_logged_as_a_warning(
     hass, enable_custom_integrations, ctl, caplog
 ):
-    from homeassistant.helpers.storage import Store
-
     coord = await _polled(hass, ctl)
-    coord._install_store.async_remove = AsyncMock(side_effect=OSError("ro"))
-
-    async def _boom(_store: Any) -> Any:
-        raise HomeAssistantError("unreadable")
-
     with caplog.at_level(logging.WARNING):
-        with patch.object(Store, "async_load", _boom):
+        with (
+            patch(
+                "custom_components.apex_fusion.coordinator.json.load",
+                side_effect=ValueError("unreadable"),
+            ),
+            patch(
+                "custom_components.apex_fusion.coordinator._remove_install_marker_file",
+                side_effect=OSError("ro"),
+            ),
+        ):
             with pytest.raises(HomeAssistantError, match="not starting the update"):
                 await coord.async_request_firmware_install()
     assert ctl.calls_for("PUT", "/rest/config/nconf") == []
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert any("unused install marker" in r.getMessage() for r in warnings)
-
-
-async def test_marker_store_uses_atomic_writes(hass, enable_custom_integrations, ctl):
-    from custom_components.apex_fusion.coordinator import _install_store_for
-
-    coord = await _make_coordinator(hass)
-    assert coord._install_store._atomic_writes is True
-    assert _install_store_for(hass, "x")._atomic_writes is True
 
 
 async def test_marker_carries_a_unique_attempt_id(
@@ -1570,35 +1600,20 @@ async def test_marker_carries_a_unique_attempt_id(
     assert all(len(i) == 16 for i in ids)
 
 
-async def test_equal_time_older_marker_does_not_confirm_a_swallowed_write_error(
+async def test_equal_time_older_marker_does_not_confirm_a_write_that_did_nothing(
     hass, enable_custom_integrations, ctl, freezer
 ):
-    """Fixed clock, an older marker with identical times, WriteError swallowed."""
-    from homeassistant.helpers.storage import Store
+    """Fixed clock, an older marker with identical times already on disk."""
     from homeassistant.util import dt as dt_util
-    from homeassistant.util.file import WriteError
 
     coord = await _polled(hass, ctl)
     freezer.move_to("2026-10-23 18:00:00")
     started_at = dt_util.utcnow().timestamp()
-    _storage(hass)[_marker_key(coord)] = {
-        "version": 1,
-        "minor_version": 1,
-        "key": _marker_key(coord),
-        "data": {
-            "entry_id": coord.entry.entry_id,
-            "attempt_id": "0000000000000000",
-            "started_at": started_at,
-            "expires_at": started_at + 1200,
-            "from_version": OLD,
-            "expected_version": NEW,
-        },
-    }
+    _storage(hass)[_marker_key(coord)] = _marker_envelope(
+        coord, started_at=started_at, expires_at=started_at + 1200
+    )
 
-    async def _failing_write(_store: Any, _data: Any) -> None:
-        raise WriteError("read-only filesystem")
-
-    with patch.object(Store, "_async_write_data", _failing_write):
+    with patch("custom_components.apex_fusion.coordinator.write_utf8_file_atomic"):
         with pytest.raises(HomeAssistantError, match="not starting the update"):
             await coord.async_request_firmware_install()
     assert ctl.calls_for("PUT", "/rest/config/nconf") == []
@@ -1610,9 +1625,12 @@ async def test_marker_remove_failure_is_logged_not_raised(
 ):
     coord = await _polled(hass, ctl)
     await coord.async_begin_install_window()
-    coord._install_store.async_remove = AsyncMock(side_effect=OSError("ro"))
     with caplog.at_level(logging.WARNING):
-        await coord.async_end_install_window(INSTALL_RESULT_REJECTED)
+        with patch(
+            "custom_components.apex_fusion.coordinator._remove_install_marker_file",
+            side_effect=OSError("ro"),
+        ):
+            await coord.async_end_install_window(INSTALL_RESULT_REJECTED)
     assert "Could not remove the firmware install marker" in caplog.text
     assert coord.install_in_progress is False
 
@@ -1776,14 +1794,19 @@ async def test_expired_marker_waits_for_a_poll_that_reports_a_version(
     assert _issue(hass, fresh) is None
 
 
-async def test_invalid_marker_is_discarded(hass, enable_custom_integrations, ctl):
+@pytest.mark.parametrize(
+    "content",
+    [
+        json.dumps({"data": {"started_at": "yesterday"}}),
+        "this is not json",
+        "[1, 2, 3]",
+    ],
+)
+async def test_invalid_marker_is_discarded(
+    hass, enable_custom_integrations, ctl, content
+):
     coord = await _make_coordinator(hass)
-    _storage(hass)[_marker_key(coord)] = {
-        "version": 1,
-        "minor_version": 1,
-        "key": _marker_key(coord),
-        "data": {"started_at": "yesterday"},
-    }
+    _storage(hass)[_marker_key(coord)] = content
     await coord.async_restore_install_window()
     assert coord.install_in_progress is False
     assert _marker_key(coord) not in _storage(hass)

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import secrets
 import time
@@ -30,9 +31,10 @@ from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.event import async_call_later, async_track_time_interval
-from homeassistant.helpers.storage import Store
+from homeassistant.helpers.storage import STORAGE_DIR
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util, slugify
+from homeassistant.util.file import write_utf8_file_atomic
 from yarl import URL
 
 from .const import (
@@ -989,15 +991,51 @@ def _parse_install_marker(
     )
 
 
-def _install_store_for(hass: HomeAssistant, entry_id: str) -> Store[dict[str, Any]]:
-    # atomic_writes: write to a temp file, fsync and rename, so a crash or power
-    # loss can never leave a torn or missing marker after a confirmed save.
-    return Store(
-        hass,
-        INSTALL_STORE_VERSION,
-        f"{DOMAIN}.install_{entry_id}",
-        atomic_writes=True,
-    )
+def _install_marker_path(hass: HomeAssistant, entry_id: str) -> str:
+    """Return the marker file path (under ``.storage``, one file per entry)."""
+    return hass.config.path(STORAGE_DIR, f"{DOMAIN}.install_{entry_id}")
+
+
+def _install_marker_envelope(entry_id: str, marker: dict[str, Any]) -> dict[str, Any]:
+    # Same envelope HA's Store uses, so the file looks like any other .storage file.
+    return {
+        "version": INSTALL_STORE_VERSION,
+        "minor_version": 1,
+        "key": f"{DOMAIN}.install_{entry_id}",
+        "data": marker,
+    }
+
+
+def _write_install_marker_file(path: str, envelope: dict[str, Any]) -> Any:
+    """Write the marker atomically (temp file, fsync, rename, directory fsync).
+
+    ``write_utf8_file_atomic`` raises on any failure, fsync included, unlike
+    ``Store`` which logs and swallows write errors. The file is then read back
+    and returned so the caller can compare it with what was meant to be written.
+    """
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    write_utf8_file_atomic(path, json.dumps(envelope), private=True)
+    with open(path, encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def _read_install_marker_file(path: str) -> tuple[bool, Any]:
+    """Return ``(exists, data)``; raises ``ValueError`` for an unreadable file."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            loaded: Any = json.load(handle)
+    except FileNotFoundError:
+        return False, None
+    if not isinstance(loaded, dict):
+        raise ValueError("install marker file is not an object")
+    return True, cast(dict[str, Any], loaded).get("data")
+
+
+def _remove_install_marker_file(path: str) -> None:
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
 
 
 async def async_remove_install_state(hass: HomeAssistant, entry: ConfigEntry) -> None:
@@ -1007,7 +1045,9 @@ async def async_remove_install_state(hass: HomeAssistant, entry: ConfigEntry) ->
         hass: Home Assistant instance.
         entry: The config entry being removed.
     """
-    await _install_store_for(hass, entry.entry_id).async_remove()
+    await hass.async_add_executor_job(
+        _remove_install_marker_file, _install_marker_path(hass, entry.entry_id)
+    )
     ir.async_delete_issue(
         hass, DOMAIN, f"firmware_install_unconfirmed_{entry.entry_id}"
     )
@@ -2186,7 +2226,7 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Serializes every controller write with the opening of an install window.
         self._write_lock = asyncio.Lock()
         self._marker_lock = asyncio.Lock()
-        self._install_store = _install_store_for(hass, entry.entry_id)
+        self._install_marker_file = _install_marker_path(hass, entry.entry_id)
 
         super().__init__(
             hass,
@@ -3181,36 +3221,39 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.async_update_listeners()
 
     async def _async_save_install_marker(self, marker: dict[str, Any]) -> None:
-        """Persist the marker and prove it reached storage, or raise.
+        """Persist the marker durably and prove it, or raise.
 
-        ``Store.async_save`` is not proof of a write: HA logs and swallows
-        write/serialization errors, and returns without writing while stopping.
-        So the marker is read back through a fresh ``Store`` (no pending-write
-        or cache state shared with the one that wrote it) and must equal what
-        was written. Anything else fails closed: the install is not started.
+        The marker is written with ``write_utf8_file_atomic`` (temp file, fsync,
+        rename, directory fsync) in the executor. That raises on any failure,
+        which ``Store`` does not (it logs and swallows write errors, and defers
+        the write while stopping). The file is then read back and must equal the
+        envelope that was written. Any exception or mismatch fails closed: the
+        partial/unused marker is removed and the install is not started.
         """
         failure = HomeAssistantError(
             "Could not record the install attempt; not starting the update"
         )
+        envelope = _install_marker_envelope(self.entry.entry_id, marker)
         async with self._marker_lock:
             if not self.hass.is_running:
                 raise failure
             try:
-                await self._install_store.async_save(marker)
-                stored: Any = await _install_store_for(
-                    self.hass, self.entry.entry_id
-                ).async_load()
+                stored: Any = await self.hass.async_add_executor_job(
+                    _write_install_marker_file, self._install_marker_file, envelope
+                )
             except Exception as err:  # noqa: BLE001
                 await self._async_remove_marker_quietly()
                 raise failure from err
-            if stored != marker:
+            if stored != envelope:
                 await self._async_remove_marker_quietly()
                 raise failure
 
     async def _async_remove_marker_quietly(self) -> None:
         """Best-effort removal of a marker for an install that never started."""
         try:
-            await self._install_store.async_remove()
+            await self.hass.async_add_executor_job(
+                _remove_install_marker_file, self._install_marker_file
+            )
         except Exception as err:  # noqa: BLE001
             _LOGGER.warning(
                 "Could not remove the unused install marker (%s); a reload may "
@@ -3225,7 +3268,9 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if generation != self._install_generation:
                 return
             try:
-                await self._install_store.async_remove()
+                await self.hass.async_add_executor_job(
+                    _remove_install_marker_file, self._install_marker_file
+                )
             except Exception as err:  # noqa: BLE001
                 _LOGGER.warning(
                     "Could not remove the firmware install marker (%s)",
@@ -3241,11 +3286,16 @@ class ApexNeptuneDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         at the first good poll. With no marker, a stale Repairs issue from an
         earlier failed attempt is removed.
         """
-        marker_any: Any = await self._install_store.async_load()
+        try:
+            exists, marker_any = await self.hass.async_add_executor_job(
+                _read_install_marker_file, self._install_marker_file
+            )
+        except (OSError, ValueError):
+            exists, marker_any = True, None
         marker = _parse_install_marker(marker_any)
         if marker is None:
             ir.async_delete_issue(self.hass, DOMAIN, self._install_issue_id)
-            if marker_any is not None:
+            if exists:
                 await self._async_clear_install_marker(self._install_generation)
             return
 
