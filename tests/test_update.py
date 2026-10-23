@@ -120,7 +120,7 @@ async def test_update_setup_creates_module_update_entity_when_outdated(
                         "hwtype": "FMM",
                         "present": True,
                         "swrev": 24,
-                        "swstat": "UPDATE",
+                        "swstat": "OLD",
                         "latestFirmware": "25",
                     },
                     {
@@ -381,7 +381,7 @@ async def test_update_controller_prefers_nconf_update_flag_over_nstat(
     assert ent.state == "off"
 
 
-async def test_update_modules_use_mconf_update_flags_when_present(
+async def test_update_modules_use_swstat_not_mconf_update_flag(
     hass, enable_custom_integrations
 ):
     entry = MockConfigEntry(
@@ -397,8 +397,20 @@ async def test_update_modules_use_mconf_update_flags_when_present(
             "meta": {"serial": "ABC", "hostname": "apex", "type": "AC6J"},
             "raw": {
                 "modules": [
-                    {"abaddr": 1, "hwtype": "FMM", "present": True, "swrev": 24},
-                    {"abaddr": 2, "hwtype": "PM2", "present": True, "swrev": 3},
+                    {
+                        "abaddr": 1,
+                        "hwtype": "FMM",
+                        "present": True,
+                        "swrev": 24,
+                        "swstat": "OK",
+                    },
+                    {
+                        "abaddr": 2,
+                        "hwtype": "PM2",
+                        "present": True,
+                        "swrev": 3,
+                        "swstat": "OLD",
+                    },
                 ],
                 "nstat": {"updateFirmware": False},
             },
@@ -421,22 +433,24 @@ async def test_update_modules_use_mconf_update_flags_when_present(
 
     await update.async_setup_entry(hass, cast(Any, entry), _add_entities)
 
-    # Controller firmware + both module entities (driven by mconf)
+    # Controller firmware + both module entities (enumerated from mconf)
     assert {e.name for e in added} == {"Firmware"}
 
     models = sorted(_device_model(e) for e in added)
     assert models == ["AC6J", "FMM", "PM2"]
 
     fmm = next(e for e in added if _device_model(e) == "FMM")
+    # mconf.update is the UI's install trigger: True there must not flag an update.
     assert fmm.installed_version == "24"
-    assert fmm.latest_version == "Update available"
-    assert fmm.state == "on"
+    assert fmm.latest_version == "24"
+    assert fmm.state == "off"
     assert fmm.release_summary == "updateStat=1"
 
+    # swstat OLD flags the update even though mconf.update is False.
     pm2 = next(e for e in added if _device_model(e) == "PM2")
     assert pm2.installed_version == "3"
-    assert pm2.latest_version == "3"
-    assert pm2.state == "off"
+    assert pm2.latest_version == "Update available"
+    assert pm2.state == "on"
 
 
 def test_update_helpers_cover_branches():
@@ -478,7 +492,7 @@ def test_update_helpers_cover_branches():
                     {"hwtype": "FMM", "present": False, "latestFirmware": "25"},
                     {"hwtype": "PM2", "present": True, "swrev": 3},
                     # No reported latest, but swstat indicates update availability.
-                    {"hwtype": "WXM", "present": True, "swrev": 2, "swstat": "UPDATE"},
+                    {"hwtype": "WXM", "present": True, "swrev": 2, "swstat": "OLD"},
                     # Valid module, uses hwType key and did fallback.
                     {
                         "hwType": "VDM",
@@ -617,7 +631,7 @@ def test_update_helpers_cover_branches():
                             "hwtype": "WXM",
                             "present": True,
                             "swrev": 2,
-                            "swstat": "UPDATE",
+                            "swstat": "OLD",
                         }
                     ]
                 }
@@ -699,6 +713,26 @@ def test_update_helpers_cover_branches():
     assert (
         fmm_ref.latest_fn(
             {
+                "config": {"mconf": [{"hwtype": "FMM", "abaddr": 1, "update": False}]},
+                "raw": {
+                    "modules": [
+                        {
+                            "hwtype": "FMM",
+                            "abaddr": 1,
+                            "present": True,
+                            "swrev": 24,
+                            "swstat": "OLD",
+                        }
+                    ]
+                },
+            }
+        )
+        == "Update available"
+    )
+    # mconf.update True with no swstat is not an availability signal.
+    assert (
+        fmm_ref.latest_fn(
+            {
                 "config": {"mconf": [{"hwtype": "FMM", "abaddr": 1, "update": True}]},
                 "raw": {
                     "modules": [
@@ -707,7 +741,7 @@ def test_update_helpers_cover_branches():
                 },
             }
         )
-        == "Update available"
+        == "24"
     )
     assert (
         fmm_ref.release_summary_fn(
@@ -865,14 +899,15 @@ def test_update_helpers_cover_branches():
         == "13"
     )
 
-    # Cover _find_mconf_module did-fallback and mismatch-continue paths.
+    # Cover _find_mconf_module did-fallback and mismatch-continue paths
+    # (release summary still reads mconf.updateStat).
     assert (
-        vdm_ref.latest_fn(
+        vdm_ref.release_summary_fn(
             {
                 "config": {
                     "mconf": [
-                        {"hwtype": "VDM", "did": "other", "update": True},
-                        {"hwtype": "VDM", "did": "vdm_1", "update": True},
+                        {"hwtype": "VDM", "did": "other", "updateStat": 1},
+                        {"hwtype": "VDM", "did": "vdm_1", "updateStat": 2},
                     ]
                 },
                 "raw": {
@@ -888,7 +923,28 @@ def test_update_helpers_cover_branches():
                 },
             }
         )
-        == "14"
+        == "updateStat=2"
+    )
+
+    # Release summary when config lacks this module: falls back to swstat.
+    assert (
+        vdm_ref.release_summary_fn(
+            {
+                "config": {"mconf": [{"hwtype": "VDM", "did": "other"}]},
+                "raw": {
+                    "modules": [
+                        {
+                            "hwtype": "VDM",
+                            "did": "vdm_1",
+                            "present": True,
+                            "swrev": 13,
+                            "swstat": "OK",
+                        }
+                    ]
+                },
+            }
+        )
+        == "OK"
     )
 
     # If config lacks this module and no latest is reported, assume up-to-date.

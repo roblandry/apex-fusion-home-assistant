@@ -320,25 +320,48 @@ def _controller_release_summary(data: dict[str, Any]) -> str | None:
     return None
 
 
+# The controller UI never offers a software update for these module types.
+_NO_UPDATE_HWTYPES = frozenset({"IOTA", "MXM", "PM3"})
+
+
+def _module_swstat_update(module: dict[str, Any] | None) -> bool | None:
+    """Return True when the controller reports a module as out of date.
+
+    Mirrors the controller web UI: `swstat == "OLD"` means an update is
+    available. `OK`, `PENDING` (an update is already queued or running) and any
+    other value are not an update offer. Module types the UI never updates, and
+    old-hardware Trident modules (hwrev 2 below firmware 5.06), report None.
+
+    `mconf.update` is the UI's install trigger, not an availability signal, and
+    is deliberately ignored here.
+    """
+    if not module:
+        return None
+
+    hwtype = str(module.get("hwtype") or module.get("hwType") or "").strip().upper()
+    if hwtype in _NO_UPDATE_HWTYPES:
+        return None
+
+    if hwtype == "TRI" and str(module.get("hwrev") or "").strip() == "2":
+        software: Any = module.get("software")
+        if software is None:
+            software = module.get("swrev")
+        parsed = normalize_firmware(str(software) if software is not None else None)
+        if parsed is not None and parsed[:2] < (5, 6):
+            return None
+
+    swstat = str(module.get("swstat") or "").strip().upper()
+    return True if swstat == "OLD" else None
+
+
 def _module_refs(data: dict[str, Any], serial_for_ids: str) -> list[_UpdateRef]:
     refs: list[_UpdateRef] = []
 
-    def _swstat_indicates_update(swstat: str | None) -> bool | None:
-        if not swstat:
-            return None
-        t = swstat.strip().upper()
-        if not t:
-            return None
-        if t == "OK":
-            return False
-        if "UPDATE" in t or t.startswith("UPD"):
-            return True
-        return None
-
     mconf_modules = _config_mconf_modules(data)
     if mconf_modules:
-        # When config is available, prefer it because it includes authoritative
-        # update flags (mconf[].update/updateStat). Config is sourced from /rest/config.
+        # When config is available, use it to enumerate modules. Update availability
+        # still comes from the status swstat, never from mconf[].update (the UI's
+        # install trigger).
         for mconf in mconf_modules:
             hwtype = (
                 str(mconf.get("hwtype") or mconf.get("hwType") or "").strip().upper()
@@ -399,18 +422,12 @@ def _module_refs(data: dict[str, Any], serial_for_ids: str) -> list[_UpdateRef]:
                     else None
                 )
 
-                mconf_module = _find_mconf_module(
-                    _data, hwtype=hwtype, module_id=module_id
-                )
-                update_any: Any = (mconf_module or {}).get("update")
-                update_flag = update_any if isinstance(update_any, bool) else None
-
                 if reported_latest is not None:
                     return reported_latest
 
                 # If an update is available but no version is provided, expose
                 # a placeholder so HA can represent availability.
-                if update_flag is True:
+                if _module_swstat_update(status_module) is True:
                     return "Update available"
 
                 # No reported latest and no update signal: assume up-to-date so
@@ -423,11 +440,9 @@ def _module_refs(data: dict[str, Any], serial_for_ids: str) -> list[_UpdateRef]:
                 hwtype: str = hwtype,
                 module_id: str = module_id,
             ) -> bool | None:
-                mconf_module = _find_mconf_module(
-                    _data, hwtype=hwtype, module_id=module_id
+                return _module_swstat_update(
+                    _find_status_module(_data, hwtype=hwtype, module_id=module_id)
                 )
-                update_any: Any = (mconf_module or {}).get("update")
-                return update_any if isinstance(update_any, bool) else None
 
             def _release_summary_fn_config(
                 _data: dict[str, Any],
@@ -551,11 +566,7 @@ def _module_refs(data: dict[str, Any], serial_for_ids: str) -> list[_UpdateRef]:
                     return reported_latest
 
                 installed = _installed_fn(_data, module_id=module_id, hwtype=hwtype)
-                sw_any: Any = m.get("swstat")
-                sw = str(sw_any) if sw_any is not None else None
-                update_signal = _swstat_indicates_update(sw)
-
-                if update_signal is True:
+                if _module_swstat_update(m) is True:
                     return "Update available"
                 if installed:
                     return installed
@@ -594,9 +605,7 @@ def _module_refs(data: dict[str, Any], serial_for_ids: str) -> list[_UpdateRef]:
                     m_id = str(m.get("did") or m.get("id") or hwtype).strip()
                 if m_id != module_id:
                     continue
-                sw_any: Any = m.get("swstat")
-                sw = str(sw_any) if sw_any is not None else None
-                return True if _swstat_indicates_update(sw) is True else None
+                return _module_swstat_update(m)
             return None
 
         refs.append(
