@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## v2026.10.23-beta.1
+
+**Before you update**
+
+- Take a Home Assistant backup before installing this release.
+- Before installing any controller firmware, read Neptune's release notes for that version and save your Apex configuration.
+- Stay present while a firmware install runs.
+
+### Features
+
+- Controller (AOS) firmware can now be installed from Home Assistant's update entity. It is offered only for controllers using the REST connection with a password. A progress bar shows while the update runs, and the controller appears as unavailable while it reboots, without prompting you to log in again. The update request is sent once and is never retried automatically. The install counts as successful only when a newer version is reported and stays reported through a settling period; if that is not confirmed within 20 minutes, a Repairs issue is raised. Module firmware install is not included (#40, #41)
+
+### Fixes
+
+- Module firmware updates are now detected from the controller's status, excluding module types the controller never updates (#39)
+- Leftover controller devices from the v2 migration are cleaned up. Orphans with no entities are removed automatically on restart; orphans that still hold old entities are kept and can now be deleted from the device page with the Delete button (#38)
+
+### Known limitation
+
+Before the update request is sent, the in-progress record is written with an atomic, fsynced file write. Durability beyond what the OS and filesystem guarantee (for example, power loss on storage that ignores fsync) is not guaranteed. Don't start a second update until the first has clearly finished or timed out.
+
 ## v2026.10.22-beta.1
 
 **Take a Home Assistant backup before installing: this release runs a one-time migration that removes orphaned APEX 1.0 devices.**
