@@ -43,6 +43,7 @@ from .const import (
     INSTALL_PHASE_RECONNECTING,
     INSTALL_PHASE_RESTARTING,
     INSTALL_PHASE_WEB_PAGES,
+    INSTALL_RESULT_SUCCESS,
     INSTALL_RESULT_TIMEOUT,
     INSTALL_WINDOW_MAX_SECONDS,
     TRANSPORT_REST,
@@ -81,6 +82,11 @@ _INSTALL_PHASE_SUMMARY = {
 # How long `async_install` waits for the coordinator's window: its hard cap plus a
 # little slack, so the coordinator's own timeout always resolves first.
 _INSTALL_WAIT_SECONDS = INSTALL_WINDOW_MAX_SECONDS + 60.0
+
+_INSTALL_TIMEOUT_MESSAGE = (
+    "The controller did not report a newer firmware version in time; check it "
+    "locally (see the Repairs issue)"
+)
 
 
 def _raw_nstat(data: dict[str, Any]) -> dict[str, Any]:
@@ -363,21 +369,16 @@ class ApexUpdateEntity(UpdateEntity):
         if not self._update_available():
             raise HomeAssistantError("No firmware update is available")
 
-        from_version = self._attr_installed_version
         await coordinator.async_request_firmware_install()
 
         # No await between the request returning and the listener below, so the
         # window cannot close unseen.
-        loop = asyncio.get_running_loop()
-        closed: asyncio.Future[None] = loop.create_future()
-        changed: asyncio.Future[None] = loop.create_future()
-        self._install_waiters.extend((closed, changed))
+        closed: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._install_waiters.append(closed)
 
         def _on_update() -> None:
             if not coordinator.install_in_progress and not closed.done():
                 closed.set_result(None)
-            if not changed.done() and self._installed_changed(from_version):
-                changed.set_result(None)
 
         unsub = coordinator.async_add_listener(_on_update)
         self._install_unsubs.append(unsub)
@@ -390,31 +391,27 @@ class ApexUpdateEntity(UpdateEntity):
                 # Never leave a window open behind a failed wait; the install is
                 # not resent.
                 await coordinator.async_end_install_window(INSTALL_RESULT_TIMEOUT)
-                raise HomeAssistantError(
-                    "The firmware install did not finish in time; check the controller"
-                ) from err
-            try:
-                async with asyncio.timeout(_INSTALL_PUBLISH_GRACE_SECONDS):
-                    await changed
-            except TimeoutError as err:
-                raise HomeAssistantError(
-                    "The controller did not report a new firmware version after "
-                    "the install; check it locally (see the Repairs issue)"
-                ) from err
+                raise HomeAssistantError(_INSTALL_TIMEOUT_MESSAGE) from err
         finally:
             # Removal may already have unsubscribed; HA's remover is single-use.
             if unsub in self._install_unsubs:
                 self._install_unsubs.remove(unsub)
                 unsub()
-            for fut in (closed, changed):
-                if fut in self._install_waiters:
-                    self._install_waiters.remove(fut)
-                if fut.done() and not fut.cancelled():
-                    fut.exception()  # mark retrieved
+            if closed in self._install_waiters:
+                self._install_waiters.remove(closed)
+            if closed.done() and not closed.cancelled():
+                closed.exception()  # mark retrieved
 
-    def _installed_changed(self, from_version: str | None) -> bool:
-        installed = self._ref.installed_fn(self._coordinator.data or {})
-        return installed is not None and installed != from_version
+        # The coordinator records the verdict before it announces the close, so
+        # it is already set here, whatever the entity's data looks like.
+        result = coordinator.last_install_result
+        if result == INSTALL_RESULT_SUCCESS:
+            return
+        if result == INSTALL_RESULT_TIMEOUT:
+            raise HomeAssistantError(_INSTALL_TIMEOUT_MESSAGE)
+        raise HomeAssistantError(
+            "The firmware install failed or was rejected; check the controller locally"
+        )
 
     async def async_will_remove_from_hass(self) -> None:
         """Release any pending install wait.

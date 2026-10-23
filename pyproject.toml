@@ -17,6 +17,10 @@ line-length = 88
 # Ruff defaults to a small, safe rule set; we extend it with import sorting.
 extend-select = ["I"]
 
+[tool.ruff.lint.per-file-ignores]
+# Fixtures imported from another test module and then requested by name.
+"tests/test_update_install_window.py" = ["F811"]
+
 [tool.ruff.lint.isort]
 known-first-party = ["custom_components", "tests"]
 order-by-type = true

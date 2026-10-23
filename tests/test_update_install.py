@@ -7,6 +7,7 @@ mock, and the window is driven through the coordinator's own API.
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, Callable, cast
@@ -32,6 +33,7 @@ from custom_components.apex_fusion.const import (
     INSTALL_PHASE_RECONNECTING,
     INSTALL_PHASE_RESTARTING,
     INSTALL_PHASE_WEB_PAGES,
+    INSTALL_RESULT_REJECTED,
     INSTALL_RESULT_SUCCESS,
     INSTALL_RESULT_TIMEOUT,
     TRANSPORT_LEGACY,
@@ -48,6 +50,14 @@ from custom_components.apex_fusion.update import (
 
 OLD = "5.15J_6B26"
 NEW = "5.16_AC26"
+
+
+@pytest.fixture(autouse=True)
+def _isolated_config_dir(hass, tmp_path):
+    """Real install-marker files, in a per-test directory."""
+    hass.config.config_dir = str(tmp_path)
+    yield
+
 
 INSTALL_FEATURES = UpdateEntityFeature.INSTALL | UpdateEntityFeature.PROGRESS
 
@@ -85,6 +95,7 @@ class _Coordinator:
     install_in_progress: bool = False
     install_phase: str | None = None
     install_percentage: int | None = None
+    last_install_result: str | None = None
     request: AsyncMock = field(default_factory=AsyncMock)
     end_window: AsyncMock = field(default_factory=AsyncMock)
     listeners: list[Callable[[], None]] = field(default_factory=list)
@@ -104,7 +115,14 @@ class _Coordinator:
 
     async def async_end_install_window(self, result: str) -> None:
         await self.end_window(result)
+        self.last_install_result = result
         self.install_in_progress = False
+
+    def close(self, result: str | None) -> None:
+        """Close the window as the coordinator does: result first, then notify."""
+        self.last_install_result = result
+        self.install_in_progress = False
+        self.notify()
 
     def notify(self) -> None:
         for cb in list(self.listeners):
@@ -392,16 +410,19 @@ async def test_module_entity_is_unavailable_when_polls_fail_even_if_installing(
 # ---------------------------------------------------------------------------
 
 
+def _opener(coord: _Coordinator) -> Callable[[], Any]:
+    async def _open() -> str:
+        coord.install_in_progress = True
+        return "accepted"
+
+    return _open
+
+
 async def test_install_requests_once_and_waits_for_the_window(
     hass, enable_custom_integrations
 ):
     ent, coord = await _controller(hass)
-
-    async def _open_window() -> str:
-        coord.install_in_progress = True
-        return "accepted"
-
-    coord.request.side_effect = _open_window
+    coord.request.side_effect = _opener(coord)
 
     task = asyncio.ensure_future(ent.async_install(None, False))
     for _ in range(5):
@@ -410,13 +431,11 @@ async def test_install_requests_once_and_waits_for_the_window(
     assert not task.done()
     assert len(coord.listeners) == 1
 
-    # The window closing alone is not success: the version must have changed.
-    coord.data = _data(installed=NEW, latest=NEW)
-    coord.install_in_progress = False
-    coord.notify()
+    coord.close(INSTALL_RESULT_SUCCESS)
     await task
 
     coord.request.assert_awaited_once()
+    coord.end_window.assert_not_awaited()
     assert coord.listeners == []
 
 
@@ -424,69 +443,46 @@ async def test_install_ignores_updates_while_the_window_is_open(
     hass, enable_custom_integrations
 ):
     ent, coord = await _controller(hass)
-
-    async def _open_window() -> str:
-        coord.install_in_progress = True
-        return "accepted"
-
-    coord.request.side_effect = _open_window
+    coord.request.side_effect = _opener(coord)
     task = asyncio.ensure_future(ent.async_install(None, False))
     for _ in range(5):
         await asyncio.sleep(0)
 
     coord.notify()  # a progress tick, window still open
+    coord.data = _data(installed=NEW, latest=NEW)  # even a new version
     coord.notify()
     await asyncio.sleep(0)
     assert not task.done()
 
-    coord.data = _data(installed=NEW, latest=NEW)
-    coord.install_in_progress = False
-    coord.notify()
+    coord.close(INSTALL_RESULT_SUCCESS)
     coord.notify()  # a second callback after completion must be harmless
     await task
 
 
-async def test_install_fails_if_the_window_closed_without_a_new_version(
-    hass, enable_custom_integrations, monkeypatch
+@pytest.mark.parametrize(
+    ("result", "message"),
+    [
+        (INSTALL_RESULT_TIMEOUT, "did not report a newer firmware"),
+        (INSTALL_RESULT_REJECTED, "failed or was rejected"),
+        (None, "failed or was rejected"),
+    ],
+)
+async def test_install_fails_on_a_non_success_result(
+    hass, enable_custom_integrations, result, message
 ):
-    monkeypatch.setattr(update, "_INSTALL_PUBLISH_GRACE_SECONDS", 0.01)
     ent, coord = await _controller(hass)
-
-    async def _open_window() -> str:
-        coord.install_in_progress = True
-        return "possibly_started"
-
-    coord.request.side_effect = _open_window
+    coord.request.side_effect = _opener(coord)
     task = asyncio.ensure_future(ent.async_install(None, False))
     for _ in range(5):
         await asyncio.sleep(0)
 
-    coord.install_in_progress = False  # hard cap: version never changed
-    coord.notify()
-    with pytest.raises(HomeAssistantError, match="did not report a new firmware"):
+    # A new version in the entity's data is not evidence of success.
+    coord.data = _data(installed=NEW, latest=NEW)
+    coord.close(result)
+    with pytest.raises(HomeAssistantError, match=message):
         await task
     assert coord.listeners == []
-
-
-async def test_install_fails_if_the_version_is_unknown_afterwards(
-    hass, enable_custom_integrations, monkeypatch
-):
-    monkeypatch.setattr(update, "_INSTALL_PUBLISH_GRACE_SECONDS", 0.01)
-    ent, coord = await _controller(hass)
-    coord.data = _data()
-
-    async def _request() -> str:
-        return await _close_with(coord, {"meta": {}})
-
-    coord.request.side_effect = _request
-    with pytest.raises(HomeAssistantError, match="did not report a new firmware"):
-        await ent.async_install(None, False)
-
-
-async def _close_with(coord: _Coordinator, data: dict[str, Any]) -> str:
-    coord.data = data
-    coord.install_in_progress = False
-    return "accepted"
+    coord.end_window.assert_not_awaited()
 
 
 async def test_install_window_already_closed_when_request_returns(
@@ -495,28 +491,12 @@ async def test_install_window_already_closed_when_request_returns(
     ent, coord = await _controller(hass)
 
     async def _quick() -> str:
-        coord.data = _data(installed=NEW, latest=NEW)
+        coord.last_install_result = INSTALL_RESULT_SUCCESS
         return "accepted"
 
     coord.request.side_effect = _quick
     await ent.async_install(None, False)
     coord.request.assert_awaited_once()
-
-
-async def test_install_times_out_with_a_clear_error(
-    hass, enable_custom_integrations, monkeypatch
-):
-    monkeypatch.setattr(update, "_INSTALL_WAIT_SECONDS", 0.01)
-    ent, coord = await _controller(hass)
-
-    async def _open_window() -> str:
-        coord.install_in_progress = True
-        return "accepted"
-
-    coord.request.side_effect = _open_window
-    with pytest.raises(HomeAssistantError, match="did not finish in time"):
-        await ent.async_install(None, False)
-    assert coord.listeners == []
 
 
 async def _start_install(ent: Any, coord: _Coordinator) -> asyncio.Future[None]:
@@ -532,39 +512,19 @@ async def _start_install(ent: Any, coord: _Coordinator) -> asyncio.Future[None]:
     return task
 
 
-async def test_success_when_the_window_closes_before_the_new_data_is_published(
+async def test_success_result_wins_while_the_entity_data_is_still_old(
     hass, enable_custom_integrations
 ):
-    """The coordinator closes the window inside the poll, before publishing it."""
+    """The window can close before the poll's data is published; no grace needed."""
     ent, coord = await _controller(hass)
     task = await _start_install(ent, coord)
 
-    # Window closed as a success, but coordinator.data is still the old poll.
-    coord.install_in_progress = False
-    coord.notify()
-    for _ in range(5):
-        await asyncio.sleep(0)
-    assert not task.done()
+    coord.close(INSTALL_RESULT_SUCCESS)
     assert coord.data["meta"]["software"] == OLD
-
-    # The poll's data is published a moment later.
-    coord.data = _data(installed=NEW, latest=NEW)
-    coord.notify()
-    await task
+    await task  # returns on the recorded result alone
     coord.request.assert_awaited_once()
     coord.end_window.assert_not_awaited()
     assert coord.listeners == []
-
-
-async def test_success_when_the_new_version_is_already_there_at_close(
-    hass, enable_custom_integrations
-):
-    ent, coord = await _controller(hass)
-    task = await _start_install(ent, coord)
-    coord.data = _data(installed=NEW, latest=NEW)
-    coord.install_in_progress = False
-    coord.notify()
-    await task
 
 
 async def test_entity_removal_cancels_the_wait_and_the_listener(
@@ -583,23 +543,6 @@ async def test_entity_removal_cancels_the_wait_and_the_listener(
     # The install belongs to the coordinator: removal does not end it.
     coord.end_window.assert_not_awaited()
     coord.request.assert_awaited_once()
-
-
-async def test_entity_removal_during_the_publish_grace_also_ends_the_wait(
-    hass, enable_custom_integrations
-):
-    ent, coord = await _controller(hass)
-    task = await _start_install(ent, coord)
-    coord.install_in_progress = False
-    coord.notify()  # window closed, new version not yet seen
-    for _ in range(5):
-        await asyncio.sleep(0)
-    assert not task.done()
-
-    await ent.async_will_remove_from_hass()
-    with pytest.raises(HomeAssistantError, match="entity was removed"):
-        await task
-    assert coord.listeners == []
 
 
 async def test_removal_with_nothing_pending_is_a_no_op(
@@ -621,7 +564,7 @@ async def test_fallback_timeout_closes_the_window_and_never_resends(
         return "accepted"
 
     coord.request.side_effect = _open_window
-    with pytest.raises(HomeAssistantError, match="did not finish in time"):
+    with pytest.raises(HomeAssistantError, match="did not report a newer firmware"):
         await ent.async_install(None, False)
 
     coord.end_window.assert_awaited_once_with(INSTALL_RESULT_TIMEOUT)
@@ -755,8 +698,7 @@ async def test_install_end_to_end_with_the_real_window(
         patch.object(coord, "_async_refresh_config_after_install", AsyncMock()),
     ):
         task = asyncio.ensure_future(ent.async_install(None, False))
-        for _ in range(10):
-            await asyncio.sleep(0)
+        await _until_installing(hass, coord)
         request.assert_awaited_once()
         assert coord.install_in_progress is True
         assert ent.in_progress is True
@@ -787,9 +729,8 @@ async def test_install_end_to_end_with_the_real_window(
 
 
 async def test_install_end_to_end_timeout_result_raises(
-    hass, enable_custom_integrations, monkeypatch
+    hass, enable_custom_integrations
 ):
-    monkeypatch.setattr(update, "_INSTALL_PUBLISH_GRACE_SECONDS", 0.01)
     entry = _entry(hass)
     coord = _real_coordinator(hass, entry)
     coord.async_set_updated_data(_data())
@@ -803,10 +744,9 @@ async def test_install_end_to_end_timeout_result_raises(
         coord, "async_request_firmware_install", AsyncMock(side_effect=_request)
     ):
         task = asyncio.ensure_future(ent.async_install(None, False))
-        for _ in range(10):
-            await asyncio.sleep(0)
+        await _until_installing(hass, coord)
         await coord.async_end_install_window(INSTALL_RESULT_TIMEOUT)
-        with pytest.raises(HomeAssistantError, match="did not report a new firmware"):
+        with pytest.raises(HomeAssistantError, match="did not report a newer firmware"):
             await task
     # The old version is still installed and the update is still offered.
     assert ent.state == "on"
@@ -838,6 +778,16 @@ async def test_real_coordinator_tick_redraws_the_entity(
     assert values == sorted(values)
     assert values[-1] > values[0]
     await coord.async_end_install_window("rejected")
+
+
+async def _until_installing(hass: Any, coord: Any) -> None:
+    """Let the real marker write (an executor job) finish and the window open."""
+    # Time is frozen here, so wait on a real thread rather than asyncio.sleep.
+    for _ in range(200):
+        if coord.install_in_progress:
+            return
+        await hass.async_add_executor_job(time.sleep, 0.005)
+    raise AssertionError("the install window never opened")
 
 
 async def _controller_for(
