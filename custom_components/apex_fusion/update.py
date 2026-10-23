@@ -15,13 +15,19 @@ controller reports a newer `latestFirmware`.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass
 from typing import Any, Callable, cast
 
-from homeassistant.components.update import UpdateDeviceClass, UpdateEntity
+from homeassistant.components.update import (
+    UpdateDeviceClass,
+    UpdateEntity,
+    UpdateEntityFeature,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .apex_fusion import (
@@ -30,7 +36,16 @@ from .apex_fusion import (
     raw_modules_from_data,
     raw_nstat_from_data,
 )
-from .const import DOMAIN
+from .const import (
+    CONF_NO_LOGIN,
+    CONF_PASSWORD,
+    DOMAIN,
+    INSTALL_PHASE_RECONNECTING,
+    INSTALL_PHASE_RESTARTING,
+    INSTALL_PHASE_WEB_PAGES,
+    INSTALL_WINDOW_MAX_SECONDS,
+    TRANSPORT_REST,
+)
 from .coordinator import (
     ApexNeptuneDataUpdateCoordinator,
     build_device_info,
@@ -42,6 +57,29 @@ from .firmware import (
     firmware_update_available as firmware_update_available,
     normalize_firmware as normalize_firmware,
 )
+
+# Shown as the controller's release summary whenever an update is available.
+# Home Assistant cuts `release_summary` at 255 characters, so keep this short.
+FIRMWARE_DISCLAIMER = (
+    "Read Neptune's release notes and save your Apex config first. "
+    "Update in person: the controller goes offline for about 5-10 minutes, and a "
+    "failed update can leave it unusable. Keep power and wired Ethernet connected. "
+    "Safety is not guaranteed."
+)
+
+# Neptune's AOS release announcement (a single forum node; it may be per-release).
+CONTROLLER_RELEASE_URL = "https://forum.neptunesystems.com/node/334396"
+
+# What the release summary says while an install runs.
+_INSTALL_PHASE_SUMMARY = {
+    INSTALL_PHASE_RESTARTING: "Installing: the controller is restarting.",
+    INSTALL_PHASE_RECONNECTING: "Installing: waiting for the controller to come back.",
+    INSTALL_PHASE_WEB_PAGES: "Installing: the controller is loading its new web pages.",
+}
+
+# How long `async_install` waits for the coordinator's window: its hard cap plus a
+# little slack, so the coordinator's own timeout always resolves first.
+_INSTALL_WAIT_SECONDS = INSTALL_WINDOW_MAX_SECONDS + 60.0
 
 
 def _raw_nstat(data: dict[str, Any]) -> dict[str, Any]:
@@ -213,9 +251,72 @@ class ApexUpdateEntity(UpdateEntity):
 
         self._refresh_attrs()
 
+    @property
+    def _is_controller(self) -> bool:
+        return self._ref.module_hwtype is None
+
+    def _install_blocker(self) -> str | None:
+        """Return why a firmware install cannot be offered, or None if it can."""
+        if not self._is_controller:
+            return "Only the controller firmware can be installed from Home Assistant"
+        if self._coordinator.transport != TRANSPORT_REST:
+            return "Firmware install requires the REST transport"
+        if (
+            self._entry.data.get(CONF_NO_LOGIN)
+            or not str(self._entry.data.get(CONF_PASSWORD, "") or "").strip()
+        ):
+            return "Firmware install requires a configured controller password"
+        return None
+
+    @property
+    def supported_features(  # pyright: ignore[reportIncompatibleVariableOverride]
+        self,
+    ) -> UpdateEntityFeature:
+        """Offer install and progress only on a controller entry that can write."""
+        if self._install_blocker() is not None:
+            return UpdateEntityFeature(0)
+        return UpdateEntityFeature.INSTALL | UpdateEntityFeature.PROGRESS
+
+    @property
+    def in_progress(  # pyright: ignore[reportIncompatibleVariableOverride]
+        self,
+    ) -> bool:
+        """Mirror the coordinator's install window (never ``_attr_in_progress``)."""
+        if not self._is_controller:
+            return False
+        return self._coordinator.install_in_progress
+
+    @property
+    def update_percentage(  # pyright: ignore[reportIncompatibleVariableOverride]
+        self,
+    ) -> int | None:
+        """Mirror the coordinator's time-based install percentage."""
+        if not self._is_controller:
+            return None
+        return self._coordinator.install_percentage
+
+    @property
+    def extra_state_attributes(  # pyright: ignore[reportIncompatibleVariableOverride]
+        self,
+    ) -> dict[str, Any] | None:
+        """Expose the install phase on controller entities that can install."""
+        if self._install_blocker() is not None:
+            return None
+        return {"install_phase": self._coordinator.install_phase}
+
+    def _update_available(self) -> bool:
+        installed = self._attr_installed_version
+        latest = self._attr_latest_version
+        if installed is None or latest is None or installed == latest:
+            return False
+        return self.version_is_newer(latest, installed)
+
     def _refresh_attrs(self) -> None:
         data = self._coordinator.data or {}
-        self._attr_available = bool(
+        installing = self._is_controller and self._coordinator.install_in_progress
+        # Polls fail while the controller reboots; keep the entity (and its
+        # progress bar) visible for the whole install window.
+        self._attr_available = installing or bool(
             getattr(self._coordinator, "last_update_success", True)
         )
         installed = self._ref.installed_fn(data)
@@ -227,6 +328,65 @@ class ApexUpdateEntity(UpdateEntity):
         self._attr_installed_version = installed
         self._attr_latest_version = latest
         self._attr_release_summary = self._ref.release_summary_fn(data)
+        self._attr_release_url = None
+        if self._is_controller:
+            phase = self._coordinator.install_phase
+            if installing and phase in _INSTALL_PHASE_SUMMARY:
+                self._attr_release_summary = _INSTALL_PHASE_SUMMARY[phase]
+            elif self._update_available():
+                self._attr_release_summary = FIRMWARE_DISCLAIMER
+                self._attr_release_url = CONTROLLER_RELEASE_URL
+
+    async def async_install(
+        self, version: str | None, backup: bool, **kwargs: Any
+    ) -> None:
+        """Install the controller's latest firmware and wait for the result.
+
+        Home Assistant expects this to return only when the install is over, so
+        it waits for the coordinator's install window to close.
+
+        Raises:
+            HomeAssistantError: If the install cannot start, the controller
+                rejects it, or it is not confirmed within the window.
+        """
+        blocker = self._install_blocker()
+        if blocker is not None:
+            raise HomeAssistantError(blocker)
+        coordinator = self._coordinator
+        if coordinator.install_in_progress:
+            raise HomeAssistantError("A firmware install is already in progress")
+        if not self._update_available():
+            raise HomeAssistantError("No firmware update is available")
+
+        from_version = self._attr_installed_version
+        await coordinator.async_request_firmware_install()
+
+        # No await between the request returning and the listener below, so the
+        # window cannot close unseen.
+        closed: asyncio.Future[None] = self.hass.loop.create_future()
+
+        def _on_update() -> None:
+            if not coordinator.install_in_progress and not closed.done():
+                closed.set_result(None)
+
+        unsub = coordinator.async_add_listener(_on_update)
+        try:
+            _on_update()
+            async with asyncio.timeout(_INSTALL_WAIT_SECONDS):
+                await closed
+        except TimeoutError as err:
+            raise HomeAssistantError(
+                "The firmware install did not finish in time; check the controller"
+            ) from err
+        finally:
+            unsub()
+
+        installed_now = self._ref.installed_fn(coordinator.data or {})
+        if installed_now is None or installed_now == from_version:
+            raise HomeAssistantError(
+                "The controller did not report a new firmware version after the "
+                "install; check it locally (see the Repairs issue)"
+            )
 
     def version_is_newer(self, latest_version: str, installed_version: str) -> bool:
         """Compare Apex firmware strings instead of using AwesomeVersion.

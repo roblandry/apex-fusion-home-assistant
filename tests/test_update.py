@@ -16,6 +16,10 @@ class _CoordinatorStub:
     last_update_success: bool = True
     device_identifier: str = "TEST"
     listeners: list[Callable[[], None]] | None = None
+    transport: str | None = None
+    install_in_progress: bool = False
+    install_phase: str | None = None
+    install_percentage: int | None = None
 
     def async_add_listener(
         self, update_callback: Callable[[], None]
