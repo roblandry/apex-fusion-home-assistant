@@ -213,7 +213,7 @@ async def test_module_state_with_reported_latest_and_stale_flag(
     assert pm2.state == "off"
 
 
-async def test_module_flag_true_same_release_and_no_latest(
+async def test_module_swstat_old_same_release_and_no_latest(
     hass, enable_custom_integrations
 ):
     data = {
@@ -226,41 +226,44 @@ async def test_module_flag_true_same_release_and_no_latest(
                     "present": True,
                     "software": "1.4J_AB12",
                     "latestFirmware": "1.4_AB12",
+                    "swstat": "OLD",
                 },
                 {
                     "abaddr": 2,
                     "hwtype": "PM2",
                     "present": True,
                     "software": "1.4J_AB12",
+                    "swstat": "OLD",
                 },
                 {
                     "abaddr": 3,
                     "hwtype": "VDM",
                     "present": True,
                     "software": "1.4J_AB12",
+                    "swstat": "OK",
                 },
             ],
         },
         "config": {
             "mconf": [
-                {"abaddr": 1, "hwtype": "FMM", "update": True},
-                {"abaddr": 2, "hwtype": "PM2", "update": True},
-                {"abaddr": 3, "hwtype": "VDM", "update": False},
+                {"abaddr": 1, "hwtype": "FMM", "update": False},
+                {"abaddr": 2, "hwtype": "PM2", "update": False},
+                {"abaddr": 3, "hwtype": "VDM", "update": True},
             ]
         },
     }
     added = await _entities(hass, data)
 
-    # Same release but flag True -> on.
+    # Same release but swstat OLD -> on.
     fmm = next(e for e in added if _device_model(e) == "FMM")
     assert fmm.state == "on"
 
-    # Flag True and no latest -> placeholder keeps the existing behavior.
+    # swstat OLD and no latest -> placeholder keeps the existing behavior.
     pm2 = next(e for e in added if _device_model(e) == "PM2")
     assert pm2.latest_version == "Update available"
     assert pm2.state == "on"
 
-    # Flag False and no latest -> up to date, nothing invented.
+    # swstat OK (mconf.update True is ignored) and no latest -> up to date, nothing invented.
     vdm = next(e for e in added if _device_model(e) == "VDM")
     assert vdm.latest_version == "1.4J_AB12"
     assert vdm.state == "off"
@@ -288,7 +291,7 @@ async def test_module_raw_path_uses_swstat_and_reported_latest(
                     "hwtype": "PM2",
                     "present": True,
                     "swrev": 3,
-                    "swstat": "UPDATE",
+                    "swstat": "OLD",
                 },
                 # Nothing to go on.
                 {"abaddr": 3, "hwtype": "VDM", "present": True, "swrev": 3},
@@ -312,7 +315,7 @@ async def test_module_raw_path_uses_swstat_and_reported_latest(
             "modules": [
                 {"hwtype": "XXX", "abaddr": 2},
                 {"hwtype": "PM2", "abaddr": 9},
-                {"hwtype": "PM2", "did": "2", "swstat": "UPDATE"},
+                {"hwtype": "PM2", "did": "2", "swstat": "OLD"},
             ]
         }
     }
