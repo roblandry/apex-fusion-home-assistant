@@ -4,21 +4,53 @@ on:
   issues:
     types: [opened, edited]
 
-permissions:
-  issues: write
+permissions: {}
 
 jobs:
   label:
     runs-on: ubuntu-latest
+    permissions:
+      issues: write # create the allowlisted labels and add them to the issue
     steps:
       - name: Apply labels from issue form
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         with:
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const issue_number = context.payload.issue.number;
             const body = context.payload.issue.body || "";
+
+            // Only these labels may ever be created or applied. Issue bodies are
+            // free text from any author, so anything parsed from the body that is
+            // not in this set is ignored. Keep in sync with the dropdown options in
+            // .github/ISSUE_TEMPLATE/*.yml plus the helper labels emitted below.
+            const ALLOWED_LABELS = new Set([
+              "area:trident",
+              "area:modules",
+              "area:inputs",
+              "area:outputs",
+              "area:updates",
+              "area:config-flow",
+              "area:auth",
+              "area:rest",
+              "area:legacy",
+              "area:docs",
+              "area:devtools",
+              "module:trident",
+              "module:trident-np",
+              "module:dos",
+              "module:fmm",
+              "module:pmup",
+              "module:eb832",
+              "module:eb8",
+              "module:vdm",
+              "module:pm2",
+              "module:mxm",
+              "module:afs",
+              "needs-logs",
+              "needs-device-dump",
+            ]);
 
             function firstMatch(re) {
               const m = body.match(re);
@@ -72,10 +104,20 @@ jobs:
               (areaSelected && /area:(trident|modules|inputs|outputs|updates|rest|legacy)/i.test(area));
             if (dumpRelevant && !dumpChecked) labels.add("needs-device-dump");
 
-            const labelList = Array.from(labels);
+            const labelList = [];
+            for (const name of labels) {
+              if (ALLOWED_LABELS.has(name)) {
+                labelList.push(name);
+              } else {
+                core.info("Skipping a parsed label that is not in the allowlist.");
+              }
+            }
             if (labelList.length === 0) return;
 
             async function ensureLabel(name) {
+              if (!ALLOWED_LABELS.has(name)) {
+                throw new Error("Refusing to create a label outside the allowlist.");
+              }
               // Create label if missing (idempotent).
               try {
                 await github.rest.issues.getLabel({ owner, repo, name });

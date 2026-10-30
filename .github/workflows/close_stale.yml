@@ -4,11 +4,16 @@ on:
   schedule:
     - cron: '0 0 * * *' # Runs daily
 
+permissions: {}
+
 jobs:
   stale:
     runs-on: ubuntu-latest
+    permissions:
+      issues: write # label, comment on and close stale issues
+      pull-requests: write # actions/stale also scans pull requests
     steps:
-      - uses: actions/stale@v9
+      - uses: actions/stale@5bef64f19d7facfb25b37b414482c7164d639639 # v9.1.0
         with:
           any-of-labels: 'bug'
           stale-issue-message: 'This issue is stale because it has not been updated in a while.'

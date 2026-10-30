@@ -6,17 +6,19 @@ name: Version check
 on:
   pull_request:
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
   version:
     name: Version
     runs-on: ubuntu-latest
+    permissions:
+      contents: read # checkout the repository
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Install version-ordering packages
         run: python3 -m pip install --quiet awesomeversion==25.8.0 packaging==26.3
