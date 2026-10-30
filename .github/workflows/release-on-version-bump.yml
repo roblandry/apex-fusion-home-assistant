@@ -20,8 +20,7 @@ on:
       - "custom_components/apex_fusion/manifest.json"
       - ".github/workflows/release-on-version-bump.yml"
 
-permissions:
-  contents: write
+permissions: {}
 
 concurrency:
   group: release
@@ -31,10 +30,13 @@ jobs:
   release:
     name: Tag and release if the version is new
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the release tag and create the GitHub release
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
+          persist-credentials: true # the "Tag and publish the release" step pushes the tag with these credentials
 
       - name: Install version-ordering packages
         run: python3 -m pip install --quiet awesomeversion==25.8.0 packaging==26.3
@@ -104,7 +106,7 @@ jobs:
 
       - name: Generate notes from commits (git-cliff)
         if: steps.decide.outputs.release == 'true' && steps.notes.outputs.generate == 'true'
-        uses: orhun/git-cliff-action@v4
+        uses: orhun/git-cliff-action@a9a95522b26fe6403f7bb24031f21fb573d0f5ff # v4.9.1
         with:
           config: cliff.toml
           args: --unreleased --tag ${{ steps.version.outputs.tag }} --strip all

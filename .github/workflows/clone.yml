@@ -5,31 +5,46 @@ on:
     - cron: "0 0 * * *"
   workflow_dispatch:
 
+permissions: {}
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # the Push step (github-push-action) pushes the CLONE.md commit with GITHUB_TOKEN
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false # github-push-action authenticates with its own github_token input
 
       - name: gh login
-        run: echo "${{ secrets.SECRET_TOKEN }}" | gh auth login --with-token
+        env:
+          SECRET_TOKEN: ${{ secrets.SECRET_TOKEN }}
+        run: echo "$SECRET_TOKEN" | gh auth login --with-token
 
       - name: parse latest clone count
+        env:
+          GITHUB_ACTOR_NAME: ${{ github.actor }}
+          SECRET_TOKEN: ${{ secrets.SECRET_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
         run: |
-          curl --user "${{ github.actor }}:${{ secrets.SECRET_TOKEN }}" \
+          curl --user "$GITHUB_ACTOR_NAME:$SECRET_TOKEN" \
             -H "Accept: application/vnd.github.v3+json" \
-            https://api.github.com/repos/${{ github.repository }}/traffic/clones \
+            "https://api.github.com/repos/$REPOSITORY/traffic/clones" \
             > clone.json
 
       - name: create gist and download previous count
         id: set_id
+        env:
+          GIST_ID_SECRET: ${{ secrets.GIST_ID }}
+          GITHUB_ACTOR_NAME: ${{ github.actor }}
         run: |
           if gh secret list | grep -q "GIST_ID"
           then
               echo "GIST_ID found"
-              echo "GIST=${{ secrets.GIST_ID }}" >> $GITHUB_OUTPUT
-              curl https://gist.githubusercontent.com/${{ github.actor }}/${{ secrets.GIST_ID }}/raw/clone.json > clone_before.json
+              echo "GIST=$GIST_ID_SECRET" >> $GITHUB_OUTPUT
+              curl "https://gist.githubusercontent.com/$GITHUB_ACTOR_NAME/$GIST_ID_SECRET/raw/clone.json" > clone_before.json
               if cat clone_before.json | grep '404: Not Found'; then
                 echo "GIST_ID not valid anymore. Creating another gist..."
                 gist_id=$(gh gist create clone.json | awk -F / '{print $NF}')
@@ -52,17 +67,22 @@ jobs:
           python3 main.py
 
       - name: Update gist with latest count
+        env:
+          GITHUB_ACTOR_NAME: ${{ github.actor }}
+          SECRET_TOKEN: ${{ secrets.SECRET_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          GIST: ${{ steps.set_id.outputs.GIST }}
         run: |
           content=$(sed -e 's/\\/\\\\/g' -e 's/\t/\\t/g' -e 's/\"/\\"/g' -e 's/\r//g' "clone.json" | sed -E ':a;N;$!ba;s/\r{0,1}\n/\\n/g')
-          echo '{"description": "${{ github.repository }} clone statistics", "files": {"clone.json": {"content": "'"$content"'"}}}' > post_clone.json
+          echo '{"description": "'"$REPOSITORY"' clone statistics", "files": {"clone.json": {"content": "'"$content"'"}}}' > post_clone.json
           curl -s -X PATCH \
-            --user "${{ github.actor }}:${{ secrets.SECRET_TOKEN }}" \
+            --user "$GITHUB_ACTOR_NAME:$SECRET_TOKEN" \
             -H "Content-Type: application/json" \
-            -d @post_clone.json https://api.github.com/gists/${{ steps.set_id.outputs.GIST }} > /dev/null 2>&1
+            -d @post_clone.json "https://api.github.com/gists/$GIST" > /dev/null 2>&1
 
           if [ ! -f CLONE.md ]; then
             shields="https://img.shields.io/badge/dynamic/json?color=success&label=Clone&query=count&url="
-            url="https://gist.githubusercontent.com/${{ github.actor }}/${{ steps.set_id.outputs.GIST }}/raw/clone.json"
+            url="https://gist.githubusercontent.com/$GITHUB_ACTOR_NAME/$GIST/raw/clone.json"
             repo="https://github.com/MShawon/github-clone-count-badge"
             echo ''> CLONE.md
             echo '
@@ -85,6 +105,6 @@ jobs:
           fi
 
       - name: Push
-        uses: ad-m/github-push-action@master
+        uses: ad-m/github-push-action@881a6320fdb16eb5318c5054f31c218aec2b324c # v1.3.0
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
